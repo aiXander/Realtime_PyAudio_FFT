@@ -1,0 +1,7 @@
+matplotlib
+pygame
+numpy
+pyaudio
+scipy
+matplotlib
+

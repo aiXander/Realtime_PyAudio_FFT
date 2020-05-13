@@ -1,8 +1,7 @@
+# Realtime_PyAudio_FFT
 ![Teaser image](./assets/teaser.png)
 
-# Realtime_PyAudio_FFT
-
-##A simple package to do realtime audio analysis in Python, using PyAudio and Numpy to extract and visualize FFT features from streaming audio.
+## A simple package to do realtime audio analysis in native Python, using PyAudio and Numpy to extract and visualize FFT features from live audio stream.
 
 **The basic pipeline:**
 * Starts a stream_reader that pulls live audio data from any source (soundcard, microphone, ...)
@@ -11,13 +10,19 @@
 * When enabled, the visualizer displays these FFT features in realtime
 
 **Uses:**
-* I personally have learned A LOT about sound by watching this realtime visualization while listening to music
+* I personally have learned **A LOT** about sound by watching this realtime visualization while listening to music
 * You can run the stream_analyzer in headless mode and use the FFT features in any Python Application that requires live music features
 
 ![Teaser image](./assets/usage.png)
 
-**Tested on:**
-* Ubuntu 18.04
+**Requirements:**
+* Tested on Ubuntu 18.04
+* Other platforms like Mac/Windows should work if PyGame can find your display (can be tricky with WSL)
+
+Tested with:
+* pygame  --> Version: 1.9.6
+* pyaudio --> Version: 0.2.11
+* scipy   --> Version: 1.4.1
 
 **ToDo:**
-* Implement realtime beat detection / melody extraction (eg using Harmonic/Percussive decomposition)
+* Implement realtime beat detection / melody extraction on top of FFT features (eg using Harmonic/Percussive decomposition)

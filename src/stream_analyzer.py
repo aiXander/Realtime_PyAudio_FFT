@@ -45,19 +45,14 @@ class Stream_Analyzer:
         self.rate = self.stream_reader.rate
 
         #Custom settings: 
-        self.log_features = False               #Plot log(FFT features) instead of FFT features 
-        self.rolling_stats_window_s = 20        #The axis range of the FFT features will adapt dynamically using a window of N seconds
-        self.equalizer_strength = 0.3           #[0-1] --> gradually rescales all FFT features to have the same mean
-        self.apply_frequency_smoothing = True   #Apply a postprocessing smoothing filter over the FFT outputs
+        self.rolling_stats_window_s = 20        # The axis range of the FFT features will adapt dynamically using a window of N seconds
+        self.equalizer_strength = 0.3           # [0-1] --> gradually rescales all FFT features to have the same mean
+        self.apply_frequency_smoothing = True   # Apply a postprocessing smoothing filter over the FFT outputs
 
         if self.apply_frequency_smoothing:
             self.filter_width = round_up_to_even(0.03*self.n_frequency_bins) - 1
         if self.visualize:
             from src.visualizer import Spectrum_Visualizer
-
-        self.delays = deque(maxlen=20)
-        self.num_ffts = 0
-        self.strongest_frequency = 0
 
         self.FFT_window_size = round_up_to_even(self.rate * FFT_window_size_ms / 1000)
         self.FFT_window_size_ms = 1000 * self.FFT_window_size / self.rate
@@ -69,6 +64,7 @@ class Stream_Analyzer:
 
         # Temporal smoothing:
         # Currently the buffer acts on the FFT_features (which are computed only occasionally eg 30 fps)
+        # This is bad since the smoothing depends on how often the .get_audio_features() method is called...
         self.smoothing_length_ms = smoothing_length_ms
         if self.smoothing_length_ms > 0:
             self.smoothing_kernel = get_smoothing_filter(self.FFT_window_size_ms, self.smoothing_length_ms, verbose=1)
@@ -90,6 +86,10 @@ class Stream_Analyzer:
 
         #Hardcoded parameters:
         self.fft_fps = 30
+        self.log_features = False   # Plot log(FFT features) instead of FFT features --> usually pretty bad
+        self.delays = deque(maxlen=20)
+        self.num_ffts = 0
+        self.strongest_frequency = 0
 
         #Assume the incoming sound follows a pink noise spectrum:
         self.power_normalization_coefficients = np.logspace(np.log2(1), np.log2(np.log2(self.rate/2)), len(self.fftx), endpoint=True, base=2, dtype=None)

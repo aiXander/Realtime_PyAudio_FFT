@@ -14,9 +14,11 @@ class Spectrum_Visualizer:
         self.ear = ear
 
         self.HEIGHT  = 450
-        self.HEIGHT  = 650
         window_ratio = 24/9     
 
+        self.HEIGHT = round(self.HEIGHT)
+        self.WIDTH  = round(window_ratio*self.HEIGHT)
+        self.y_ext = [round(0.05*self.HEIGHT), self.HEIGHT]
         self.cm = cm.plasma
         #self.cm = cm.inferno
 
@@ -24,25 +26,8 @@ class Spectrum_Visualizer:
 
         self.add_slow_bars = 1
         self.add_fast_bars = 1
-        self.slow_bar_thickness = 1.5 / self.ear.n_frequency_bins
+        self.slow_bar_thickness = max(0.00002*self.HEIGHT, 1.25 / self.ear.n_frequency_bins)
         self.tag_every_n_bins = max(1,round(5 * (self.ear.n_frequency_bins / 51))) # Occasionally display Hz tags on the x-axis
-
-        self.HEIGHT = round(self.HEIGHT)
-        self.WIDTH  = round(window_ratio*self.HEIGHT)
-        self.y_ext = [round(0.05*self.HEIGHT), self.HEIGHT]
-
-        self.bar_width = (self.WIDTH / self.ear.n_frequency_bins) - self.inter_bar_distance
-        self.mode_str = 'non-blocking'
-
-        #Configure the bars:
-        self.slow_bars, self.fast_bars, self.bar_x_positions = [],[],[]
-        for i in range(self.ear.n_frequency_bins):
-            x = int(i* self.WIDTH / self.ear.n_frequency_bins)
-            fast_bar = [int(x), int(self.y_ext[0]), math.ceil(self.bar_width), None]
-            slow_bar = [int(x), None, math.ceil(self.bar_width - self.inter_bar_distance), None]
-            self.bar_x_positions.append(x)
-            self.fast_bars.append(fast_bar)
-            self.slow_bars.append(slow_bar)
 
         self.fast_bar_colors = [list((255*np.array(self.cm(i))[:3]).astype(int)) for i in np.linspace(0,255,self.ear.n_frequency_bins).astype(int)]
         self.slow_bar_colors = [list(np.clip((255*3.5*np.array(self.cm(i))[:3]).astype(int) , 0, 255)) for i in np.linspace(0,255,self.ear.n_frequency_bins).astype(int)]
@@ -74,8 +59,20 @@ class Spectrum_Visualizer:
         else:
             self.bg_color           = 60
             self.decay_speed        = 0.94
-            self.inter_bar_distance = 2
+            self.inter_bar_distance = int(0.2*self.WIDTH / self.ear.n_frequency_bins)
             self.avg_energy_height  = 0.225
+
+        self.bar_width = (self.WIDTH / self.ear.n_frequency_bins) - self.inter_bar_distance
+
+        #Configure the bars:
+        self.slow_bars, self.fast_bars, self.bar_x_positions = [],[],[]
+        for i in range(self.ear.n_frequency_bins):
+            x = int(i* self.WIDTH / self.ear.n_frequency_bins)
+            fast_bar = [int(x), int(self.y_ext[0]), math.ceil(self.bar_width), None]
+            slow_bar = [int(x), None, math.ceil(self.bar_width), None]
+            self.bar_x_positions.append(x)
+            self.fast_bars.append(fast_bar)
+            self.slow_bars.append(slow_bar)
 
     def start(self):
         print("Starting spectrum visualizer...")
@@ -87,7 +84,7 @@ class Spectrum_Visualizer:
             self.screen.set_alpha(255)
             self.prev_screen = self.screen
 
-        pygame.display.set_caption('Spectrum Analyzer -- %s (FFT-Peak: %05d Hz)' %(self.mode_str, self.ear.strongest_frequency))
+        pygame.display.set_caption('Spectrum Analyzer -- (FFT-Peak: %05d Hz)' %self.ear.strongest_frequency)
         self.bin_font = pygame.font.Font('freesansbold.ttf', round(0.025*self.HEIGHT))
         self.fps_font = pygame.font.Font('freesansbold.ttf', round(0.05*self.HEIGHT))
 
@@ -164,7 +161,7 @@ class Spectrum_Visualizer:
         self.text = self.fps_font.render('Fps: %.1f' %(self.fps), True, (255, 255, 255) , (self.bg_color, self.bg_color, self.bg_color)) 
         self.textRect = self.text.get_rect()
         self.textRect.x, self.textRect.y = round(0.015*self.WIDTH), round(0.03*self.HEIGHT)
-        pygame.display.set_caption('Audio Visualizer -- %s (Peak: %05d Hz)' %(self.mode_str, self.ear.strongest_frequency))
+        pygame.display.set_caption('Spectrum Analyzer -- (FFT-Peak: %05d Hz)' %self.ear.strongest_frequency)
         
         self.plot_bars()
 

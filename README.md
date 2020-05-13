@@ -32,5 +32,6 @@ Tested with:
 
 **ToDo:**
 * Implement realtime beat detection / melody extraction on top of FFT features (eg using Harmonic/Percussive decomposition)
-* The pygame.transform operations sometimes cause weird visual artifacts (boxes) for some resolution settings --> fix?
+* The pygame.transform operations sometimes cause weird visual artifacts (boxes) for some resolution settings --> fix??
 * Remove the matplotlib dependency since it's only needed for the colormap of the vis..
+* Slow bars decay speed currently depends on how often `.get_audio_features()` is called --> fix

@@ -3,7 +3,7 @@
   <img src="./assets/teaser.gif">
 </p>
 
-## A simple package to do realtime audio analysis in native Python, using PyAudio and Numpy to extract and visualize FFT features from live audio stream.
+### A simple package to do realtime audio analysis in native Python, using PyAudio and Numpy to extract and visualize FFT features from a live audio stream.
 
 **The basic pipeline:**
 * Starts a stream_reader that pulls live audio data from any source (soundcard, microphone, ...)
@@ -11,9 +11,9 @@
 * When called, the stream_analyzer, applies FFT to the latest audio segment
 * When enabled, the visualizer displays these FFT features in realtime
 
-**Uses:**
+**Usage:**
 * I personally have learned **A LOT** about sound by watching this realtime visualization while listening to music
-* You can run the stream_analyzer in headless mode and use the FFT features in any Python Application that requires live music features
+* You can run the stream_analyzer in headless mode and use the FFT features in any Python Application that requires live musical features
 
 ![Teaser image](./assets/usage.png)
 

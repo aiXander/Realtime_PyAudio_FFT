@@ -18,8 +18,9 @@
 ![Teaser image](./assets/usage.png)
 
 **Requirements:**
+
 I developped this code on my local machine, it has not been properly tested on other setups..
-If something doesn't work, please try to fix it yourself and post an issue if needed!
+If something doesn't work, please first try to fix it yourself and post an issue if needed!
 * Tested on Ubuntu 18.04
 * Other platforms like Mac/Windows should work if PyGame can find your display (can be tricky with WSL)
 
@@ -32,3 +33,4 @@ Tested with:
 **ToDo:**
 * Implement realtime beat detection / melody extraction on top of FFT features (eg using Harmonic/Percussive decomposition)
 * The pygame.transform operations sometimes cause weird visual artifacts (boxes) for some resolution settings --> fix?
+* Remove the matplotlib dependency since it's only needed for the colormap of the vis..

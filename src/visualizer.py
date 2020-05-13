@@ -3,31 +3,23 @@ import time, sys, math
 import pygame
 from matplotlib import cm
 from collections import deque
+from src.utils import Button
 
-class spectrum_visualizer:
-    def __init__(self, ear, plot_audio_history = False):
-        self.plot_audio_history = plot_audio_history
+class Spectrum_Visualizer:
+    """
+    The Spectrum_Visualizer visualizes spectral FFT data using a simple PyGame GUI
+    """
+    def __init__(self, ear):
+        self.plot_audio_history = True
         self.ear = ear
 
-        self.HEIGHT  = 450
-        window_ratio = 24/9
+        self.HEIGHT  = 500
+        window_ratio = 24/9        
 
-        if self.plot_audio_history:
-            self.bg_color      = 10    #Background color
-            self.decay_speed   = 0.92  #Vertical decay of slow bars
-            self.inter_bar_distance = 0            
-            self.avg_energy_height  = 0.1125
-        else:
-            self.bg_color      = 80
-            self.decay_speed   = 0.95
-            self.inter_bar_distance = 2
-            self.avg_energy_height = 0.225
+        self.cm = cm.plasma
+        #self.cm = cm.inferno
 
-        if self.plot_audio_history:
-            self.inter_bar_distance = 0
-            self.alpha_multiplier = 0.995
-            self.move_fraction = 0.0099
-            self.shrink_f = 0.994
+        self.toggle_history_mode()
 
         self.add_slow_bars = 1
         self.add_fast_bars = 1
@@ -39,7 +31,7 @@ class spectrum_visualizer:
         self.y_ext = [round(0.05*self.HEIGHT), self.HEIGHT]
 
         self.bar_width = (self.WIDTH / self.ear.n_frequency_bins) - self.inter_bar_distance
-        self.mode_str = 'blocking' if self.ear.blocking else 'non-blocking'
+        self.mode_str = 'non-blocking'
 
         #Configure the bars:
         self.slow_bars, self.fast_bars, self.bar_x_positions = [],[],[]
@@ -51,12 +43,8 @@ class spectrum_visualizer:
             self.fast_bars.append(fast_bar)
             self.slow_bars.append(slow_bar)
 
-
-        self.cm = cm.plasma
-        #self.cm = cm.inferno
-
         self.fast_bar_colors = [list((255*np.array(self.cm(i))[:3]).astype(int)) for i in np.linspace(0,255,self.ear.n_frequency_bins).astype(int)]
-        self.slow_bar_colors = [list(np.clip((255*3*np.array(self.cm(i))[:3]).astype(int) , 0, 255)) for i in np.linspace(0,255,self.ear.n_frequency_bins).astype(int)]
+        self.slow_bar_colors = [list(np.clip((255*3.5*np.array(self.cm(i))[:3]).astype(int) , 0, 255)) for i in np.linspace(0,255,self.ear.n_frequency_bins).astype(int)]
         self.fast_bar_colors = self.fast_bar_colors[::-1]
         self.slow_bar_colors = self.slow_bar_colors[::-1]
 
@@ -71,6 +59,23 @@ class spectrum_visualizer:
         self.fps = 0
         self._is_running = False
 
+    def toggle_history_mode(self):
+
+        if self.plot_audio_history:
+            self.bg_color           = 10    #Background color
+            self.decay_speed        = 0.90  #Vertical decay of slow bars
+            self.inter_bar_distance = 0            
+            self.avg_energy_height  = 0.1125
+            self.inter_bar_distance = 0
+            self.alpha_multiplier   = 0.995
+            self.move_fraction      = 0.0099
+            self.shrink_f           = 0.994
+        else:
+            self.bg_color           = 60
+            self.decay_speed        = 0.94
+            self.inter_bar_distance = 2
+            self.avg_energy_height  = 0.225
+
     def start(self):
         print("Starting spectrum visualizer...")
         pygame.init()
@@ -81,9 +86,9 @@ class spectrum_visualizer:
             self.screen.set_alpha(255)
             self.prev_screen = self.screen
 
-        pygame.display.set_caption('Audio Visualizer -- %s (Peak: %05d Hz)' %(self.mode_str, self.ear.strongest_frequency))
-        self.bin_font = pygame.font.Font('freesansbold.ttf', 12)
-        self.fps_font = pygame.font.Font('freesansbold.ttf', 22)
+        pygame.display.set_caption('Spectrum Analyzer -- %s (FFT-Peak: %05d Hz)' %(self.mode_str, self.ear.strongest_frequency))
+        self.bin_font = pygame.font.Font('freesansbold.ttf', round(0.025*self.HEIGHT))
+        self.fps_font = pygame.font.Font('freesansbold.ttf', round(0.05*self.HEIGHT))
 
         for i in range(self.ear.n_frequency_bins):
             if i == 0 or i == (self.ear.n_frequency_bins - 1):
@@ -100,6 +105,11 @@ class spectrum_visualizer:
 
         self._is_running = True
 
+        #Interactive components:
+        self.button_height = round(0.05*self.HEIGHT)
+        self.history_button  = Button(text="Toggle Hist Mode", right=self.WIDTH, top=0, width=None, height=self.button_height)
+        self.slow_bar_button = Button(text="Toggle Slow Bars", right=self.WIDTH, top=self.history_button.height, width=None, height=self.button_height)
+
     def stop(self):
         print("Stopping spectrum visualizer...")
         del self.fps_font
@@ -109,13 +119,21 @@ class spectrum_visualizer:
         pygame.quit()
         self._is_running = False
 
-    def toggle(self):
+    def toggle_display(self):
+        '''
+        This function can be triggered to turn on/off the display
+        '''
         if self._is_running: self.stop()
         else: self.start()
 
     def update(self):
         for event in pygame.event.get():
-            pass
+            if self.history_button.click():
+                self.plot_audio_history = not self.plot_audio_history
+                self.toggle_history_mode()
+            if self.slow_bar_button.click():
+                self.add_slow_bars = not self.add_slow_bars
+                self.slow_features = [0]*self.ear.n_frequency_bins
 
         if np.min(self.ear.bin_mean_values) > 0:
             self.ear.frequency_bin_energies = self.avg_energy_height * self.ear.frequency_bin_energies / self.ear.bin_mean_values
@@ -144,7 +162,7 @@ class spectrum_visualizer:
 
         self.text = self.fps_font.render('Fps: %.1f' %(self.fps), True, (255, 255, 255) , (self.bg_color, self.bg_color, self.bg_color)) 
         self.textRect = self.text.get_rect()
-        self.textRect.center = (round(0.93*self.WIDTH), round(0.065*self.HEIGHT))
+        self.textRect.x, self.textRect.y = round(0.015*self.WIDTH), round(0.03*self.HEIGHT)
         pygame.display.set_caption('Audio Visualizer -- %s (Peak: %05d Hz)' %(self.mode_str, self.ear.strongest_frequency))
         
         self.plot_bars()
@@ -159,6 +177,9 @@ class spectrum_visualizer:
                 if i % self.tag_every_n_bins == 0:
                     self.screen.blit(self.bin_text_tags[cnt], self.bin_rectangles[cnt])
                     cnt += 1
+
+        self.history_button.draw(self.screen)
+        self.slow_bar_button.draw(self.screen)
 
         pygame.display.flip()
 

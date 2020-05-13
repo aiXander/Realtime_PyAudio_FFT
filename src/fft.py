@@ -17,6 +17,9 @@ def getFFT(data, rate, chunk_size, log_scale=False):
 
     return FFT
 
+
+## TODO: Realtime Harmonic/Percussive decomposition
+
 '''
 from scipy import signal
 def median_filter_horizontal(x, filter_len):

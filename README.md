@@ -1,5 +1,8 @@
 # Realtime_PyAudio_FFT
 ![Teaser image](./assets/teaser.gif)
+<p align="center">
+  <img src="./assets/teaser.gif">
+</p>
 
 ## A simple package to do realtime audio analysis in native Python, using PyAudio and Numpy to extract and visualize FFT features from live audio stream.
 

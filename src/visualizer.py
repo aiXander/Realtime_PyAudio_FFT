@@ -49,7 +49,7 @@ class Spectrum_Visualizer:
 
         if self.plot_audio_history:
             self.bg_color           = 10    #Background color
-            self.decay_speed        = 0.90  #Vertical decay of slow bars
+            self.decay_speed        = 0.10  #Vertical decay of slow bars
             self.inter_bar_distance = 0            
             self.avg_energy_height  = 0.1125
             self.alpha_multiplier   = 0.995
@@ -58,7 +58,7 @@ class Spectrum_Visualizer:
 
         else:
             self.bg_color           = 60
-            self.decay_speed        = 0.94
+            self.decay_speed        = 0.06
             self.inter_bar_distance = int(0.2*self.WIDTH / self.ear.n_frequency_bins)
             self.avg_energy_height  = 0.225
 
@@ -196,7 +196,8 @@ class Spectrum_Visualizer:
                 self.fast_bars[i][3] = int(feature_value + 0.02*self.HEIGHT)
 
             if self.add_slow_bars:
-                slow_feature_value = max(self.slow_features[i]*self.decay_speed, feature_value)
+                self.decay = min(0.99, 1 - max(0,self.decay_speed * 60 / self.ear.fft_fps))
+                slow_feature_value = max(self.slow_features[i]*self.decay, feature_value)
                 new_slow_features.append(slow_feature_value)
                 self.slow_bars[i][1] = int(self.fast_bars[i][1] + slow_feature_value)
                 self.slow_bars[i][3] = int(self.slow_bar_thickness * local_height)

@@ -29,3 +29,4 @@ Tested with:
 
 **ToDo:**
 * Implement realtime beat detection / melody extraction on top of FFT features (eg using Harmonic/Percussive decomposition)
+* The pygame.transform operations sometimes cause weird visual artifacts (boxes) for some resolution settings --> fix?

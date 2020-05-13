@@ -1,11 +1,11 @@
 import numpy as np
-import time, sys, math, cv2, scipy
+import time, math, scipy
 from collections import deque
 from scipy.signal import savgol_filter
 
+from src.stream_reader import Stream_Reader
 from src.fft import getFFT
 from src.utils import *
-from src.stream_reader import Stream_Reader
 
 class Stream_Analyzer:
     """

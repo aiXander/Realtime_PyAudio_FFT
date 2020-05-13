@@ -1,6 +1,6 @@
 import numpy as np
 import pyaudio
-import time, sys, math, cv2
+import time, sys, math
 from collections import deque
 
 from src.utils import *

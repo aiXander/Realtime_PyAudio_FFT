@@ -71,15 +71,6 @@ class Spectrum_Visualizer:
             self.move_fraction      = 0.0099
             self.shrink_f           = 0.994
 
-
-            self.bg_color           = 10    #Background color
-            self.decay_speed        = 0.00  #Vertical decay of slow bars     
-            self.inter_bar_distance = 0
-            self.avg_energy_height  = 0.1125
-            self.alpha_multiplier   = 0.995
-            self.move_fraction      = 0.0099
-            self.shrink_f           = 0.994
-
         else:
             self.bg_color           = 60
             self.decay_speed        = 0.94

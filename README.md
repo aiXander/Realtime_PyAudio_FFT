@@ -1,5 +1,5 @@
 # Realtime_PyAudio_FFT
-![Teaser image](./assets/teaser.png)
+![Teaser image](./assets/teaser.gif)
 
 ## A simple package to do realtime audio analysis in native Python, using PyAudio and Numpy to extract and visualize FFT features from live audio stream.
 
@@ -20,6 +20,7 @@
 * Other platforms like Mac/Windows should work if PyGame can find your display (can be tricky with WSL)
 
 Tested with:
+* Python 3.6.3
 * pygame  --> Version: 1.9.6
 * pyaudio --> Version: 0.2.11
 * scipy   --> Version: 1.4.1

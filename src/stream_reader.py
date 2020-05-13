@@ -59,7 +59,7 @@ class Stream_Reader:
         print("\nDefaulted to using first working mic, Running on:")
         self.print_mic_info(self.device)
         print("\n##################################################################################################")
-        print('Recording from %s at %d Hz with (non-overlapping) data-windows of %d samples (updating at %.2ffps)' 
+        print('Recording from %s at %d Hz\nUsing (non-overlapping) data-windows of %d samples (updating at %.2ffps)' 
             %(self.info["name"],self.rate, self.update_window_n_frames, self.updates_per_second))
 
     def non_blocking_stream_read(self, in_data, frame_count, time_info, status):

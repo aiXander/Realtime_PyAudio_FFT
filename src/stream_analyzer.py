@@ -46,12 +46,12 @@ class Stream_Analyzer:
 
         #Custom settings: 
         self.log_features = False               #Plot log(FFT features) instead of FFT features 
-        self.rolling_stats_window_s = 60        #The axis range of the FFT features will adapt dynamically using a window of N seconds
-        self.equalizer_strength = 0.0           #[0-1] --> gradually rescales all FFT features to have the same mean
+        self.rolling_stats_window_s = 20        #The axis range of the FFT features will adapt dynamically using a window of N seconds
+        self.equalizer_strength = 0.3           #[0-1] --> gradually rescales all FFT features to have the same mean
         self.apply_frequency_smoothing = True   #Apply a postprocessing smoothing filter over the FFT outputs
 
         if self.apply_frequency_smoothing:
-            self.filter_width = round_up_to_even(0.02*self.n_frequency_bins) - 1
+            self.filter_width = round_up_to_even(0.03*self.n_frequency_bins) - 1
         if self.visualize:
             from src.visualizer import Spectrum_Visualizer
 

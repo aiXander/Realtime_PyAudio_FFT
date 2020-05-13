@@ -13,7 +13,7 @@ class Spectrum_Visualizer:
         self.plot_audio_history = True
         self.ear = ear
 
-        self.HEIGHT  = 500
+        self.HEIGHT  = 600
         window_ratio = 24/9        
 
         self.cm = cm.plasma

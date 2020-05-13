@@ -25,7 +25,7 @@ def get_smoothing_filter(FFT_window_size_ms, filter_length_ms, verbose = 0):
     if verbose:
         min_fraction = 100*np.min(filter_weights)/np.max(filter_weights)
         print('\nApplying temporal smoothing to the FFT features...')
-        print("Smoothing buffer contains %d FFT windows (sigma: %d) --> min_contribution: %.3f%%" %(buffer_length, filter_sigma, min_fraction))
+        print("Smoothing buffer contains %d FFT windows (sigma: %.3f) --> min_contribution: %.3f%%" %(buffer_length, filter_sigma, min_fraction))
         print("Filter weights:")
         for i, w in enumerate(filter_weights):
             print("%02d: %.3f" %(len(filter_weights)-i, w))

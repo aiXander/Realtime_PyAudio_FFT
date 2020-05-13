@@ -12,7 +12,7 @@
 * When `visualize` is enabled, the visualizer displays these FFT features in realtime using a PyGame GUI (I made two display modes: 2D and 3D)
 
 **Usage:**
-* I have personally learned **A LOT** about sound by watching this realtime visualization while listening to music
+* I have personally learned **A LOT** about sound by watching [this realtime visualization](https://www.youtube.com/watch?v=FnP2bkzU4oo) while listening to music
 * You can run the stream_analyzer in headless mode and use the FFT features in any Python Application that requires live musical features
 
 ![Teaser image](./assets/usage.png)

@@ -20,7 +20,7 @@
 **Requirements:**
 
 I developped this code on my local machine, it has not been properly tested on other setups..
-If something doesn't work, please first try to fix it yourself and post an issue if needed!
+If something doesn't work, please first try to fix it yourself and post an issue/solution when appropriate!
 * Tested on Ubuntu 18.04
 * Other platforms like Mac/Windows should work if PyGame can find your display (can be tricky with WSL)
 

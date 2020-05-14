@@ -1,7 +1,5 @@
-matplotlib
-pygame
 numpy
-pyaudio
-scipy
 matplotlib
-
+scipy
+pygame
+PyAudio

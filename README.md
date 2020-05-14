@@ -30,6 +30,11 @@ Tested with:
 * pyaudio --> Version: 0.2.11
 * scipy   --> Version: 1.4.1
 
+Alternatively to pyaudio, you can use [Sounddevice](https://python-sounddevice.readthedocs.io/en/0.3.15/installation.html) which might be more compatible with Windows/Mac
+* just run `python3 -m pip install sounddevice`
+* Tested on Ubuntu 18.04 with sounddevice version 0.3.15
+* The code to switch between the two sound interfaces is in the `__init__` function of the Stream_Analyzer class
+
 **ToDo:**
 * Implement realtime beat detection / melody extraction on top of FFT features (eg using Harmonic/Percussive decomposition)
 * The pygame.transform operations sometimes cause weird visual artifacts (boxes) for some resolution settings --> fix??

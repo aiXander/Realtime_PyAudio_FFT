@@ -28,7 +28,7 @@ class Stream_Reader:
         self.verbose = verbose
         self.pa = pyaudio.PyAudio()
 
-        #Temporary variables #hacks
+        #Temporary variables #hacks!
         self.update_window_n_frames = 1024 #Don't remove this, needed for device testing!
         self.data_buffer = None
 

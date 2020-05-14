@@ -3,7 +3,6 @@ import time, math, scipy
 from collections import deque
 from scipy.signal import savgol_filter
 
-from src.stream_reader import Stream_Reader
 from src.fft import getFFT
 from src.utils import *
 
@@ -36,11 +35,20 @@ class Stream_Analyzer:
         self.verbose = verbose
         self.visualize = visualize
 
-        self.stream_reader = Stream_Reader(
-            device  = device, 
-            rate    = rate, 
-            updates_per_second  = updates_per_second,
-            verbose = verbose)
+        try:
+            from src.stream_reader_pyaudio import Stream_Reader
+            self.stream_reader = Stream_Reader(
+                device  = device, 
+                rate    = rate, 
+                updates_per_second  = updates_per_second,
+                verbose = verbose)
+        except:
+            from src.stream_reader_sounddevice import Stream_Reader
+            self.stream_reader = Stream_Reader(
+                device  = device, 
+                rate    = rate, 
+                updates_per_second  = updates_per_second,
+                verbose = verbose)
 
         self.rate = self.stream_reader.rate
 

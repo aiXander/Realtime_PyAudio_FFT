@@ -18,6 +18,7 @@
 ![Teaser image](./assets/usage.png)
 
 **Requirements:**
+
 `pip -r install requirements.txt`
 I developped this code on my local machine --> it has not been properly tested on other setups..
 If something doesn't work, please first try to fix it yourself and post an issue/solution when appropriate!

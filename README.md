@@ -24,6 +24,7 @@
 I developped this code on my local machine --> it has not been properly tested on other setups..
 If something doesn't work, please first try to fix it yourself and post an issue/solution when appropriate!
 * Tested on Ubuntu 18.04
+* For Mac OSX (tested on Catalina 10.15.4), Please make sure you run it with Python downloaded from [Python.org](https://www.python.org/downloads/release/python-377/) (`pygame` has doesn't work well with the default/Homebrew Python ) 
 * Other platforms like Mac/Windows should work if PyGame can find your display and Python finds your audio card (these can be tricky with [WSL](https://research.wmz.ninja/articles/2017/11/setting-up-wsl-with-graphics-and-audio.html))
 
 Tested with:
@@ -31,6 +32,7 @@ Tested with:
 * [pygame](https://www.pygame.org/wiki/GettingStarted)  --> Version: 1.9.6
 * [pyaudio](http://people.csail.mit.edu/hubert/pyaudio/) --> Version: 0.2.11
 * [scipy](https://www.scipy.org/install.html)   --> Version: 1.4.1
+
 
 Alternatively to pyaudio, you can use [sounddevice](https://python-sounddevice.readthedocs.io/en/0.3.15/installation.html) which might be more compatible with Windows/Mac
 * just run `python3 -m pip install sounddevice`

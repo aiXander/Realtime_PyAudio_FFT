@@ -1,5 +1,5 @@
-numpy
-matplotlib
-scipy
-pygame
-PyAudio
+numpy==1.18.4
+matplotlib==3.2.1
+scipy==1.4.1
+pygame==1.9.6
+PyAudio==0.2.11

@@ -7,7 +7,7 @@ ear = Stream_Analyzer(
                 FFT_window_size_ms  = 60,    # Window size used for the FFT transform
                 updates_per_second  = 1000,  # How often to read the audio stream for new data
                 smoothing_length_ms = 50,    # Apply some temporal smoothing to reduce noisy features
-                n_frequency_bins    = 400,   # The FFT features are grouped in bins
+                n_frequency_bins    = 200,   # The FFT features are grouped in bins
                 visualize = 1,               # Visualize the FFT features with PyGame
                 verbose   = 1                # Print running statistics (latency, fps, ...)
                 )
@@ -18,4 +18,3 @@ while True:
     if (time.time() - last_update) > (1./fps):
         last_update = time.time()
         raw_fftx, raw_fft, binned_fftx, binned_fft = ear.get_audio_features()
-#3.2ms/40fps

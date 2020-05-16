@@ -177,5 +177,5 @@ class Stream_Analyzer:
 
             if self.visualize and self.visualizer._is_running:
                 self.visualizer.update()
-
+                
         return self.fftx, self.fft, self.frequency_bin_centres, self.frequency_bin_energies

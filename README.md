@@ -24,8 +24,8 @@
 I developped this code on my local machine --> it has not been properly tested on other setups..
 If something doesn't work, please first try to fix it yourself and post an issue/solution when appropriate!
 * Tested on Ubuntu 18.04
-* For Mac OSX (tested on Catalina 10.15.4), Please make sure you run it with Python downloaded from [Python.org](https://www.python.org/downloads/release/python-377/) (`pygame` has doesn't work well with the default/Homebrew Python ) 
 * Other platforms like Mac/Windows should work if PyGame can find your display and Python finds your audio card (these can be tricky with [WSL](https://research.wmz.ninja/articles/2017/11/setting-up-wsl-with-graphics-and-audio.html))
+* For Mac OSX (tested on Catalina 10.15.4), please make sure you run with Python downloaded from [Python.org](https://www.python.org/downloads/release/python-377/) (`pygame` doesn't work well with the default/Homebrew Python)
 
 Tested with:
 * Python 3.6.3

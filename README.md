@@ -11,12 +11,6 @@
 * When triggered by `.get_audio_features()`, the stream_analyzer, applies a Fast-Fourier-Transform to the most recent audio window in the buffer
 * When `visualize` is enabled, the visualizer displays these FFT features in realtime using a PyGame GUI (I made two display modes: 2D and 3D)
 
-**Usage:**
-* I have personally learned **A LOT** about sound by watching [this realtime visualization](https://www.youtube.com/watch?v=FnP2bkzU4oo) while listening to music
-* You can run the stream_analyzer in headless mode and use the FFT features in any Python Application that requires live musical features
-
-![Teaser image](./assets/usage.png)
-
 **Requirements:**
 
 `pip install -r requirements.txt`
@@ -41,6 +35,12 @@ Alternatively to pyaudio, you can use [sounddevice](https://python-sounddevice.r
 * just run `python3 -m pip install sounddevice`
 * Tested on Ubuntu 18.04 with sounddevice version 0.3.15
 * The code to switch between the two sound interfaces is in the `__init__` function of the Stream_Analyzer class
+
+**Usage:**
+* I have personally learned **A LOT** about sound by watching [this realtime visualization](https://www.youtube.com/watch?v=FnP2bkzU4oo) while listening to music
+* You can run the stream_analyzer in headless mode and use the FFT features in any Python Application that requires live musical features
+
+![Teaser image](./assets/usage.png)
 
 **ToDo:**
 * Implement realtime beat detection / melody extraction on top of FFT features (eg using Harmonic/Percussive decomposition)

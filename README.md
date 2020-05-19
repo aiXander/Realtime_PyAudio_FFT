@@ -19,7 +19,7 @@
 
 **Requirements:**
 
-`pip -r install requirements.txt`
+`pip install -r requirements.txt`
 
 If you're having trouble installing PyAudio, you might want to 
 `sudo apt install libasound-dev portaudio19-dev libportaudio2 libportaudiocpp0` (tested on Ubuntu)

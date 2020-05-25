@@ -105,8 +105,8 @@ class Spectrum_Visualizer:
 
         #Interactive components:
         self.button_height = round(0.05*self.HEIGHT)
-        self.history_button  = Button(text="Toggle 2D/3D Mode", right=self.WIDTH, top=0, width=None, height=self.button_height)
-        self.slow_bar_button = Button(text="Toggle Slow Bars ", right=self.WIDTH, top=self.history_button.height, width=None, height=self.button_height)
+        self.history_button  = Button(text="Toggle 2D/3D Mode", right=self.WIDTH, top=0, width=round(0.12*self.WIDTH), height=self.button_height)
+        self.slow_bar_button = Button(text="Toggle Slow Bars", right=self.WIDTH, top=self.history_button.height, width=round(0.12*self.WIDTH), height=self.button_height)
 
     def stop(self):
         print("Stopping spectrum visualizer...")

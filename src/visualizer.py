@@ -1,9 +1,9 @@
 import numpy as np
 import time, sys, math
 import pygame
-from matplotlib import cm
 from collections import deque
 from src.utils import Button
+from matplotlib import cm
 
 class Spectrum_Visualizer:
     """
@@ -36,6 +36,7 @@ class Spectrum_Visualizer:
 
         self.slow_features = [0]*self.ear.n_frequency_bins
         self.frequency_bin_max_energies  = np.zeros(self.ear.n_frequency_bins)
+        self.frequency_bin_energies = self.ear.frequency_bin_energies
         self.bin_text_tags, self.bin_rectangles = [], []
 
         #Fixed init params:
@@ -134,7 +135,7 @@ class Spectrum_Visualizer:
                 self.slow_features = [0]*self.ear.n_frequency_bins
 
         if np.min(self.ear.bin_mean_values) > 0:
-            self.ear.frequency_bin_energies = self.avg_energy_height * self.ear.frequency_bin_energies / self.ear.bin_mean_values
+            self.frequency_bin_energies = self.avg_energy_height * self.ear.frequency_bin_energies / self.ear.bin_mean_values
         
         if self.plot_audio_history:
             new_w, new_h = int((2+self.shrink_f)/3*self.WIDTH), int(self.shrink_f*self.HEIGHT)
@@ -185,9 +186,9 @@ class Spectrum_Visualizer:
     def plot_bars(self):
         bars, slow_bars, new_slow_features = [], [], []
         local_height = self.y_ext[1] - self.y_ext[0]
-        feature_values = self.ear.frequency_bin_energies[::-1]
+        feature_values = self.frequency_bin_energies[::-1]
 
-        for i in range(len(self.ear.frequency_bin_energies)):
+        for i in range(len(self.frequency_bin_energies)):
             feature_value = feature_values[i] * local_height
 
             self.fast_bars[i][3] = int(feature_value)

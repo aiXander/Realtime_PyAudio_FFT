@@ -28,12 +28,16 @@ class Stream_Analyzer:
         smoothing_length_ms = 50,
         n_frequency_bins    = 51,
         visualize = True,
-        verbose   = False):
+        verbose   = False,
+        height    = 450,
+        window_ratio = 24/9):
 
         self.n_frequency_bins = n_frequency_bins
         self.rate = rate
         self.verbose = verbose
         self.visualize = visualize
+        self.height = height
+        self.window_ratio = window_ratio
 
         try:
             from src.stream_reader_pyaudio import Stream_Reader

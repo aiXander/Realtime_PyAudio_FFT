@@ -8,6 +8,9 @@ def parse_args():
                         help='pyaudio (portaudio) device index')
     parser.add_argument('--height', type=int, default=450, dest='height',
                         help='height, in pixels, of the visualizer window')
+    parser.add_argument('--n_frequency_bins', type=int, default=400, dest='frequency_bins',
+                        help='The FFT features are grouped in bins')
+    parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--window_ratio', default='24/9', dest='window_ratio',
                         help='float ratio of the visualizer window. e.g. 24/9')
     return parser.parse_args()
@@ -32,9 +35,9 @@ def run_FFT_analyzer():
                     FFT_window_size_ms  = 60,    # Window size used for the FFT transform
                     updates_per_second  = 1000,  # How often to read the audio stream for new data
                     smoothing_length_ms = 50,    # Apply some temporal smoothing to reduce noisy features
-                    n_frequency_bins    = 400,   # The FFT features are grouped in bins
+                    n_frequency_bins = args.frequency_bins, # The FFT features are grouped in bins
                     visualize = 1,               # Visualize the FFT features with PyGame
-                    verbose   = 1,               # Print running statistics (latency, fps, ...)
+                    verbose   = args.verbose,    # Print running statistics (latency, fps, ...)
                     height    = args.height,     # Height, in pixels, of the visualizer window,
                     window_ratio = window_ratio  # Float ratio of the visualizer window. e.g. 24/9
                     )

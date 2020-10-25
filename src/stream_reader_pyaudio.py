@@ -17,9 +17,9 @@ class Stream_Reader:
 
     """
 
-    def __init__(self, 
-        device = None, 
-        rate = None, 
+    def __init__(self,
+        device = None,
+        rate = None,
         updates_per_second  = 1000,
         FFT_window_size = None,
         verbose = False):
@@ -59,7 +59,7 @@ class Stream_Reader:
         print("\nDefaulted to using first working mic, Running on:")
         self.print_mic_info(self.device)
         print("\n##################################################################################################")
-        print('Recording from %s at %d Hz\nUsing (non-overlapping) data-windows of %d samples (updating at %.2ffps)' 
+        print('Recording from %s at %d Hz\nUsing (non-overlapping) data-windows of %d samples (updating at %.2ffps)'
             %(self.info["name"],self.rate, self.update_window_n_frames, self.updates_per_second))
 
     def non_blocking_stream_read(self, in_data, frame_count, time_info, status):
@@ -108,7 +108,7 @@ class Stream_Reader:
 
         if self.test_device(device, rate=default_rate):
             return default_rate
-            
+
         print("SOMETHING'S WRONG! I can't figure out a good sample-rate for DEVICE =>", device)
         return default_rate
 
@@ -127,7 +127,7 @@ class Stream_Reader:
                 channels = 1,
                 input_device_index=device,
                 frames_per_buffer=self.update_window_n_frames,
-                rate = rate, 
+                rate = rate,
                 input = True)
             stream.close()
             return True

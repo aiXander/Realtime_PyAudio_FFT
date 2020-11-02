@@ -13,8 +13,8 @@ class Spectrum_Visualizer:
         self.plot_audio_history = True
         self.ear = ear
 
-        self.HEIGHT  = 450
-        window_ratio = 24/9     
+        self.HEIGHT  = self.ear.height
+        window_ratio = self.ear.window_ratio
 
         self.HEIGHT = round(self.HEIGHT)
         self.WIDTH  = round(window_ratio*self.HEIGHT)
@@ -51,7 +51,7 @@ class Spectrum_Visualizer:
         if self.plot_audio_history:
             self.bg_color           = 10    #Background color
             self.decay_speed        = 0.10  #Vertical decay of slow bars
-            self.inter_bar_distance = 0            
+            self.inter_bar_distance = 0
             self.avg_energy_height  = 0.1125
             self.alpha_multiplier   = 0.995
             self.move_fraction      = 0.0099
@@ -136,7 +136,7 @@ class Spectrum_Visualizer:
 
         if np.min(self.ear.bin_mean_values) > 0:
             self.frequency_bin_energies = self.avg_energy_height * self.ear.frequency_bin_energies / self.ear.bin_mean_values
-        
+
         if self.plot_audio_history:
             new_w, new_h = int((2+self.shrink_f)/3*self.WIDTH), int(self.shrink_f*self.HEIGHT)
             #new_w, new_h = int(self.shrink_f*self.WIDTH), int(self.shrink_f*self.HEIGHT)
@@ -151,7 +151,7 @@ class Spectrum_Visualizer:
             self.screen.blit(pygame.transform.rotate(prev_screen, 180), new_pos)
 
         if self.start_time is None:
-           self.start_time = time.time() 
+           self.start_time = time.time()
 
         self.vis_steps += 1
 
@@ -159,11 +159,11 @@ class Spectrum_Visualizer:
             self.fps = self.fps_interval / (time.time()-self.start_time)
             self.start_time = time.time()
 
-        self.text = self.fps_font.render('Fps: %.1f' %(self.fps), True, (255, 255, 255) , (self.bg_color, self.bg_color, self.bg_color)) 
+        self.text = self.fps_font.render('Fps: %.1f' %(self.fps), True, (255, 255, 255) , (self.bg_color, self.bg_color, self.bg_color))
         self.textRect = self.text.get_rect()
         self.textRect.x, self.textRect.y = round(0.015*self.WIDTH), round(0.03*self.HEIGHT)
         pygame.display.set_caption('Spectrum Analyzer -- (FFT-Peak: %05d Hz)' %self.ear.strongest_frequency)
-        
+
         self.plot_bars()
 
         #Draw text tags:
@@ -203,7 +203,7 @@ class Spectrum_Visualizer:
                 self.slow_bars[i][1] = int(self.fast_bars[i][1] + slow_feature_value)
                 self.slow_bars[i][3] = int(self.slow_bar_thickness * local_height)
 
-        if self.add_fast_bars:     
+        if self.add_fast_bars:
             for i, fast_bar in enumerate(self.fast_bars):
                 pygame.draw.rect(self.screen,self.fast_bar_colors[i],fast_bar,0)
 
@@ -212,10 +212,10 @@ class Spectrum_Visualizer:
                 self.prev_screen = pygame.transform.rotate(self.prev_screen, 180)
                 self.prev_screen.set_alpha(self.prev_screen.get_alpha()*self.alpha_multiplier)
 
-        if self.add_slow_bars: 
+        if self.add_slow_bars:
             for i, slow_bar in enumerate(self.slow_bars):
                 pygame.draw.rect(self.screen,self.slow_bar_colors[i],slow_bar,0)
-                
+
         self.slow_features = new_slow_features
 
         #Draw everything:

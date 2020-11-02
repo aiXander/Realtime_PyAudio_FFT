@@ -19,7 +19,7 @@ def gaussian_kernel1d(sigma, truncate=2.0):
     # make the radius of the filter equal to truncate standard deviations
     radius = int(truncate * sigma + 0.5)
     exponent_range = np.arange(1)
-    
+
     x = np.arange(-radius, radius+1)
     phi_x = np.exp(-0.5 / sigma2 * x ** 2)
     phi_x = phi_x / phi_x.sum()

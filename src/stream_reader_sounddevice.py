@@ -17,9 +17,9 @@ class Stream_Reader:
 
     """
 
-    def __init__(self, 
-        device = None, 
-        rate = None, 
+    def __init__(self,
+        device = None,
+        rate = None,
         updates_per_second  = 1000,
         FFT_window_size = None,
         verbose = False):
@@ -49,29 +49,29 @@ class Stream_Reader:
         # This part is a bit hacky, need better solution for this:
         # Determine what the optimal buffer shape is by streaming some test audio
         self.optimal_data_lengths = []
-        with sd.InputStream(samplerate=self.rate, 
-                            blocksize=0, 
-                            device=self.device, 
-                            channels=1, 
-                            dtype=np.float32, 
+        with sd.InputStream(samplerate=self.rate,
+                            blocksize=0,
+                            device=self.device,
+                            channels=1,
+                            dtype=np.float32,
                             latency='low',
                             callback=self.test_stream_read):
             time.sleep(0.2)
 
-        self.update_window_n_frames = max(self.optimal_data_lengths) 
+        self.update_window_n_frames = max(self.optimal_data_lengths)
         del self.optimal_data_lengths
-        
+
         #Alternative:
         #self.update_window_n_frames = round_up_to_even(44100 / updates_per_second)
 
         self.stream = sd.InputStream(
-                                    samplerate=self.rate, 
-                                    blocksize=self.update_window_n_frames, 
-                                    device=None, 
-                                    channels=1, 
-                                    dtype=np.float32, 
-                                    latency='low', 
-                                    extra_settings=None, 
+                                    samplerate=self.rate,
+                                    blocksize=self.update_window_n_frames,
+                                    device=None,
+                                    channels=1,
+                                    dtype=np.float32,
+                                    latency='low',
+                                    extra_settings=None,
                                     callback=self.non_blocking_stream_read)
 
         self.rate = self.stream.samplerate
@@ -92,7 +92,7 @@ class Stream_Reader:
         print(device_dict[self.device])
         print('Which has a latency of %.2f ms' %(1000*self.device_latency))
         print("\n##################################################################################################")
-        print('Recording audio at %d Hz\nUsing (non-overlapping) data-windows of %d samples (updating at %.2ffps)' 
+        print('Recording audio at %d Hz\nUsing (non-overlapping) data-windows of %d samples (updating at %.2ffps)'
             %(self.rate, self.update_window_n_frames, self.updates_per_second))
 
     def non_blocking_stream_read(self, indata, frames, time_info, status):

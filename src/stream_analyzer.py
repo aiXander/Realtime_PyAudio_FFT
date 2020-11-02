@@ -20,39 +20,43 @@ class Stream_Analyzer:
 
     """
 
-    def __init__(self, 
-        device = None, 
-        rate   = None, 
-        FFT_window_size_ms  = 50, 
-        updates_per_second  = 100, 
-        smoothing_length_ms = 50, 
-        n_frequency_bins    = 51, 
+    def __init__(self,
+        device = None,
+        rate   = None,
+        FFT_window_size_ms  = 50,
+        updates_per_second  = 100,
+        smoothing_length_ms = 50,
+        n_frequency_bins    = 51,
         visualize = True,
-        verbose   = False):
+        verbose   = False,
+        height    = 450,
+        window_ratio = 24/9):
 
         self.n_frequency_bins = n_frequency_bins
         self.rate = rate
         self.verbose = verbose
         self.visualize = visualize
+        self.height = height
+        self.window_ratio = window_ratio
 
         try:
             from src.stream_reader_pyaudio import Stream_Reader
             self.stream_reader = Stream_Reader(
-                device  = device, 
-                rate    = rate, 
+                device  = device,
+                rate    = rate,
                 updates_per_second  = updates_per_second,
                 verbose = verbose)
         except:
             from src.stream_reader_sounddevice import Stream_Reader
             self.stream_reader = Stream_Reader(
-                device  = device, 
-                rate    = rate, 
+                device  = device,
+                rate    = rate,
                 updates_per_second  = updates_per_second,
                 verbose = verbose)
 
         self.rate = self.stream_reader.rate
 
-        #Custom settings: 
+        #Custom settings:
         self.rolling_stats_window_s    = 20     # The axis range of the FFT features will adapt dynamically using a window of N seconds
         self.equalizer_strength        = 0.20   # [0-1] --> gradually rescales all FFT features to have the same mean
         self.apply_frequency_smoothing = True   # Apply a postprocessing smoothing filter over the FFT outputs
@@ -172,10 +176,10 @@ class Stream_Analyzer:
                 avg_data_capture_delay = 1000.*np.mean(np.array(self.stream_reader.data_capture_delays))
                 data_fps = self.stream_reader.num_data_captures / (time.time() - self.stream_reader.stream_start_time)
                 print("\nAvg fft  delay: %.2fms  -- avg data delay: %.2fms" %(avg_fft_delay, avg_data_capture_delay))
-                print("Num data captures: %d (%.2ffps)-- num fft computations: %d (%.2ffps)" 
+                print("Num data captures: %d (%.2ffps)-- num fft computations: %d (%.2ffps)"
                     %(self.stream_reader.num_data_captures, data_fps, self.num_ffts, self.fft_fps))
 
             if self.visualize and self.visualizer._is_running:
                 self.visualizer.update()
-                
+
         return self.fftx, self.fft, self.frequency_bin_centres, self.frequency_bin_energies

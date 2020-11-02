@@ -11,7 +11,7 @@ def getFFT(data, rate, chunk_size, log_scale=False):
 
     #fftx = np.fft.fftfreq(chunk_size, d=1.0/rate)
     #fftx = np.split(np.abs(fftx), 2)[0]
-    
+
     if log_scale:
         try:
             FFT = np.multiply(20, np.log10(FFT))
@@ -33,7 +33,7 @@ def median_filter_vertical(x, filter_len):
 
 def harmonic_percussive_decomposition(FFT_features, Fs):
     # https://www.audiolabs-erlangen.de/resources/MIR/FMP/C8/C8S1_HPS.html
-    
+
     N, H = 1024, 512
     X = librosa.stft(x, n_fft=N, hop_length=H, win_length=N, window='hann', center=True, pad_mode='constant')
     Y = np.abs(X)**2

@@ -13,6 +13,8 @@ def parse_args():
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--window_ratio', default='24/9', dest='window_ratio',
                         help='float ratio of the visualizer window. e.g. 24/9')
+    parser.add_argument('--sleep_between_frames', dest='sleep_between_frames', action='store_true',
+                        help='when true process sleeps between frames to reduce CPU usage (recommended for low update rates)')
     return parser.parse_args()
 
 def convert_window_ratio(window_ratio):
@@ -48,6 +50,8 @@ def run_FFT_analyzer():
         if (time.time() - last_update) > (1./fps):
             last_update = time.time()
             raw_fftx, raw_fft, binned_fftx, binned_fft = ear.get_audio_features()
+        elif args.sleep_between_frames:
+            time.sleep(((1./fps)-(time.time()-last_update)) * 0.99)
 
 if __name__ == '__main__':
     run_FFT_analyzer()

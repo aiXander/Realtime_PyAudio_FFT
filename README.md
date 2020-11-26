@@ -5,6 +5,8 @@
 
 ### A simple package to do realtime audio analysis in native Python, using PyAudio and Numpy to extract and visualize FFT features from a live audio stream.
 
+[**Demo Video**](https://youtu.be/FnP2bkzU4oo)
+
 **The basic pipeline:**
 * Starts a stream_reader that pulls live audio data from any source using PyAudio (soundcard, microphone, ...)
 * Reads data from this stream many times per second (eg 1000 updates per second) and stores that data in a fifo buffer

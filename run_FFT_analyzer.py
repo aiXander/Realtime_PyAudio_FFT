@@ -32,7 +32,7 @@ def run_FFT_analyzer():
     window_ratio = convert_window_ratio(args.window_ratio)
 
     ear = Stream_Analyzer(
-                    device = 3,        # Pyaudio (portaudio) device index, defaults to first mic input
+                    device = args.device,        # Pyaudio (portaudio) device index, defaults to first mic input
                     rate   = None,               # Audio samplerate, None uses the default source settings
                     FFT_window_size_ms  = 60,    # Window size used for the FFT transform
                     updates_per_second  = 1000,  # How often to read the audio stream for new data

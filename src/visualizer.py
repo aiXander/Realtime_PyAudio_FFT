@@ -208,7 +208,7 @@ class Spectrum_Visualizer:
                 pygame.draw.rect(self.screen,self.fast_bar_colors[i],fast_bar,0)
 
         if self.plot_audio_history:
-                self.prev_screen = self.screen.copy()
+                self.prev_screen = self.screen.copy().convert_alpha()
                 self.prev_screen = pygame.transform.rotate(self.prev_screen, 180)
                 self.prev_screen.set_alpha(self.prev_screen.get_alpha()*self.alpha_multiplier)
 

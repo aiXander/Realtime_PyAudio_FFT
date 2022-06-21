@@ -17,7 +17,7 @@
 
 `pip install -r requirements.txt`
 
-If you're having trouble installing PyAudio, you might want to 
+You also might have to 
 `sudo apt install libasound-dev portaudio19-dev libportaudio2 libportaudiocpp0` (tested on Ubuntu)
 
 I developped this code on my local machine --> it has not been properly tested on other setups..
@@ -28,7 +28,7 @@ If something doesn't work, please first try to fix it yourself and post an issue
 
 Tested with:
 * Python 3.6.3
-* [pygame](https://www.pygame.org/wiki/GettingStarted)  --> Version: 1.9.6
+* [pygame](https://www.pygame.org/wiki/GettingStarted)  --> Version: 1.9.6 & 
 * [pyaudio](http://people.csail.mit.edu/hubert/pyaudio/) --> Version: 0.2.11
 * [scipy](https://www.scipy.org/install.html)   --> Version: 1.4.1
 
@@ -39,6 +39,8 @@ Alternatively to pyaudio, you can use [sounddevice](https://python-sounddevice.r
 * The code to switch between the two sound interfaces is in the `__init__` function of the Stream_Analyzer class
 
 **Usage:**
+
+just run `python run_FFT_analyzer.py` and play a sound on your machine!
 * I have personally learned **A LOT** about sound by watching [this realtime visualization](https://www.youtube.com/watch?v=FnP2bkzU4oo) while listening to music
 * You can run the stream_analyzer in headless mode and use the FFT features in any Python Application that requires live musical features
 

@@ -48,6 +48,7 @@ class Stream_Reader:
             self.num_data_captures = 0
 
         self.stream = self.pa.open(
+            input_device_index=self.device,
             format = pyaudio.paInt16,
             channels = 1,
             rate = self.rate,

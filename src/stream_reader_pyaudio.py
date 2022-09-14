@@ -87,12 +87,12 @@ class Stream_Reader:
 
         self.data_buffer = numpy_data_buffer(self.data_windows_to_buffer, self.update_window_n_frames)
 
-        print("\n--🎙  -- Starting live audio stream...\n")
+        print("\n-- Starting live audio stream...\n")
         self.stream.start_stream()
         self.stream_start_time = time.time()
 
     def terminate(self):
-        print("👋  Sending stream termination command...")
+        print("Sending stream termination command...")
         self.stream.stop_stream()
         self.stream.close()
         self.pa.terminate()

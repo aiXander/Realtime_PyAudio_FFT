@@ -17,7 +17,7 @@
 
 I would recommend setting up a virtual environment but is not necessary:
 ```
-cd  Realtime_PyAudio_FFT
+cd Realtime_PyAudio_FFT
 python3 -m venv venv
 
 # activate on Windows

@@ -15,6 +15,20 @@
 
 **Requirements:**
 
+I would recommend setting up a virtual environment but is not necessary:
+```
+cd Realtime_PyAudio_FFT
+python3 -m venv venv
+
+# activate on Windows
+venv\Scripts\activate.bat
+
+# activate on Linux and MacOS
+source venv/bin/activate
+```
+
+**Install the dependencies with**
+
 `pip install -r requirements.txt`
 
 You also might have to 

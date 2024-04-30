@@ -47,10 +47,13 @@ def run_FFT_analyzer():
     fps = 60  #How often to update the FFT features + display
     last_update = time.time()
     print("All ready, starting audio measurements now...")
+    fft_samples = 0
     while True:
         if (time.time() - last_update) > (1./fps):
             last_update = time.time()
             raw_fftx, raw_fft, binned_fftx, binned_fft = ear.get_audio_features()
+            print(f"Got fft_features #{fft_samples} of shape {raw_fft.shape}")
+            fft_samples += 1
         elif args.sleep_between_frames:
             time.sleep(((1./fps)-(time.time()-last_update)) * 0.99)
 

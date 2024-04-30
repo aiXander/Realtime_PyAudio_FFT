@@ -124,7 +124,7 @@ class Stream_Reader:
         if data_windows_to_buffer is None:
             self.data_windows_to_buffer = int(self.updates_per_second / 2) #By default, buffer 0.5 second of audio
         else:
-            self.data_windows_to_buffer = data_windows_to_buffer
+            self.data_windows_to_buffer = int(data_windows_to_buffer)
 
         self.data_buffer = numpy_data_buffer(self.data_windows_to_buffer, self.update_window_n_frames)
 

@@ -19,23 +19,13 @@
 
 You also might have to 
 `sudo apt install libasound-dev portaudio19-dev libportaudio2 libportaudiocpp0` (tested on Ubuntu)
+or 
+`brew install portaudio` (on Mac)
 
-I developped this code on my local machine --> it has not been properly tested on other setups..
-If something doesn't work, please first try to fix it yourself and post an issue/solution when appropriate!
-* Tested on Ubuntu 18.04
 * Other platforms like Mac/Windows should work if PyGame can find your display and Python finds your audio card (these can be tricky with [WSL](https://research.wmz.ninja/articles/2017/11/setting-up-wsl-with-graphics-and-audio.html))
-* For Mac OSX (tested on Catalina 10.15.4), please make sure you run with Python downloaded from [Python.org](https://www.python.org/downloads/release/python-377/) (`pygame` doesn't work well with the default/Homebrew Python)
-
-Tested with:
-* Python 3.6.3
-* [pygame](https://www.pygame.org/wiki/GettingStarted)  --> Version: 1.9.6 & 
-* [pyaudio](http://people.csail.mit.edu/hubert/pyaudio/) --> Version: 0.2.11
-* [scipy](https://www.scipy.org/install.html)   --> Version: 1.4.1
-
 
 Alternatively to pyaudio, you can use [sounddevice](https://python-sounddevice.readthedocs.io/en/0.3.15/installation.html) which might be more compatible with Windows/Mac
 * just run `python3 -m pip install sounddevice`
-* Tested on Ubuntu 18.04 with sounddevice version 0.3.15
 * The code to switch between the two sound interfaces is in the `__init__` function of the Stream_Analyzer class
 
 **Usage:**

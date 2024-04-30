@@ -20,6 +20,7 @@
 You also might have to 
 `sudo apt install libasound-dev portaudio19-dev libportaudio2 libportaudiocpp0` (tested on Ubuntu)
 or 
+
 `brew install portaudio` (on Mac)
 
 * Other platforms like Mac/Windows should work if PyGame can find your display and Python finds your audio card (these can be tricky with [WSL](https://research.wmz.ninja/articles/2017/11/setting-up-wsl-with-graphics-and-audio.html))

@@ -26,7 +26,7 @@ or
 
 * Other platforms like Mac/Windows should work if PyGame can find your display and Python finds your audio card (these can be tricky with [WSL](https://research.wmz.ninja/articles/2017/11/setting-up-wsl-with-graphics-and-audio.html))
 
-Alternatively to pyaudio, you can use [sounddevice](https://python-sounddevice.readthedocs.io/en/0.3.15/installation.html) which might be more compatible with Windows/Mac
+Alternatively to pyaudio, you can try [sounddevice](https://python-sounddevice.readthedocs.io/en/0.3.15/installation.html) which sometimes is more compatible with Windows/Mac
 * just run `python3 -m pip install sounddevice`
 * The code to switch between the two sound interfaces is in the `__init__` function of the Stream_Analyzer class
 

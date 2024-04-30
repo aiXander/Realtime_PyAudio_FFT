@@ -17,7 +17,8 @@
 
 `pip install -r requirements.txt`
 
-You also might have to 
+You also might have to:
+
 `sudo apt install libasound-dev portaudio19-dev libportaudio2 libportaudiocpp0` (tested on Ubuntu)
 or 
 

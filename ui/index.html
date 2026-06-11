@@ -49,7 +49,7 @@ Each onset is sent over OSC as `/audio/onset/{low,mid,high}` (only on onsets, no
 - Payload: `[low: f32, mid: f32, high: f32]` — three floats per message
 - Range: `[0, 1]` typically (unclamped — *master gain* > 1 can push above)
 - Rate: matches the audio block rate (~`sr / blocksize`, e.g. ~187 Hz at 48 kHz / 256-sample blocks)
-- Default destination: `127.0.0.1:9000` (configurable in `config.yaml` under `osc.destinations`)
+- Default destination: `127.0.0.1:9000` (configurable in `configs/main.yaml` under `osc.destinations`)
 - Band edges (Hz) are announced once on `/audio/meta` — see config or the band selector.
 
 # WebSocket
@@ -81,7 +81,7 @@ Rolling history of the same three signals as the bar graph. The colored polyline
 - Payload: `[low: f32, mid: f32, high: f32]`
 - Range: `[0, 1]` typically (unclamped if *master gain* > 1)
 - Rate: per audio block (~`sr / blocksize`, e.g. ~187 Hz at 48 kHz / 256)
-- Default destination: `127.0.0.1:9000` (configure in `config.yaml` → `osc.destinations`)
+- Default destination: `127.0.0.1:9000` (configure in `configs/main.yaml` → `osc.destinations`)
 - Meta on `/audio/meta` carries `[sr, blocksize, n_fft_bins, low_lo, low_hi, mid_lo, mid_hi, high_lo, high_hi]`
 
 # WebSocket
@@ -109,7 +109,7 @@ What you see here is **byte-identical** to the wire payload. The white peak-hold
 # OSC
 
 - Address: `/audio/fft`
-- Payload: `n_bins` float32 values (default `n_bins = 128`, configurable via `fft.n_bins` in `config.yaml`)
+- Payload: `n_bins` float32 values (default `n_bins = 128`, configurable via `fft.n_bins` in `configs/main.yaml`)
 - Range:
   - **raw dB OFF** (default) → `[0, 1]` post-processed (smoother → auto-scaler → gate → tanh → strength blend)
   - **raw dB ON** → log-spaced spectrum in dB; empty low bins are rewritten to `db_floor` on OSC so consumers stay in-range

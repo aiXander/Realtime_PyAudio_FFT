@@ -16,3 +16,7 @@ preset-*.yaml
 
 # Local runtime config (seeded from configs/main.example.yaml on first run)
 configs/main.yaml
+
+# Locally cloned reference repos (not part of this project)
+Realtime-beat-tracking/
+madmom/

@@ -178,6 +178,14 @@ class FFTWorker(threading.Thread):
         with self._lock:
             self.read_block_idx = 0
 
+    def resync(self) -> None:
+        """Snap the read pointer to 'now' (one full window back) without
+        counting the skipped backlog as drops. Called when the FFT is
+        re-enabled after a disabled period — the gap is deliberate idle
+        time, not an overrun, and shouldn't pollute the fft_drops counter."""
+        with self._lock:
+            self.read_block_idx = max(0, self.ring.write_idx - self.n_blocks_per_window)
+
     def run(self) -> None:
         boost_current_thread("fft-worker")
         while True:

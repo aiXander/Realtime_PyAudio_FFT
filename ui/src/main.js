@@ -21,6 +21,8 @@ const scene = makeScene(document.getElementById("viz-scene"));
 const fft   = makeFft(document.getElementById("viz-fft"));
 
 // ----- WS handlers -----
+const bpmEl = document.getElementById("bpm-readout");
+let bpmText = bpmEl ? bpmEl.textContent : "";
 onMessage("snapshot", (m) => {
   store.low = m.low; store.mid = m.mid; store.high = m.high;
   store.low_raw = m.low_raw; store.mid_raw = m.mid_raw; store.high_raw = m.high_raw;
@@ -30,8 +32,10 @@ onMessage("snapshot", (m) => {
   if (m.high_onset) store.high_onset_pulse_t = now;
   if (typeof m.bpm === "number") {
     store.bpm = m.bpm;
-    const el = document.getElementById("bpm-readout");
-    if (el) el.textContent = m.bpm > 0 ? `${m.bpm.toFixed(1)} BPM` : "— BPM";
+    // Only touch the DOM when the rendered string actually changes —
+    // snapshots arrive at up to 60 Hz and BPM moves at most a few times/sec.
+    const text = m.bpm > 0 ? `${m.bpm.toFixed(1)} BPM` : "— BPM";
+    if (bpmEl && text !== bpmText) { bpmText = text; bpmEl.textContent = text; }
   }
 });
 
@@ -122,12 +126,18 @@ const PERF_ROWS = [
       "Numbers are `avg / p95 ms`. Bar is scaled against one snapshot interval (`1 / ws_snapshot_hz`).",
     ].join("\n") },
 ];
+const VIZ_NAMES = ["lines", "bars", "scene", "fft"];
 const BROWSER_ROWS = [
   { key: "raf", tooltip: [
       "**Browser inter-draw interval.** Wall-clock time between consecutive canvas redraws. Throttled to the UI refresh rate slider.",
       "",
       "Numbers are `avg / p95 ms`. Bar shows how far the average exceeds the target frame period (0% = on target).",
     ].join("\n") },
+  ...VIZ_NAMES.map((name) => ({ key: name, tooltip: [
+      `**\`${name}\` canvas paint cost.** Time spent inside its draw() call per frame.`,
+      "",
+      "Numbers are `avg / p95 ms`. Bar is scaled against one UI frame period (1 / refresh rate).",
+    ].join("\n") })),
 ];
 const perfContainer = document.getElementById("perf-rows");
 
@@ -179,6 +189,13 @@ function renderPerfPanel() {
   const raf_p95 = p95Ring(store.raf_ms_ring);
   const raf_load = Math.max(0, (raf_avg - targetPeriod) / targetPeriod * 100);
   setPerfRow("b_raf", raf_avg, raf_p95, raf_load, false);
+  // Per-canvas paint cost, scaled against the frame budget.
+  for (const name of VIZ_NAMES) {
+    const v = store.viz_perf[name];
+    if (!v) continue;
+    const avg = avgRing(v.ring);
+    setPerfRow("b_" + name, avg, p95Ring(v.ring), avg / targetPeriod * 100, false);
+  }
 }
 
 // ----- RAF loop -----

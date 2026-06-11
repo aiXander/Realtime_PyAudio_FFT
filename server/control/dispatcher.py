@@ -72,10 +72,15 @@ class Dispatcher:
     async def _set_fft(self, msg):
         enabled = bool(msg.get("enabled", False))
         if enabled:
-            # Reset post-processor state so we don't reuse stale smoother / peak
-            # values from before the FFT was disabled.
-            if self.app.fft_postprocessor is not None:
-                self.app.fft_postprocessor.reset()
+            if not self.app.fft_enabled.is_set():
+                # Reset post-processor state so we don't reuse stale smoother /
+                # peak values from before the FFT was disabled, and snap the
+                # worker's read pointer past the disabled gap so elapsed idle
+                # time isn't counted as fft_drops.
+                if self.app.fft_postprocessor is not None:
+                    self.app.fft_postprocessor.reset()
+                if self.app.fft_worker is not None:
+                    self.app.fft_worker.resync()
             self.app.fft_enabled.set()
         else:
             self.app.fft_enabled.clear()

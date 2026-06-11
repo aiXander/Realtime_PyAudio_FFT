@@ -13,13 +13,15 @@ server/      # Python audio-server package (entry point: server.main:main)
              # FFTPostProcessor (per-bin port of AutoScaler for the FFT bins),
              # OnsetTracker (per-band onset detector on L/M/H + rolling BPM on `low`)
   control/   # WS message dispatcher + pure validators
-  io/        # WSServer, OSC sender task, FeatureStore/FFTStore, static HTTP
+  io/        # WSServer, OSC wire layer + worker-thread OSC publisher,
+             # FeatureStore/FFTStore, static HTTP
   config.py  # Dataclass schema, YAML load, debounced atomic Persister
   main.py    # App orchestrator: builds and wires everything together
 ui/          # Vanilla-JS browser UI (ES modules, no build step). Pure viz —
              # no DSP. What you see in the FFT graph is byte-identical to the
              # OSC payload.
-config.yaml  # Persisted runtime state — written automatically when UI changes settings
+configs/     # main.yaml = persisted runtime state (auto-written when UI changes
+             # settings); any other *.yaml here is a saved preset
 ```
 
 ## Commands
@@ -28,7 +30,7 @@ config.yaml  # Persisted runtime state — written automatically when UI changes
 # Install (editable, with dev extras)
 pip install -e ".[dev]"
 
-# Run the server (reads ./config.yaml; opens WS on 8765, UI HTTP on 8766)
+# Run the server (reads <repo>/configs/main.yaml; opens WS on 8765, UI HTTP on 8766)
 audio-server                          # entry point from pyproject [project.scripts]
 python -m server.main                 # equivalent
 audio-server --open                   # also launches the bundled UI in default browser
@@ -41,7 +43,7 @@ pytest tests/
 pytest tests/unit/test_foo.py::test_bar    # single test
 ```
 
-The server *must* be launched with `config.yaml`'s parent directory writable — the Persister atomically rewrites it on every UI control change, and presets are saved alongside as `preset-<name>.yaml`.
+The `configs/` directory *must* be writable — the Persister atomically rewrites `configs/main.yaml` on every UI control change, and presets are saved alongside as `configs/<name>.yaml`. (A legacy `./config.yaml` + `presets/` layout is auto-migrated into `configs/` at startup.)
 
 ## Architecture: the threading contract is the design
 
@@ -75,20 +77,25 @@ PortAudio C thread ──► AudioCallback (server/audio/callback.py)
               │                     owned by FFTWorker / FFTPostProcessor —
               │                     no copy on the publish path)
               │                        │
-              └────► sender_event (asyncio.Event, set via call_soon_threadsafe)
-                            │
-                            ▼
+              ├─► OscPublisher         ├─► OscPublisher
+              │    .publish_lmh()      │    .publish_fft()
+              │   direct UDP sendto on │   direct UDP sendto on
+              │   the DSP worker thread│   the FFT worker thread
+              │   → /audio/lmh, /audio/│   → /audio/fft
+              │   bpm, /audio/onset/*  │
+              ▼                        ▼
+            (stores polled by the WS broadcast loop at ws_snapshot_hz)
+
                   asyncio loop owns:
-                    - osc_sender_task  (server/io/osc_sender.py)  → /audio/lmh, /audio/fft
                     - WSServer         (server/io/ws_server.py)   → JSON snapshots + binary FFT
                     - StaticHTTPServer (server/io/http_server.py) → serves ui/ over http
-                    - Persister        (server/config.py)         → debounced atomic config.yaml
+                    - Persister        (server/config.py)         → debounced atomic configs/main.yaml
                     - Dispatcher       (server/control/dispatcher.py) → handles inbound WS control msgs
 
 Browser (ui/) ──ws://127.0.0.1:8765──► Dispatcher (validate → mutate App state → persist → reply)
 ```
 
-**Single source of truth for FFT.** Both OSC and WS read from the same `FFTStore`, picking either the `raw_db` or `processed` stream based on `cfg.fft.send_raw_db`. The UI reflects this flag from `meta` and renders whatever it receives — no client-side DSP. So the FFT graph in the browser is byte-identical to the `/audio/fft` OSC payload at any moment in time.
+**Single source of truth for FFT.** OSC and WS send the same frames — `FFTWorker` hands identical buffer refs to `OscPublisher.publish_fft` and `FFTStore.publish`, and both sides pick `raw_db` vs `processed` from the same `cfg.fft.send_raw_db` flag. The UI reflects this flag from `meta` and renders whatever it receives — no client-side DSP. So the FFT graph in the browser is byte-identical to the `/audio/fft` OSC payload at any moment in time.
 
 ### App is the orchestrator
 
@@ -96,9 +103,9 @@ Browser (ui/) ──ws://127.0.0.1:8765──► Dispatcher (validate → mutate
 
 1. **SlotRing**: SPSC seqlock for audio data (callback → DSP/FFT workers).
 2. **threading.Event**: one-shot wakeups (`dsp_event`, `fft_event`, `fft_enabled`, `stop_flag`).
-3. **FeatureStore / FFTStore**: lock-guarded publish/read (workers → asyncio sender / WS broadcaster). `FFTStore` holds a `(raw_db, processed)` pair; `read(kind)` returns the requested stream.
+3. **FeatureStore / FFTStore**: lock-guarded publish/read (workers → WS broadcaster). `FFTStore` holds a `(raw_db, processed)` pair; `read(kind)` returns the requested stream.
 
-When the DSP or FFT worker publishes, it calls `App._signal_dsp_published`, which uses `loop.call_soon_threadsafe(sender_event.set)` to wake the OSC sender task. This is the only cross-thread asyncio interaction — never `asyncio.run_coroutine_threadsafe` from a worker.
+OSC is dispatched directly on the worker threads: right after publishing to its store, each worker calls `OscPublisher.publish_lmh` / `publish_fft` (`server/io/osc_publisher.py`), which mutates a pre-encoded packet template in place and `sendto`s it — no asyncio hop, no per-send allocation (the wire layer is `OscSender` in `server/io/osc_sender.py`). Workers never touch the asyncio loop; the loop discovers new data by polling the stores from the WS broadcast loop.
 
 ### What runs where
 
@@ -127,7 +134,7 @@ Per-bin port of `features.AutoScaler`, intentionally structurally identical to t
 6. **AutoScaler core.** `tanh(max(0, smooth - noise_floor) / max(peak_smoothed, noise_floor))`. Bit-for-bit identical math to the L/M/H side, except divisor is the smeared peak.
 7. **Strength blend.** `output = strength × scaled + (1 − strength) × raw_db_mapped`, where `raw_db_mapped = clamp((wire_dB − db_floor) / span, 0, 1)` with the same noise gate (in calibrated units) so silent bins flatten to 0 instead of disappearing. At `strength=0` the output is an honest dB readout; at `strength=1` it's fully equalized.
 
-The output is always in `[0, 1]` (same range as L/M/H scaled). `process()` writes into one of two preallocated f32 output buffers and returns the just-written ref, toggling on each call; the returned ref stays valid until two further `process()` calls. `FFTWorker.run` does the same trick for the wire-format `bins_f32` (two preallocated buffers, alternated). Both refs are passed straight into `FFTStore.publish` — no copy on the publish path. The two consumers (OSC sender, WS encoder) drain the array synchronously inside their handler (via `.tolist()` and `.tobytes()` respectively) so the ref is always dropped well before the producer cycles back ~2 hops later.
+The output is always in `[0, 1]` (same range as L/M/H scaled). `process()` writes into one of two preallocated f32 output buffers and returns the just-written ref, toggling on each call; the returned ref stays valid until two further `process()` calls. `FFTWorker.run` does the same trick for the wire-format `bins_f32` (two preallocated buffers, alternated). Both refs are passed straight into `FFTStore.publish` — no copy on the publish path. The two consumers (OSC publisher, WS encoder) drain the array synchronously inside their handler (via a byteswap-copy into the pre-encoded OSC packet and `.tobytes()` respectively) so the ref is always dropped well before the producer cycles back ~2 hops later.
 
 **`update_*` methods** (called from the asyncio loop on Dispatcher events) all take `_lock` and recompute affected derived state: `update_smoothing` rebuilds `tau_per_bin`; `update_bands` re-anchors it; `update_autoscale` re-derives the attack/release alphas; `update_smear` recomputes σ; `update_tilt` rebuilds the per-bin tilt offsets; `reconfigure` reallocates everything (used on `n_bins` / `sr` / `f_min` / hot-switch). Hop-rate `process()` calls don't allocate — buffers (`smooth_lin`, `peak_lin`, `peak_smoothed`, `interp_db`, two `_processed_buffers`, the sentinel-interp LUT `_empty_idx / _left_idx / _right_idx / _w_left / _w_right / _left_vals / _right_vals`, plus four scratches `_lin / _diff / _alpha / _scratch` and a bool `_mask`) are preallocated.
 
@@ -153,7 +160,7 @@ User-facing knobs (`sensitivity`, `refractory_s`, `slow_tau_s`, `abs_floor`, per
 ### Wire formats
 
 - **WS JSON**: `meta`, `snapshot` (L/M/H raw + scaled, plus `low_onset` / `mid_onset` / `high_onset` ∈ {0,1} and `bpm`), `devices`, `presets`, `server_status`, `error`. Inbound types are listed in `Dispatcher._handlers`. `meta.onset` carries `{low: {sensitivity, refractory_s, slow_tau_s}, mid: {...}, high: {...}}`.
-- **WS binary** (FFT): `[type=1:u8][reserved:u8][n_bins:u16 LE][float32 * n_bins LE]` — see `encode_fft_binary` / `decodeFftBinary` in `ui/src/ws.js`. **Float interpretation depends on `meta.fft_send_raw_db`**: `false` (default) → post-processed `[0..1]`; `true` → raw wire dB with `-1000` sentinels for empty log bins.
+- **WS binary** (FFT): `[type=1:u8][reserved:u8][n_bins:u16 LE][float32 * n_bins LE]` — see `WSServer._encode_fft_binary` (server) / `decodeFftBinary` in `ui/src/ws.js`. **Float interpretation depends on `meta.fft_send_raw_db`**: `false` (default) → post-processed `[0..1]`; `true` → raw wire dB with `-1000` sentinels for empty log bins.
 - **OSC**: `/audio/meta [sr, blocksize, n_fft_bins, low_lo, low_hi, mid_lo, mid_hi, high_lo, high_hi]` — three independent bandpasses, edges in Hz. `/audio/lmh [low, mid, high]` (scaled, per audio block). `/audio/bpm [bpm:f]` (per audio block; `0.0` while not yet locked or after long silence; derived from the low onset stream). `/audio/onset/low [1:i]`, `/audio/onset/mid [1:i]`, `/audio/onset/high [1:i]` (each sent only on that band's onset blocks — absence is silence on the address; constant pre-encoded packet per band, no per-send packing). `/audio/fft [...bins]` (only when `osc.send_fft` is true and FFT is enabled). **Same `send_raw_db` flag controls FFT semantics here**: `false` → `[0..1]` post-processed (matches L/M/H semantics on OSC); `true` → raw dB (sentinels rewritten to `db_floor` so consumers see in-range values).
 
 ### Config / validation
@@ -163,7 +170,7 @@ User-facing knobs (`sensitivity`, `refractory_s`, `slow_tau_s`, `abs_floor`, per
 ## Coding conventions specific to this codebase
 
 - **No allocation in the callback.** Every buffer used by `AudioCallback`, `DSPWorker`, `FFTWorker`, `FFTPostProcessor`, and the ring is preallocated in `__init__` / `_allocate`. New code in those files must use in-place numpy ufuncs (`np.add(..., out=)`, `np.multiply(..., out=)`, `np.fft.rfft(..., out=)`, etc.) — never expressions that allocate. Subtle traps: `np.where(...)` does not accept `out=`, so prefer `fill + np.copyto(..., where=mask)` with a preallocated bool mask; `arr * scalar` and `arr1 + arr2` always allocate (use the ufunc with `out=`); `np.maximum(arr, scalar)` allocates unless given `out=` (repurpose a scratch buffer, e.g. `_alpha`, when its content is no longer needed); `np.square(x)` allocates a length-`x` temp (use `np.dot(x, x)` for RMS²); `bool_arr = arr > 0` allocates (use `np.greater(..., out=mask)` into a preallocated bool mask). The plan's §3.1 has the audit reasoning.
-- **Hop-rate FFT output is double-buffered, not copied.** `FFTWorker._bins_f32_buffers` (×2) and `FFTPostProcessor._processed_buffers` (×2) are preallocated; each producer alternates which buffer it writes into and publishes the just-written ref directly. This holds because the two consumers (OSC `tolist()`, WS `tobytes()`) drop the ref synchronously inside their handler — well before the producer cycles back ~2 hops later. If you add a third consumer that holds the ref across an `await` or hands it to another coroutine, take a copy at that boundary or extend the buffer count.
+- **Hop-rate FFT output is double-buffered, not copied.** `FFTWorker._bins_f32_buffers` (×2) and `FFTPostProcessor._processed_buffers` (×2) are preallocated; each producer alternates which buffer it writes into and publishes the just-written ref directly. This holds because the two consumers (OSC byteswap-copy into the packet template, WS `tobytes()`) drop the ref synchronously inside their handler — well before the producer cycles back ~2 hops later. If you add a third consumer that holds the ref across an `await` or hands it to another coroutine, take a copy at that boundary or extend the buffer count.
 - **Float32 audio path, float64 control state.** Ring slots, mono buffer, FFT window, FFT wire output are float32. Filter `zi` state, smoother values, autoscaler peak/scratch, post-processor internals are float64 for IIR numerical stability and accumulation precision. Don't mix without thinking about it.
 - **Worker-thread reconfiguration goes through a lock or a setter**, not direct attribute assignment from the asyncio loop. `FFTWorker.reconfigure()` and `FFTPostProcessor.{reconfigure, update_*}` take `self._lock`; `ExpSmoother.set_tau()` and `AutoScaler.set_*()` are atomic single-attribute swaps that workers re-read on next iteration.
 - **Drop-oldest, never block.** WS per-client outbound is a `_BoundedDropOldest` (maxsize=4); the broadcast loop and dispatcher reply path both use `put_nowait_drop_oldest`. Never await a slow client.

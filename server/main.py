@@ -2,9 +2,11 @@
 
 Threads:
   - PortAudio C thread runs AudioCallback (memcpy + signal).
-  - DSP worker thread (filter + RMS + smoother + autoscaler -> FeatureStore).
-  - FFT worker thread (optional; window + rfft + log-bin -> FFTStore).
-  - Main asyncio loop: OSC sender, WS server, broadcaster, status.
+  - DSP worker thread (filter + RMS + smoother + autoscaler -> FeatureStore
+    + direct OSC dispatch via OscPublisher).
+  - FFT worker thread (optional; window + rfft + log-bin + post-process
+    -> FFTStore + direct OSC dispatch).
+  - Main asyncio loop: WS server, broadcaster, status, dispatcher, persister.
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ from .audio.callback import AudioCallback
 from .audio.ringbuffer import SlotRing
 from .audio.stream import StreamHandle, open_input_stream
 from .config import CANONICAL_CONFIG_PATH, Config, Persister, config_to_dict, load_config
+from .control import validate as V
 from .control.dispatcher import Dispatcher
 from .dsp.features import AutoScaler, ExpSmoother
 from .dsp.fft import FFTWorker
@@ -209,6 +212,15 @@ class App:
                          hop: int | None = None, f_min: float | None = None) -> None:
         """Reconfigure FFT window/hop/f_min and mirror knobs that depend on
         the resulting Δf_lin / log-bins-per-octave into AutoScaler."""
+        # Validate BEFORE touching the worker: a non-blocksize-aligned
+        # window/hop would leave FFTWorker with a zero-block geometry that
+        # spins without advancing. Raises ValueError (preset loader logs &
+        # skips the section).
+        ok = V.validate_fft_window(window_size=window_size, hop=hop, f_min=f_min,
+                                   blocksize=self.cfg.audio.blocksize)
+        window_size = ok.get("window_size")
+        hop = ok.get("hop")
+        f_min = ok.get("f_min")
         self.fft_worker.reconfigure(window_size=window_size, hop=hop, f_min=f_min)
         if window_size is not None:
             self.cfg.fft.window_size = window_size

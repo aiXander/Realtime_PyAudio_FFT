@@ -58,7 +58,14 @@ function bindDragAware(el, label, fmt, getMsg, snapFn) {
   el.addEventListener("pointerup", commit);
   return {
     read,
-    setValue: (v) => { writeSlider(el, v); label.textContent = fmt(v); },
+    // Ignored mid-drag: every control change triggers a meta broadcast →
+    // syncMeta() → setValue(), and rewriting the slider the user is
+    // currently dragging makes the thumb fight the server echo. Same guard
+    // the freq-axis / FFT band overlays use (`if (drag) return`).
+    setValue: (v) => {
+      if (dragging) return;
+      writeSlider(el, v); label.textContent = fmt(v);
+    },
   };
 }
 
@@ -141,7 +148,11 @@ export function setupControls() {
   smearEl.addEventListener("input",   () => { smearDragging = true; updateSmear(false); });
   smearEl.addEventListener("change",  () => { updateSmear(true); smearDragging = false; });
   smearEl.addEventListener("pointerup", () => { if (smearDragging) { updateSmear(true); smearDragging = false; } });
-  const smearCtl = { setValue: (v) => { smearEl.value = String(Math.round(v * 100)); smearLab.textContent = v <= 0 ? "off" : `${v.toFixed(2)} oct`; } };
+  const smearCtl = { setValue: (v) => {
+    if (smearDragging) return;
+    smearEl.value = String(Math.round(v * 100));
+    smearLab.textContent = v <= 0 ? "off" : `${v.toFixed(2)} oct`;
+  } };
 
   // FFT spectral-tilt slider — slider value is tenths of a dB/oct (-60..120 → -6..12 dB/oct).
   const tiltEl  = document.getElementById("fft-tilt");
@@ -156,6 +167,7 @@ export function setupControls() {
   tiltEl.addEventListener("change",  () => { updateTilt(true); tiltDragging = false; });
   tiltEl.addEventListener("pointerup", () => { if (tiltDragging) { updateTilt(true); tiltDragging = false; } });
   const tiltCtl = { setValue: (v) => {
+    if (tiltDragging) return;
     tiltEl.value = String(Math.round(v * 10));
     tiltLab.textContent = v === 0 ? "flat" : `${v >= 0 ? "+" : ""}${v.toFixed(1)} dB/oct`;
   } };
@@ -184,7 +196,11 @@ export function setupControls() {
   floorEl.addEventListener("input",   () => { floorDragging = true; updateFloor(false); });
   floorEl.addEventListener("change",  () => { updateFloor(true); floorDragging = false; });
   floorEl.addEventListener("pointerup", () => { if (floorDragging) { updateFloor(true); floorDragging = false; } });
-  const floorCtl = { setValue: (f) => { floorEl.value = String(floorToSlider(f)); floorLab.textContent = fmtFloor(f); } };
+  const floorCtl = { setValue: (f) => {
+    if (floorDragging) return;
+    floorEl.value = String(floorToSlider(f));
+    floorLab.textContent = fmtFloor(f);
+  } };
 
   // Master gain — final post-processing multiplier. Slider range 50..150 →
   // 0.5..1.5 (1.0 centered). At gain ≤ 1.0 the slider uses the default UI
@@ -223,6 +239,7 @@ export function setupControls() {
   masterEl.addEventListener("change",    () => { updateMaster(true); masterDragging = false; });
   masterEl.addEventListener("pointerup", () => { if (masterDragging) { updateMaster(true); masterDragging = false; } });
   const masterCtl = { setValue: (v) => {
+    if (masterDragging) return;
     masterEl.value = String(Math.round(v * 100));
     masterLab.textContent = `${v.toFixed(2)}×`;
     paintMaster(v);
@@ -239,7 +256,11 @@ export function setupControls() {
   strengthEl.addEventListener("input", () => { strDragging = true; updateStrength(false); });
   strengthEl.addEventListener("change", () => { updateStrength(true); strDragging = false; });
   strengthEl.addEventListener("pointerup", () => { if (strDragging) { updateStrength(true); strDragging = false; } });
-  const strengthCtl = { setValue: (v) => { strengthEl.value = String(Math.round(v * 100)); strengthLab.textContent = `${Math.round(v * 100)}%`; } };
+  const strengthCtl = { setValue: (v) => {
+    if (strDragging) return;
+    strengthEl.value = String(Math.round(v * 100));
+    strengthLab.textContent = `${Math.round(v * 100)}%`;
+  } };
 
   // Onset detection — sensitivity / refractory / slow envelope τ, PER BAND.
   // One set of sliders edits the currently selected band; the band selector
@@ -272,16 +293,28 @@ export function setupControls() {
   };
   let onsetBand = "low";
   const onsetBandBtns = Array.from(document.querySelectorAll(".onset-band-btn"));
+  // Sliders currently being dragged — renderOnsetSliders skips these so the
+  // meta echo can't fight the user's in-flight drag (same guard as the
+  // other sliders' setValue).
+  const onsetDragging = new Set();
   function renderOnsetSliders() {
     const c = onsetCfg[onsetBand];
-    onsetSensEl.value = String(Math.round(c.sensitivity * 100));
-    onsetSensLab.textContent = fmtSens(onsetSensEl.value);
-    onsetRefrEl.value = String(Math.round(c.refractory_s * 1000));
-    onsetRefrLab.textContent = `${Math.round(parseFloat(onsetRefrEl.value))} ms`;
-    writeSlider(onsetTauEl, Math.round(c.slow_tau_s * 1000));
-    onsetTauLab.textContent = `${Math.round(readSlider(onsetTauEl))} ms`;
-    onsetFloorEl.value = String(Math.round(c.abs_floor * 100));
-    onsetFloorLab.textContent = fmtOnsetFloor(onsetFloorEl.value);
+    if (!onsetDragging.has(onsetSensEl)) {
+      onsetSensEl.value = String(Math.round(c.sensitivity * 100));
+      onsetSensLab.textContent = fmtSens(onsetSensEl.value);
+    }
+    if (!onsetDragging.has(onsetRefrEl)) {
+      onsetRefrEl.value = String(Math.round(c.refractory_s * 1000));
+      onsetRefrLab.textContent = `${Math.round(parseFloat(onsetRefrEl.value))} ms`;
+    }
+    if (!onsetDragging.has(onsetTauEl)) {
+      writeSlider(onsetTauEl, Math.round(c.slow_tau_s * 1000));
+      onsetTauLab.textContent = `${Math.round(readSlider(onsetTauEl))} ms`;
+    }
+    if (!onsetDragging.has(onsetFloorEl)) {
+      onsetFloorEl.value = String(Math.round(c.abs_floor * 100));
+      onsetFloorLab.textContent = fmtOnsetFloor(onsetFloorEl.value);
+    }
   }
   function setOnsetBand(b) {
     if (b === onsetBand) return;
@@ -307,9 +340,10 @@ export function setupControls() {
       onsetCfg[onsetBand][paramKey] = serverVal;
       send({ type: "set_onset", band: onsetBand, [paramKey]: serverVal, commit });
     };
-    el.addEventListener("input", () => { dragging = true; apply(false); });
-    el.addEventListener("change", () => { apply(true); dragging = false; });
-    el.addEventListener("pointerup", () => { if (dragging) { apply(true); dragging = false; } });
+    const endDrag = () => { dragging = false; onsetDragging.delete(el); };
+    el.addEventListener("input", () => { dragging = true; onsetDragging.add(el); apply(false); });
+    el.addEventListener("change", () => { apply(true); endDrag(); });
+    el.addEventListener("pointerup", () => { if (dragging) { apply(true); endDrag(); } });
   }
   bindOnsetSlider(onsetSensEl, onsetSensLab, fmtSens, "sensitivity", (v) => v / 100);
   bindOnsetSlider(onsetRefrEl, onsetRefrLab, (v) => `${Math.round(v)} ms`,
@@ -346,6 +380,7 @@ export function setupControls() {
   wsEl.addEventListener("pointerup", () => { if (wsDragging) { updateWs(true); wsDragging = false; } });
   const wsCtl = {
     setValue: (hz) => {
+      if (wsDragging) return;
       const idx = nearestFpsIdx(hz);
       wsEl.value = String(idx);
       const snapped = UI_FPS_STEPS[idx];
@@ -369,6 +404,7 @@ export function setupControls() {
   peakDecayEl.addEventListener("change",  () => { updatePeakDecay(true); peakDecayDragging = false; });
   peakDecayEl.addEventListener("pointerup", () => { if (peakDecayDragging) { updatePeakDecay(true); peakDecayDragging = false; } });
   const peakDecayCtl = { setValue: (v) => {
+    if (peakDecayDragging) return;
     peakDecayEl.value = String(Math.round(v * 100));
     peakDecayLab.textContent = `${v.toFixed(2)}/s`;
     store.peak_decay_per_s = v;

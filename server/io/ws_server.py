@@ -302,15 +302,5 @@ class WSServer:
         return self.get_server_status()
 
 
-def encode_fft_binary(frame: np.ndarray, gain: float = 1.0) -> bytes:
-    """Wire layout: [type=1:u8][reserved:u8][n_bins:u16][float32 * n_bins] LE."""
-    arr = np.asarray(frame, dtype=np.float32)
-    if gain != 1.0:
-        arr = arr * np.float32(gain)
-    n = int(arr.shape[0])
-    header = struct.pack("<BBH", 1, 0, n)
-    return header + arr.tobytes(order="C")
-
-
 def encode_meta(meta_dict: dict) -> str:
     return json.dumps({"type": "meta", **meta_dict})

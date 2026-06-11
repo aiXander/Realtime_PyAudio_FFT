@@ -97,6 +97,37 @@ def validate_n_fft_bins(n):
     return n
 
 
+def validate_fft_window(window_size=None, hop=None, f_min=None, *, blocksize):
+    """FFT window geometry. Hard invariants only:
+
+    - window_size / hop must be positive multiples of the audio blocksize.
+      FFTWorker._allocate derives its block counts by integer division; a
+      sub-blocksize or non-multiple value leaves the worker with a
+      zero-block window/hop that spins without advancing the read pointer.
+    - f_min must be a positive finite frequency (log-spaced bin edges take
+      log10(f_min)).
+
+    Returns a dict of only the keys that were provided (same shape as
+    validate_autoscale).
+    """
+    out = {}
+    if window_size is not None:
+        if not isinstance(window_size, int) or isinstance(window_size, bool):
+            raise ValueError("window_size must be an int")
+        if window_size < blocksize or window_size % blocksize:
+            raise ValueError(f"window_size must be a positive multiple of blocksize ({blocksize})")
+        out["window_size"] = window_size
+    if hop is not None:
+        if not isinstance(hop, int) or isinstance(hop, bool):
+            raise ValueError("hop must be an int")
+        if hop < blocksize or hop % blocksize:
+            raise ValueError(f"hop must be a positive multiple of blocksize ({blocksize})")
+        out["hop"] = hop
+    if f_min is not None:
+        out["f_min"] = _finite_float(f_min, "f_min", gt=0.0)
+    return out
+
+
 def validate_autoscale(tau_attack_s=None, tau_release_s=None, noise_floor=None, strength=None,
                        master_gain=None):
     out = {}

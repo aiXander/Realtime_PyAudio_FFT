@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Learnings — Realtime-beat-tracking + madmom internals</title>
+<style>
+  :root {
+    --bg: #0e0f12;
+    --panel: #16181d;
+    --panel-2: #1c1f26;
+    --text: #e6e8ee;
+    --muted: #8a92a3;
+    --accent: #7cffb2;
+    --accent-2: #ffd166;
+    --accent-3: #ef476f;
+    --good: #7cffb2;
+    --warn: #ffd166;
+    --bad: #ef476f;
+    --code-bg: #0a0b0e;
+    --border: #262a33;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: ui-sans-serif, -apple-system, "Inter", "SF Pro Text", Helvetica, Arial, sans-serif;
+    background:
+      radial-gradient(1200px 800px at 10% -10%, rgba(124,255,178,0.05), transparent 60%),
+      radial-gradient(900px 700px at 90% 0%, rgba(239,71,111,0.04), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+    padding: 48px 24px 96px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  header.hero {
+    border: 1px solid var(--border);
+    background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+    border-radius: 16px;
+    padding: 28px 32px;
+    margin-bottom: 32px;
+  }
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  h1 {
+    margin: 0 0 8px;
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  h1 span.accent { color: var(--accent); }
+  .lede {
+    color: var(--muted);
+    margin: 8px 0 0;
+    font-size: 15px;
+  }
+  h2 {
+    font-size: 18px;
+    margin: 48px 0 14px;
+    letter-spacing: -0.005em;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+  }
+  h2 .num {
+    display: inline-block;
+    color: var(--accent);
+    margin-right: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  h3 { font-size: 15px; margin: 22px 0 6px; }
+  h4 { font-size: 13.5px; margin: 14px 0 4px; color: var(--accent-2); letter-spacing: 0.01em; }
+  p { margin: 8px 0; }
+  code, kbd, .mono {
+    font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+  }
+  code {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: #cfd6e4;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    line-height: 1.5;
+    margin: 10px 0;
+    color: #cfd6e4;
+  }
+  pre .c { color: var(--muted); }
+  .grid-summary {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-top: 18px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .card .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .card .value { font-size: 14px; }
+
+  .tech {
+    border: 1px solid var(--border);
+    background: var(--panel);
+    border-radius: 12px;
+    padding: 18px 20px;
+    margin: 14px 0;
+    position: relative;
+  }
+  .tech.adopt { border-left: 3px solid var(--good); }
+  .tech.consider { border-left: 3px solid var(--warn); }
+  .tech.skip { border-left: 3px solid var(--bad); }
+  .verdict {
+    display: inline-block;
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 999px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .verdict.adopt { background: rgba(124,255,178,0.12); color: var(--good); border: 1px solid rgba(124,255,178,0.3); }
+  .verdict.consider { background: rgba(255,209,102,0.12); color: var(--warn); border: 1px solid rgba(255,209,102,0.3); }
+  .verdict.skip { background: rgba(239,71,111,0.12); color: var(--bad); border: 1px solid rgba(239,71,111,0.3); }
+  .tech h3 { margin-top: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; }
+  .meta-row {
+    color: var(--muted);
+    font-size: 12.5px;
+    margin: 6px 0 10px;
+  }
+  .meta-row .ref { color: #b6bdcd; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 4px 0; }
+  .pill {
+    display: inline-block;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    margin-right: 6px;
+  }
+  .pill.good { color: var(--good); border-color: rgba(124,255,178,0.3); }
+  .pill.warn { color: var(--warn); border-color: rgba(255,209,102,0.3); }
+  .callout {
+    background: linear-gradient(180deg, rgba(124,255,178,0.06), rgba(124,255,178,0.02));
+    border: 1px solid rgba(124,255,178,0.2);
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin: 16px 0;
+  }
+  .callout.warn {
+    background: linear-gradient(180deg, rgba(239,71,111,0.06), rgba(239,71,111,0.02));
+    border-color: rgba(239,71,111,0.25);
+  }
+  .callout.neutral {
+    background: linear-gradient(180deg, rgba(255,209,102,0.04), rgba(255,209,102,0.01));
+    border-color: rgba(255,209,102,0.2);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 13px;
+  }
+  th, td {
+    border-bottom: 1px solid var(--border);
+    padding: 8px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; }
+  td.mono-cell { font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; color: #cfd6e4; }
+  .toc {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin: 24px 0;
+    font-size: 13px;
+  }
+  .toc strong { color: var(--accent); }
+  .toc a { color: #cfd6e4; text-decoration: none; margin-right: 14px; }
+  .toc a:hover { color: var(--accent); }
+
+  .effort-tag { font-size: 11px; color: var(--muted); margin-left: 8px; font-weight: normal; }
+  .effort-tag strong { color: var(--accent-2); font-weight: 600; }
+
+  footer {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 48px;
+    text-align: center;
+  }
+  @media (max-width: 720px) {
+    .grid-summary { grid-template-columns: 1fr; }
+    body { padding: 24px 14px 64px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">Investigation — algorithmic mining</div>
+  <h1>Learnings from <span class="accent">Realtime-beat-tracking</span> + <span class="accent">madmom</span> internals</h1>
+  <p class="lede">
+    Two passes. First: the 2018 outer wrapper (mostly a multiprocessing scaffold around madmom).
+    Second: the actual madmom source under <code>madmom/features/</code> — the algorithms that matter.
+    Updated 2026-05-15.
+  </p>
+
+  <div class="grid-summary">
+    <div class="card">
+      <div class="label">Outer wrapper</div>
+      <div class="value">Skip the code. Two conceptual ideas: <strong>beat phase</strong> + <strong>tempogram</strong>. Everything else violates our realtime/alloc invariants.</div>
+    </div>
+    <div class="card">
+      <div class="label">madmom internals</div>
+      <div class="value">Three porting wins: <strong>SuperFlux ODF</strong>, <strong>comb-filter tempo</strong>, <strong>phase-locked aligner</strong>. ~150 lines, ~1 day total.</div>
+    </div>
+    <div class="card">
+      <div class="label">What we don't need</div>
+      <div class="value">RNN models, multi-resolution STFT stack, full DBN bar-position state space, phase-based ODFs.</div>
+    </div>
+  </div>
+</header>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <a href="#wrapper">1. Outer wrapper</a>
+  <a href="#odf">2. ODFs</a>
+  <a href="#peak">3. Peak picking</a>
+  <a href="#tempo">4. Tempo (comb)</a>
+  <a href="#beats">5. Beat trackers</a>
+  <a href="#dbn">6. DBN</a>
+  <a href="#downbeat">7. Downbeat</a>
+  <a href="#constants">8. Constants</a>
+  <a href="#plan">9. Port plan</a>
+</div>
+
+<!-- ================== PART 1: OUTER WRAPPER ================== -->
+<h2 id="wrapper"><span class="num">01</span>The outer wrapper (Realtime-beat-tracking, 2018)</h2>
+<p>
+  A <code>pyaudio</code> recorder process appends 20&nbsp;ms <em>int16</em> chunks into a giant
+  <code>multiprocessing.Array('d', samp_rate*60*3)</code> shared buffer
+  (<span class="mono">audio_interface_control.py:51-68</span>). An "operation center"
+  (<span class="mono">main.py:225-336</span>) round-robins
+  <strong>10-second audio windows</strong> to worker processes (one per physical core minus one,
+  <span class="mono">main.py:78-79</span>). Each worker
+  (<span class="mono">single_worker.py:60-77</span>) runs madmom's
+  <code>RNNDownBeatProcessor</code> → <code>DBNDownBeatTrackingProcessor</code> to get beat times +
+  downbeat positions. Predictions are reconciled across overlapping workers
+  (<span class="mono">beat_tracking_util.py:90-110</span>).
+</p>
+<p>
+  The novelty is the parallel scheduling, not the DSP. For us this is mostly an anti-reference.
+</p>
+
+<div class="callout warn">
+<strong>Avoid copying from the outer wrapper:</strong>
+<ul>
+  <li>Multiprocessing + giant <code>multiprocessing.Array</code> (<span class="mono">main.py:48-53, 97-111</span>). Wrong model — we use threads + lock-guarded stores.</li>
+  <li><code>np.hstack</code> into an ever-growing array inside the audio callback path (<span class="mono">audio_interface_control.py:96-129</span>) — exactly the allocation-in-callback antipattern.</li>
+  <li>Deprecated APIs: <code>np.fromstring</code>, <code>librosa.output.write_wav</code>, Python 2 (<span class="mono">audio_interface_control.py:23, 49, 55</span>).</li>
+  <li>10-second decision latency (<span class="mono">main.py:76</span>). Incompatible with realtime visuals.</li>
+  <li><code>time.sleep</code>-driven busy-wait coordination + random worker assignment (<span class="mono">main.py:69, 156, 175, 226, 270</span>).</li>
+  <li><code>np.median</code>/<code>np.mean</code> on length-3/length-8 arrays in inner loops (<span class="mono">beat_tracking_util.py:66, 79-86</span>) — numpy-ufunc-overhead trap we already avoid by unrolling.</li>
+</ul>
+</div>
+
+<!-- ================== PART 2: MADMOM INTERNALS ================== -->
+<h2 id="odf"><span class="num">02</span>Onset Detection Functions — <code>onsets.py</code></h2>
+<p>
+  All ODFs operate on a magnitude spectrogram <code>S[t, k]</code> (typically log-filtered onto
+  24 bands/octave). Method registry: <span class="mono">onsets.py:645-649</span>.
+</p>
+
+<table>
+<tr><th>ODF</th><th>Formula</th><th>Source</th><th>Cost</th><th>Notes</th></tr>
+<tr>
+  <td><strong>Spectral Flux</strong></td>
+  <td class="mono-cell">SF[t] = Σ_k max(0, S[t,k] − S[t−τ,k])</td>
+  <td class="mono-cell">onsets.py:163-193</td>
+  <td>cheap</td>
+  <td>Canonical baseline. L1 of half-wave-rectified spectral diff.</td>
+</tr>
+<tr>
+  <td><strong>Spectral Diff</strong></td>
+  <td class="mono-cell">SD[t] = Σ_k max(0, S[t,k] − S[t−τ,k])²</td>
+  <td class="mono-cell">onsets.py:130-160</td>
+  <td>cheap</td>
+  <td>L2 variant. Slightly peakier.</td>
+</tr>
+<tr>
+  <td><strong>SuperFlux</strong> ⭐</td>
+  <td class="mono-cell">SuF[t] = Σ_k max(0, S[t,k] − max<sub>j∈[k−M,k+M]</sub> S[t−τ,j])</td>
+  <td class="mono-cell">onsets.py:196-240</td>
+  <td>cheap</td>
+  <td>SF with a frequency-axis max-filter on the previous frame. Suppresses vibrato. <code>diff_max_bins=3</code> ⇒ M=1.</td>
+</tr>
+<tr>
+  <td><strong>ComplexFlux</strong></td>
+  <td class="mono-cell">SuperFlux × local group-delay mask</td>
+  <td class="mono-cell">onsets.py:245-317</td>
+  <td>med</td>
+  <td>Needs phase. Best classical ODF for sustained-pitch material.</td>
+</tr>
+<tr>
+  <td>HFC</td>
+  <td class="mono-cell">HFC[t] = mean_k (k · S[t,k])</td>
+  <td class="mono-cell">onsets.py:102-127</td>
+  <td>trivial</td>
+  <td>Great for hats/snares, terrible for kicks.</td>
+</tr>
+<tr>
+  <td>Modified KL</td>
+  <td class="mono-cell">MKL[t] = mean_k log(1 + S[t,k]/(S[t−τ,k]+ε))</td>
+  <td class="mono-cell">onsets.py:320-362</td>
+  <td>cheap</td>
+  <td>Relative (not absolute) flux — invariant to level. Robust under compression.</td>
+</tr>
+<tr>
+  <td>Phase Dev / Cplx Domain</td>
+  <td class="mono-cell">phase-based variants</td>
+  <td class="mono-cell">onsets.py:365-581</td>
+  <td>med</td>
+  <td>Niche. SuperFlux family already covers the realtime use case.</td>
+</tr>
+</table>
+
+<div class="callout">
+<strong>What to take:</strong> Our current detector runs on 3 post-processed L/M/H scalars per block — effectively a 3-bin SF on bands we've already tilted, smoothed, and AutoScaled. Moving to <strong>per-bin SuperFlux on the FFTPostProcessor's log-spaced bins</strong> at hop rate (~100 Hz) is the single most impactful upgrade available: it's the canonical realtime ODF, we already have the right data structure (log-spaced log-mag bins), and the math is <em>three ops per hop</em>:
+<pre><span class="c"># prev_max ← max-filter of previous bins across ±1 bin (reflect)</span>
+np.maximum(prev[:-2], prev[1:-1], out=prev_max[1:-1])
+np.maximum(prev_max[1:-1], prev[2:], out=prev_max[1:-1])
+<span class="c"># flux ← Σ max(0, cur − prev_max)</span>
+np.subtract(cur, prev_max, out=diff)
+np.maximum(diff, 0.0, out=diff)
+flux = diff.sum()
+</pre>
+Alloc-free, microseconds per hop. SuperFlux is monotonically related to our fast-minus-slow envelope but operates <em>pre</em>-AutoScale, so the spectral contour of the transient is preserved instead of being smashed into 3 numbers. Kick / snare / hat become reliably separable even when L/M/H edges aren't ideal for the genre.
+</div>
+
+<h2 id="peak"><span class="num">03</span>Peak-picking — <code>peak_picking</code> at <span class="mono">onsets.py:874-963</span></h2>
+<p>Three-stage filter on a 1D activation <code>a[t]</code>:</p>
+<ol>
+  <li><strong>Smooth</strong>: optional Hamming convolution (off by default for NN activations).</li>
+  <li><strong>Adaptive-threshold gate</strong>: <code>m[t] = uniform_filter(a, size=pre_avg+post_avg+1, origin=...)</code>; keep <code>a[t] ≥ m[t] + threshold</code>.</li>
+  <li><strong>Local-max gate</strong>: <code>M[t] = maximum_filter(detections, size=pre_max+post_max+1, ...)</code>; keep <code>detections[t] == M[t]</code>.</li>
+  <li><strong>Combine</strong> within ±<code>combine</code> seconds (default 30&nbsp;ms, <span class="mono">onsets.py:1039</span>).</li>
+</ol>
+<p>
+  Online wrapper <code>OnsetPeakPickingProcessor</code> (<span class="mono">onsets.py:966-1107</span>)
+  sets <code>post_*=0</code>, <code>smooth=0</code>, and combines with <code>'left'</code> so the
+  <em>first</em> of a near-duplicate cluster is reported.
+</p>
+<p>
+  For SF-style ODFs the paper-tuned values are
+  <code>pre_avg≈100ms / post_avg≈70ms / pre_max≈30ms / post_max≈30ms / threshold≈1.25</code>
+  (Böck 2012). Defaults at <span class="mono">onsets.py:1032-1041</span>.
+</p>
+
+<div class="callout neutral">
+<strong>Comparing to our Schmitt-trigger:</strong> Our existing detector is roughly the online
+equivalent of stages 2+3 collapsed — slow envelope ≈ <code>pre_avg</code>,
+<code>sensitivity × slow</code> ≈ <code>threshold</code>, refractory ≈ <code>combine</code>.
+The piece we <em>lack</em> is an explicit local-maximum check: our
+<code>nov &gt; thr_high</code> fires on the first frame above threshold, not the peak.
+For sharp transients that's 1-2 frames of jitter; for slow swells it can fire ~50&nbsp;ms early.
+<br/><br/>
+<strong>Cheap fix:</strong> track <code>nov_prev[i]</code> and fire only on the falling edge
+(<code>state == armed AND nov[i] &lt; nov_prev[i]</code>) — we cross the threshold to arm, then
+fire on the frame after the peak. One extra scalar comparison per band per block, removes onset-time jitter.
+</div>
+
+<h2 id="tempo"><span class="num">04</span>Tempo estimation — <code>tempo.py</code></h2>
+
+<h3>Comb-filter method (default, online-friendly)</h3>
+<p>
+  For each delay τ ∈ [min_τ, max_τ] (in frames), run a <strong>backward IIR comb</strong> on the
+  activation <code>a[n]</code>:
+</p>
+<pre>y_τ[n] = a[n] + α · y_τ[n − τ]     <span class="c"># α = ALPHA = 0.79 (tempo.py:22)</span>
+</pre>
+<p>
+  Online variant (<span class="mono">tempo.py:375-418</span>): maintain a 2D buffer
+  <code>_comb_buffer[max_τ+1, n_taus]</code>, update with
+  <code>y_n = act + α · _comb_buffer[-intervals]</code>, argmax-pool into a histogram over the last
+  <code>HIST_BUFFER = 10&nbsp;s</code> (<span class="mono">tempo.py:27</span>).
+</p>
+<p>
+  For our use case: ~70 IIRs at 100&nbsp;Hz ≈ 7 kops. Trivial. No FFT, no autocorrelation, no NN.
+</p>
+
+<h3>ACF method (alternative)</h3>
+<p>
+  <code>bins[τ] = Σ_n a[n] · a[n − τ]</code> (<span class="mono">tempo.py:62-106</span>).
+  Equivalent to a comb with α=0. Simpler but less robust at noisy activations — the resonant comb
+  integrates evidence in phase, ACF doesn't.
+</p>
+
+<h3>Picking the tempo (<code>detect_tempo</code>, <span class="mono">tempo.py:198-255</span>)</h3>
+<ol>
+  <li>Quadratic-interp histogram for sub-bin resolution.</li>
+  <li><code>bpm = 60·fps/τ</code>.</li>
+  <li><code>scipy.signal.argrelmax(bins, mode='wrap')</code> — local maxima with edge wrap.</li>
+  <li>Smoothing: <code>act_smooth=0.14&nbsp;s</code> Hamming on activation; <code>hist_smooth=9 bins</code> on the histogram.</li>
+  <li>Range: <code>MIN_BPM=40, MAX_BPM=250</code>.</li>
+</ol>
+<p>
+  <strong>No log-Gaussian prior, no common-tempo bias, no octave-folding.</strong> The histogram is
+  the prior — the α=0.79 leak naturally biases comb response toward the fundamental, not its multiples.
+  Typical failure mode is half-tempo doubling on dense music, not octave errors.
+</p>
+
+<div class="callout">
+<strong>Why this replaces our median-of-12-IOIs:</strong> Our IOI estimator is brittle to missed
+or spurious onsets — a single missed kick injects a 2× IOI that pollutes the median window for the
+next 12 onsets (~6 seconds at 120 BPM). The comb integrates evidence <em>in phase</em>: a missed
+onset just dips the right τ's resonance for one hop, doesn't move the argmax. Pairs naturally with
+SuperFlux (feed flux directly into the comb).
+</div>
+
+<h2 id="beats"><span class="num">05</span>Beat-tracking algorithms — <code>beats.py</code></h2>
+
+<h3>Comb-filter aligner (Böck-Schedl 2011) <span class="effort-tag">⭐ port candidate</span></h3>
+<p>
+  <code>BeatTrackingProcessor</code> (<span class="mono">beats.py:385-525</span>),
+  <code>detect_beats</code> (<span class="mono">beats.py:301-381</span>).
+</p>
+<ol>
+  <li>Smooth activation with Hamming over 0.09–0.14&nbsp;s.</li>
+  <li>Estimate dominant interval τ via comb-filter histogram (above).</li>
+  <li>For each candidate start phase φ ∈ [0, τ):
+    score <code>Σ_n a[φ + n·τ] · w(offset)</code> where <code>w</code> is a Hamming centered on
+    the expected position; argmax to snap; recurse at <code>position + interval</code>.</li>
+  <li>Pick the φ with highest total score; emit beat sequence.</li>
+</ol>
+<p>
+  Look-ahead variant (<span class="mono">beats.py:494-520</span>) re-estimates interval in a ±10&nbsp;s
+  window per beat — allows tempo drift. Constants:
+  <code>LOOK_ASIDE=0.2</code>, <code>LOOK_AHEAD=10&nbsp;s</code>
+  (<span class="mono">beats.py:450-451</span>).
+</p>
+<p>
+  In pure-math terms: <strong>template alignment</strong>. Given τ from the tempogram, try all
+  phases, score each with a Hamming-windowed sum over expected positions, pick the best.
+  This <em>is</em> what we want for phase-locked beat prediction.
+</p>
+
+<h3>CRF beat tracker — <code>beats_crf.pyx</code></h3>
+<ul>
+  <li><strong>Initial dist</strong> (<span class="mono">beats_crf.pyx:29-51</span>): uniform over first τ frames.</li>
+  <li><strong>Transition dist</strong> (<span class="mono">beats_crf.pyx:54-81</span>): <code>norm.pdf(log2(j), loc=log2(τ), scale=INTERVAL_SIGMA)</code> for j ∈ [0, 2τ). <code>INTERVAL_SIGMA=0.18</code> in log2 units ≈ ±18% tempo wiggle per beat.</li>
+  <li><strong>Viterbi</strong> (<span class="mono">beats_crf.pyx:146-242</span>): max over <code>v_p[i−j] + transition[j]</code>; backtrack from final argmax.</li>
+</ul>
+<p>
+  Tractable online (length × τ ≈ length × 60). But you only get one tempo per call (picked up front).
+  The comb-aligner above is simpler and produces equivalent output for our purposes.
+</p>
+
+<h2 id="dbn"><span class="num">06</span>DBN state space — <code>beats_hmm.py</code></h2>
+<p>
+  <code>BeatStateSpace</code> (<span class="mono">beats_hmm.py:23-99</span>): for each modeled
+  interval τ (in frames, integer), allocate τ states with
+  <code>state_positions = linspace(0, 1, τ, endpoint=False)</code>.
+  Total states = Σ τ over the tempo grid.
+</p>
+<p>
+  At <code>min_bpm=55, max_bpm=215, fps=100</code>: τ ∈ [28, 109], ~5500 states naive;
+  <code>num_tempi=60</code> log-spaced caps it at ~3500.
+</p>
+<p>
+  <strong>Transition</strong> (<span class="mono">beats_hmm.py:272-325</span>): within a beat,
+  <code>state[t+1] = state[t]+1</code>; at boundary, prob ∝
+  <code>exp(−λ · |τ_to/τ_from − 1|)</code> with <code>TRANSITION_LAMBDA=100</code>
+  (<span class="mono">beats.py:948</span>). Higher λ ⇒ stickier tempo.
+</p>
+<p>
+  <strong>Observation</strong> (<span class="mono">beats_hmm.py:513-573</span>): each state is
+  <em>beat</em> if <code>state_position &lt; 1/OBSERVATION_LAMBDA</code> (first 6.25% of beat,
+  with <code>OBSERVATION_LAMBDA=16</code>), <em>non-beat</em> otherwise. Densities are
+  <code>log(a[t])</code> for beat, <code>log((1 − a[t]) / (λ − 1))</code> for non-beat. The
+  (λ−1) normalisation makes the two compete fairly across 15/16 non-beat states.
+</p>
+
+<div class="callout neutral">
+<strong>Tractability for us:</strong> ~3500 states × 100&nbsp;Hz × ~10 sparse transitions ≈
+2 Mops/s. Doable in pure numpy. <strong>But</strong> the DBN's killer feature — joint
+inference of tempo and phase from a noisy <em>continuous-valued</em> activation — only matters
+if you have a high-quality activation in the first place. Feeding a sparse 0/1 onset stream
+into the DBN works but loses most of the dynamic information that makes it beat the
+"predict at last+IOI" baseline. <strong>Valuable only if SuperFlux is in first.</strong>
+</div>
+
+<h2 id="downbeat"><span class="num">07</span>Downbeat detection — <code>downbeats.py</code></h2>
+<p>
+  <strong>Verdict: model-driven only.</strong> There is <em>no signal-level "kick on the 1"
+  heuristic anywhere in madmom</em>. Downbeat tracking requires the separately-trained
+  <code>RNNDownBeatProcessor</code> (<span class="mono">downbeats.py:30-95</span>) outputting a
+  2-column activation. The DBN then has 2–4 beat bar state spaces
+  (<code>BarStateSpace</code>, <span class="mono">beats_hmm.py:102-169</span>) and a third
+  observation column (<code>RNNDownBeatTrackingObservationModel</code>,
+  <span class="mono">beats_hmm.py:576-638</span>).
+</p>
+<p>
+  No low-hanging fruit here. If we want downbeat without an RNN, the classic heuristic (which
+  madmom doesn't use) is <strong>low-band energy correlation at beat positions</strong>: cumulate
+  <code>low_energy[beat_k] · cos(2πk/N)</code> for N ∈ {2, 3, 4}, pick N + phase with maximum
+  response. Coarse but useful — leaves us with a <code>/audio/beat/count ∈ {1..N}</code>.
+</p>
+
+<h2 id="constants"><span class="num">08</span>Numerical constants worth borrowing</h2>
+<table>
+<tr><th>Constant</th><th>Value</th><th>Source</th><th>Use</th></tr>
+<tr><td>Frame rate (FPS)</td><td>100 Hz</td><td class="mono-cell">all processors</td><td>Standard hop rate. At sr=48k, hop=480 hits exactly 100 Hz. We currently use hop=512 → 93.75 Hz.</td></tr>
+<tr><td>STFT online</td><td class="mono-cell">{512, 1024, 2048}</td><td class="mono-cell">beats.py:84, onsets.py:770</td><td>Multi-resolution stack for RNNs — not needed if we don't port the NN front-end.</td></tr>
+<tr><td>Log filter</td><td>12 bands/oct online, 24 offline</td><td class="mono-cell">onsets.py:770-790</td><td>Our FFTPostProcessor already gives log-spaced bins.</td></tr>
+<tr><td>ACT_SMOOTH</td><td>0.14 s Hamming</td><td class="mono-cell">tempo.py:25</td><td>Activation pre-smoothing before comb.</td></tr>
+<tr><td>HIST_SMOOTH</td><td>9 bins Hamming</td><td class="mono-cell">tempo.py:26</td><td>Tempo histogram smoothing.</td></tr>
+<tr><td>ALPHA (comb)</td><td>0.79</td><td class="mono-cell">tempo.py:22</td><td>Comb leak. Biases against half-tempo doubling.</td></tr>
+<tr><td>HIST_BUFFER</td><td>10 s</td><td class="mono-cell">tempo.py:27</td><td>Rolling tempogram window.</td></tr>
+<tr><td>MIN/MAX_BPM (tempo)</td><td>40 / 250</td><td class="mono-cell">tempo.py:23-24</td><td>General-purpose range.</td></tr>
+<tr><td>MIN/MAX_BPM (beats)</td><td>55 / 215</td><td class="mono-cell">beats.py:945-946</td><td>Beat-tracking range. Our [60, 180] is fine.</td></tr>
+<tr><td>TRANSITION_LAMBDA</td><td>100</td><td class="mono-cell">beats.py:948</td><td>DBN tempo stickiness.</td></tr>
+<tr><td>OBSERVATION_LAMBDA</td><td>16</td><td class="mono-cell">beats.py:949</td><td>1/16 of beat = "beat state".</td></tr>
+<tr><td>NUM_TEMPI</td><td>60 log-spaced</td><td class="mono-cell">downbeats.py:195</td><td>State-space capping.</td></tr>
+<tr><td>INTERVAL_SIGMA (CRF)</td><td>0.18 (log2)</td><td class="mono-cell">beats.py:711</td><td>±18% tempo wiggle per beat.</td></tr>
+<tr><td>SuperFlux <code>diff_max_bins</code></td><td>3 (M=1)</td><td class="mono-cell">onsets.py:196-240</td><td>±1-bin max-filter for vibrato suppression.</td></tr>
+<tr><td>SuperFlux <code>diff_frames</code></td><td>1–2 frames</td><td class="mono-cell">onsets.py</td><td>10–20 ms diff at 100 Hz.</td></tr>
+<tr><td>Peak-pick combine</td><td>30 ms</td><td class="mono-cell">onsets.py:1039</td><td>Onset cluster dedup window.</td></tr>
+<tr><td>LOOK_ASIDE (aligner)</td><td>0.2</td><td class="mono-cell">beats.py:450</td><td>Hamming window half-width as fraction of interval.</td></tr>
+<tr><td>LOOK_AHEAD (aligner)</td><td>10 s</td><td class="mono-cell">beats.py:451</td><td>Window for per-beat tempo re-estimation.</td></tr>
+</table>
+
+<!-- ================== PRIORITIZED PORT PLAN ================== -->
+<h2 id="plan"><span class="num">09</span>Prioritized port plan</h2>
+
+<div class="tech adopt">
+<h3>1. SuperFlux ODF on FFT bins<span class="verdict adopt">Adopt</span><span class="effort-tag">~2 hours · <strong>highest value</strong></span></h3>
+<div class="meta-row">
+  <span class="pill good">Canonical realtime ODF</span>
+  <span class="pill">Alloc-free</span>
+  <span class="ref">Study: <span class="mono">onsets.py:196-240</span></span>
+</div>
+<p>
+  <strong>Port</strong>: ~30 lines into a new <code>server/dsp/flux.py</code> (or extend
+  <code>onset.py</code>). Keep one previous-hop copy of the FFTPostProcessor's bin array; per hop
+  compute <code>prev_max = maximum_filter1d(prev, size=3, mode='reflect')</code>,
+  <code>flux = max(0, cur − prev_max).sum()</code>. Feed <code>flux</code> into the existing
+  Schmitt-trigger infrastructure (per-band by partitioning bin range into low/mid/high
+  sub-ranges, summed independently).
+</p>
+<p>
+  <strong>Why</strong>: Replaces 3-band coarse novelty with the canonical realtime ODF. Tightens
+  kick/snare/hat separation, especially when L/M/H edges aren't well-aligned for the genre.
+  Hop rate (~100 Hz) instead of block rate (~187 Hz) is fine for beat tracking; keep the per-band
+  L/M/H Schmitt for downstream consumers that need block-rate triggers.
+</p>
+</div>
+
+<div class="tech adopt">
+<h3>2. Comb-filter tempo estimator<span class="verdict adopt">Adopt</span><span class="effort-tag">~1 day · high value</span></h3>
+<div class="meta-row">
+  <span class="pill good">Robust to missed onsets</span>
+  <span class="pill">~7 kops at 100 Hz</span>
+  <span class="ref">Study: <span class="mono">tempo.py:109-163, 375-418, 198-255</span></span>
+</div>
+<p>
+  <strong>Port</strong>: ~80 lines. Online comb-filter bank — maintain
+  <code>_comb_buffer[max_tau+1, n_taus]</code> (~100 × 60 × float64 ≈ 50 KB), per hop do
+  <code>y = a + α · _comb_buffer[−intervals]</code>; argmax-pool into
+  <code>_hist_buffer[10s, n_taus]</code> ring; every 1 s compute
+  <code>argmax(sum(hist, axis=0))</code> → BPM.
+</p>
+<p>
+  <strong>Why</strong>: Replaces median-of-12-IOIs, which is brittle to missed/spurious onsets.
+  Pairs naturally with #1 — feeding SuperFlux directly into the comb is the textbook approach.
+  Same machinery later gives us per-tempo confidence (the histogram), which lets the BPM
+  decay-to-0 logic become a confidence threshold instead of a 5&nbsp;s timeout.
+</p>
+</div>
+
+<div class="tech adopt">
+<h3>3. Phase-locked beat aligner<span class="verdict adopt">Adopt</span><span class="effort-tag">~½ day on top of #2</span></h3>
+<div class="meta-row">
+  <span class="pill good">Predictive beat times</span>
+  <span class="pill">OSC: phase + next_beat</span>
+  <span class="ref">Study: <span class="mono">beats.py:301-381, 450-451</span></span>
+</div>
+<p>
+  <strong>Port</strong>: ~50 lines. Given tempo τ from #2, maintain phase φ ∈ [0, τ). Once per
+  hop: if <code>flux[t] &gt; threshold</code>, snap φ ← (<code>t mod τ</code>) weighted by a
+  Hamming around the expected position (exactly <code>detect_beats</code>'s windowed argmax);
+  else let φ advance. Predicted next beat =
+  <code>t + ((φ − (t mod τ)) mod τ)</code>. Fire when crossed.
+</p>
+<p>
+  <strong>Why</strong>: Closes the "beat prediction" item. Adds
+  <code>/audio/beat/phase ∈ [0,1)</code> and <code>/audio/beat/next_t</code> — downstream
+  visuals can render anticipatory between-beat motion (ramps that hit zero on the kick,
+  beat-quantised cues). High-payoff for vibe-coding / VJ use.
+</p>
+</div>
+
+<div class="tech adopt">
+<h3>4. Falling-edge fire for Schmitt-trigger<span class="verdict adopt">Adopt</span><span class="effort-tag">15 min · trivial</span></h3>
+<div class="meta-row">
+  <span class="pill">Removes 1-2 frame jitter</span>
+  <span class="ref">Study: <span class="mono">onsets.py:942-956</span></span>
+</div>
+<p>
+  <strong>Port</strong>: ~5 lines. Track <code>nov_prev[i]</code>; fire on
+  <code>state == armed AND nov[i] &lt; nov_prev[i]</code>. Aligns onset time with the actual peak
+  instead of the threshold crossing.
+</p>
+<p>
+  <strong>Why</strong>: Free upgrade. Tightens onset timing accuracy without changing detection
+  rate. Helps #3's phase-snap because each snap is anchored on the true peak.
+</p>
+</div>
+
+<div class="tech consider">
+<h3>5. Mini-DBN beat tracker<span class="verdict consider">Long-term</span><span class="effort-tag">~3 days</span></h3>
+<div class="meta-row">
+  <span class="pill warn">Only valuable after #1-#3</span>
+  <span class="ref">Study: <span class="mono">beats_hmm.py:23-99, 221-325, 513-573; beats.py:1064-1142</span></span>
+</div>
+<p>
+  <strong>Port</strong>: ~300 lines. Build <code>BeatStateSpace</code> with ~60 log-spaced tempi
+  over [60, 180] BPM at 100 Hz, sparse exponential transition (λ=100), 1/16-of-beat observation
+  model. Online forward: <code>α[t+1] = obs · (T · α[t])</code>. Argmax state → (tempo, phase).
+</p>
+<p>
+  <strong>Why / why-not</strong>: Strictly more robust than #3 — handles tempo drift gracefully,
+  never has to "pick" between octave candidates because both states stay alive in the posterior.
+  But only shines with a smooth-valued continuous activation (#1's output). Skip until
+  #1-#4 prove insufficient.
+</p>
+</div>
+
+<div class="tech consider">
+<h3>6. Downbeat counter via low-band emphasis heuristic<span class="verdict consider">Consider</span><span class="effort-tag">~½ day</span></h3>
+<div class="meta-row">
+  <span class="pill">Not in madmom — heuristic only</span>
+</div>
+<p>
+  <strong>Port</strong>: cumulate <code>low_energy[beat_k] · cos(2πk/N)</code> for N ∈ {2,3,4},
+  pick the (N, phase) with maximum response. Emit
+  <code>/audio/beat/count ∈ {1..N}</code>. Coarse, no model, but instantly useful for visuals.
+</p>
+<p>
+  madmom does this with an RNN trained on labels — we can't replicate that without the model.
+  The heuristic is a pragmatic substitute. Only worthwhile after #3 because it needs phase-aligned
+  beat times.
+</p>
+</div>
+
+<!-- ================== TLDR ================== -->
+<h2><span class="num">10</span>TL;DR</h2>
+<div class="callout">
+<p>
+  The 2018 outer wrapper is mostly anti-reference (mp scaffolding, allocation in callbacks,
+  10&nbsp;s latency). The <strong>actual algorithmic gold</strong> is in
+  <code>madmom/features/</code>:
+</p>
+<ol>
+  <li><strong>SuperFlux on our FFT bins</strong> → canonical realtime ODF, ~30 lines, immediate kick/snare/hat separation upgrade.</li>
+  <li><strong>Comb-filter tempo</strong> → replaces median-of-IOIs, robust to missed onsets, ~80 lines.</li>
+  <li><strong>Phase-locked aligner</strong> → predictive <code>/audio/beat/phase</code> + <code>/audio/next_beat_in</code>, ~50 lines.</li>
+  <li><strong>Falling-edge Schmitt fire</strong> → 5-line accuracy upgrade.</li>
+</ol>
+<p>
+  Together: ~6-8 hours, ~165 lines of new code. Gets us to <em>feature parity with madmom's
+  classical (non-NN) pipeline</em> on our own realtime infrastructure. The DBN and CRF beat
+  trackers are real options afterwards, but only meaningful once we have SuperFlux feeding them.
+</p>
+</div>
+
+<footer>
+  Investigation only — no code changed. Sources read: <span class="mono">madmom/features/{onsets,beats,beats_hmm,beats_crf,downbeats,tempo}.py</span>. Current pipeline: <span class="mono">server/dsp/onset.py</span>.
+</footer>
+
+</div>
+</body>
+</html>

@@ -77,9 +77,12 @@ class OscPublisher:
         try:
             s.send_lmh(scaled[0] * g, scaled[1] * g, scaled[2] * g)
             s.send_bpm(bpm)
-            if onsets[0]: s.send_onset(0)
-            if onsets[1]: s.send_onset(1)
-            if onsets[2]: s.send_onset(2)
+            if onsets[0]:
+                s.send_onset(0)
+            if onsets[1]:
+                s.send_onset(1)
+            if onsets[2]:
+                s.send_onset(2)
         except Exception as e:
             log.debug("publish_lmh failed: %s", e)
             return

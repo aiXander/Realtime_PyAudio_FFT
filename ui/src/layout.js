@@ -16,8 +16,14 @@ const SPLIT_MAX = 0.9;
 let container = null;
 let cardEls = {};   // id -> { card, title, handles: {} }
 let centerHandle = null;
-let layout = null;  // { split_x, split_y, quadrants }
+let layout = null;  // { split_x, split_y, quadrants } — null until first meta
 let dragging = null;
+let lastKey = "";   // fingerprint of the last applied server layout
+
+// Below this width the CSS stacks the cards in one column (see style.css
+// `@media (max-width: 760px)`), so tiling drags are disabled there.
+const stackedMq = window.matchMedia ? window.matchMedia("(max-width: 760px)") : null;
+const isStacked = () => !!(stackedMq && stackedMq.matches);
 
 export function setupLayout() {
   container = document.querySelector(".viz-grid");
@@ -32,15 +38,23 @@ export function setupLayout() {
   }
   centerHandle = document.createElement("div");
   centerHandle.className = "viz-resize-center";
-  centerHandle.addEventListener("mousedown", beginCenterDrag);
+  centerHandle.addEventListener("pointerdown", beginCenterDrag);
   container.appendChild(centerHandle);
+  window.addEventListener("blur", () => endDrag(null));
 }
 
+/** Apply the server's saved layout. Cheap no-op when it hasn't changed
+ *  since the last call (meta arrives on every control change). */
 export function applyLayout(next) {
   if (!container || !next) return;
   if (dragging) return; // don't clobber in-flight drag with the meta echo
   if (typeof next.split_x !== "number" || typeof next.split_y !== "number" || !Array.isArray(next.quadrants)) return;
-  layout = { split_x: next.split_x, split_y: next.split_y, quadrants: next.quadrants.slice() };
+  const q = next.quadrants;
+  if (q.length !== 4 || !CARDS.every((id) => q.includes(id))) return;
+  const key = `${next.split_x}|${next.split_y}|${q.join(",")}`;
+  if (key === lastKey && layout) return;
+  lastKey = key;
+  layout = { split_x: next.split_x, split_y: next.split_y, quadrants: q.slice() };
   if (!container.classList.contains("free-layout")) {
     container.classList.add("free-layout");
   }
@@ -87,7 +101,17 @@ function paint(card, r) {
 
 function pushLayout(commit) {
   if (!layout) return;
+  lastKey = `${layout.split_x}|${layout.split_y}|${layout.quadrants.join(",")}`;
   send({ type: "set_ui_layout", layout, commit });
+}
+
+// A drag may start only with the primary button, once the server's layout
+// has arrived (before that the cards sit in the CSS fallback grid and there
+// is nothing to resize), and not in the stacked narrow layout.
+function canDrag(e) {
+  if (!layout || !container) return false;
+  if (e.pointerType === "mouse" && e.button !== 0) return false;
+  return !isStacked();
 }
 
 // ---------- handles ----------
@@ -101,7 +125,7 @@ function createHandles(card, id) {
   for (const edge of ["n", "s", "e", "w"]) {
     const el = document.createElement("div");
     el.className = `viz-resize viz-resize-${edge}`;
-    el.addEventListener("mousedown", (e) => beginSplitDrag(e, edge, id));
+    el.addEventListener("pointerdown", (e) => beginSplitDrag(e, edge, id));
     card.appendChild(el);
     handles[edge] = el;
   }
@@ -123,7 +147,7 @@ function setHandleVisibility(handles, q) {
 }
 
 function beginSplitDrag(e, edge, id) {
-  if (e.button !== 0) return;
+  if (!canDrag(e)) return;
   e.preventDefault();
   e.stopPropagation();
   // Resolve which split this edge moves.
@@ -137,12 +161,14 @@ function beginSplitDrag(e, edge, id) {
     startSplit: layout[axis],
     originX: e.clientX,
     originY: e.clientY,
+    pointerId: e.pointerId,
   };
+  document.body.classList.add("layout-dragging");
   attachWindowDrag();
 }
 
 function beginCenterDrag(e) {
-  if (e.button !== 0) return;
+  if (!canDrag(e)) return;
   e.preventDefault();
   e.stopPropagation();
   const rect = container.getBoundingClientRect();
@@ -153,8 +179,10 @@ function beginCenterDrag(e) {
     startY: layout.split_y,
     originX: e.clientX,
     originY: e.clientY,
+    pointerId: e.pointerId,
   };
   centerHandle.classList.add("dragging");
+  document.body.classList.add("layout-dragging");
   attachWindowDrag();
 }
 
@@ -162,10 +190,10 @@ function beginCenterDrag(e) {
 
 function addTitleDrag(card, title, id) {
   if (!title) return;
-  title.addEventListener("mousedown", (e) => {
+  title.addEventListener("pointerdown", (e) => {
     const tag = e.target.tagName;
     if (tag === "INPUT" || tag === "LABEL" || e.target.closest("label")) return;
-    if (e.button !== 0) return;
+    if (!canDrag(e)) return;
     e.preventDefault();
     const rect = container.getBoundingClientRect();
     dragging = {
@@ -175,6 +203,7 @@ function addTitleDrag(card, title, id) {
       originX: e.clientX,
       originY: e.clientY,
       moved: false,
+      pointerId: e.pointerId,
     };
     card.classList.add("dragging");
     attachWindowDrag();
@@ -184,16 +213,19 @@ function addTitleDrag(card, title, id) {
 // ---------- window-level drag plumbing ----------
 
 function attachWindowDrag() {
-  window.addEventListener("mousemove", onMove);
-  window.addEventListener("mouseup", onUp, { once: true });
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onCancel);
 }
 
 function detachWindowDrag() {
-  window.removeEventListener("mousemove", onMove);
+  window.removeEventListener("pointermove", onMove);
+  window.removeEventListener("pointerup", onUp);
+  window.removeEventListener("pointercancel", onCancel);
 }
 
 function onMove(e) {
-  if (!dragging) return;
+  if (!dragging || !layout || e.pointerId !== dragging.pointerId) return;
   if (dragging.kind === "split") {
     const dxFrac = (e.clientX - dragging.originX) / dragging.rect.width;
     const dyFrac = (e.clientY - dragging.originY) / dragging.rect.height;
@@ -236,6 +268,7 @@ function highlightDropTarget(e) {
 }
 
 function findCardAt(clientX, clientY, excludeId) {
+  if (!layout) return null;
   const rect = container.getBoundingClientRect();
   const xFrac = (clientX - rect.left) / rect.width;
   const yFrac = (clientY - rect.top) / rect.height;
@@ -246,10 +279,22 @@ function findCardAt(clientX, clientY, excludeId) {
 }
 
 function onUp(e) {
+  if (dragging && e.pointerId !== dragging.pointerId) return;
+  endDrag(e);
+}
+
+// pointercancel / window blur: finish the drag without swapping.
+function onCancel(e) {
+  if (dragging && e.pointerId !== dragging.pointerId) return;
+  endDrag(null);
+}
+
+function endDrag(e) {
   detachWindowDrag();
   if (!dragging) return;
   const d = dragging;
   dragging = null;
+  document.body.classList.remove("layout-dragging");
   if (centerHandle) centerHandle.classList.remove("dragging");
 
   if (d.kind === "swap") {
@@ -257,7 +302,7 @@ function onUp(e) {
     card.classList.remove("dragging");
     card.style.transform = "";
     for (const id of CARDS) cardEls[id]?.card.classList.remove("drop-target");
-    if (d.moved) {
+    if (d.moved && e && layout) {
       const target = findCardAt(e.clientX, e.clientY, d.id);
       if (target) {
         // Swap quadrant assignments. The visual rectangles stay tiled.

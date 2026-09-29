@@ -52,6 +52,8 @@ class AudioCallback:
         self.ring.write_block(self.mono_buf, t1)
         self.dsp_event.set()
         self.fft_event.set()
+        # Perf ring measures the whole body (mix + ring write + event sets),
+        # not just the mix; t1 stays the block's availability timestamp.
         i = self.perf_idx
-        self.perf_ring[i % self.perf_len] = t1 - t0
+        self.perf_ring[i % self.perf_len] = time.perf_counter_ns() - t0
         self.perf_idx = i + 1

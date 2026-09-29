@@ -1,4 +1,11 @@
-// WebSocket connection with exponential backoff (cap 2s) and message routing.
+// WebSocket connection with exponential backoff (cap 2s), connection-state
+// fan-out, and message routing.
+//
+// Connection states (emitted to onStatus listeners and shown on the badge):
+//   "connecting"   — first attempt after page load
+//   "connected"    — socket open (the server greets with meta/devices/presets)
+//   "reconnecting" — socket dropped; retrying with backoff. Clicking the
+//                    badge retries immediately.
 
 import { store } from "./store.js";
 
@@ -24,8 +31,14 @@ const WS_URL = (() => {
 
 let socket = null;
 let backoffMs = 250;
+let retryTimer = null;
+let retryAt = 0;
+let countdownTimer = null;
+let attempts = 0;
+let state = "connecting";
 const handlers = {};
 const errSinks = [];
+const statusSinks = [];
 
 export function onMessage(type, fn) {
   handlers[type] = fn;
@@ -35,6 +48,11 @@ export function onError(fn) {
   errSinks.push(fn);
 }
 
+/** fn(state) on every connection-state change: "connecting" | "connected" | "reconnecting". */
+export function onStatus(fn) {
+  statusSinks.push(fn);
+}
+
 export function send(obj) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
   socket.send(JSON.stringify(obj));
@@ -42,52 +60,121 @@ export function send(obj) {
 }
 
 export function isConnected() {
-  return socket && socket.readyState === WebSocket.OPEN;
+  return !!socket && socket.readyState === WebSocket.OPEN;
 }
 
-function setStatus(text, ok) {
-  const el = document.getElementById("ws-status");
-  if (el) {
-    el.textContent = text;
-    el.className = "badge " + (ok ? "connected" : "disconnected");
+const badge = document.getElementById("ws-status");
+const badgeText = badge ? badge.querySelector(".badge-text") || badge : null;
+
+function renderBadge() {
+  if (!badge) return;
+  let text;
+  if (state === "connected") text = "live";
+  else if (state === "connecting") text = "connecting…";
+  else {
+    const s = Math.max(0, Math.ceil((retryAt - performance.now()) / 1000));
+    text = retryTimer && s > 0 ? `reconnecting · ${s}s` : "reconnecting…";
   }
+  if (badgeText.textContent !== text) badgeText.textContent = text;
+  badge.className = "badge badge-conn " + state;
+  badge.setAttribute("aria-disabled", state === "reconnecting" ? "false" : "true");
+  badge.setAttribute("aria-label",
+    state === "connected" ? "WebSocket connected"
+    : state === "connecting" ? "Connecting to the audio server"
+    : "Disconnected from the audio server. Activate to retry now.");
+}
+
+function setState(next) {
+  if (next === state) { renderBadge(); return; }
+  state = next;
+  renderBadge();
+  for (const f of statusSinks) f(state);
 }
 
 function onOpen() {
-  setStatus("connected", true);
   backoffMs = 250;
+  attempts = 0;
+  clearTimeout(countdownTimer);
+  setState("connected");
 }
 
-function onClose() {
-  setStatus("disconnected", false);
-  setTimeout(connect, backoffMs);
+function scheduleReconnect() {
+  clearTimeout(retryTimer);
+  attempts++;
+  retryAt = performance.now() + backoffMs;
+  retryTimer = setTimeout(() => { retryTimer = null; connect(); }, backoffMs);
   backoffMs = Math.min(backoffMs * 2, 2000);
+  tickCountdown();
+}
+
+function tickCountdown() {
+  clearTimeout(countdownTimer);
+  renderBadge();
+  if (retryTimer) countdownTimer = setTimeout(tickCountdown, 250);
+}
+
+function onClose(ev) {
+  if (ev.target !== socket) return; // stale socket from a manual retry
+  socket = null;
+  setState("reconnecting");
+  scheduleReconnect();
 }
 
 function onWsError(_e) {
   // close handler will fire
 }
 
+/** Retry right away (badge click). No-op while connected or connecting. */
+export function retryNow() {
+  if (socket) return;
+  clearTimeout(retryTimer);
+  retryTimer = null;
+  backoffMs = 250;
+  connect();
+}
+
+if (badge) badge.addEventListener("click", retryNow);
+
 function decodeFftBinary(buf) {
   // [type=1:u8][reserved:u8][n_bins:u16][float32 * n_bins] LE
+  if (buf.byteLength < 4) return null;
   const dv = new DataView(buf);
   const type = dv.getUint8(0);
   if (type !== 1) return null;
   const n = dv.getUint16(2, true);
-  const f32 = new Float32Array(buf, 4, n);
-  return f32;
+  if (buf.byteLength < 4 + 4 * n) return null;
+  return new Float32Array(buf, 4, n);
 }
 
+// Snapshot arrival times for the "srv Hz" badge — fixed ring, no shifting.
+const SNAP_RING = 64;
+const snapTimes = new Float64Array(SNAP_RING);
+let snapIdx = 0, snapCount = 0;
+
+/** Measured server snapshot rate (Hz) over the last ~second of arrivals. */
+export function snapshotRate() {
+  if (snapCount < 2) return 0;
+  const newest = snapTimes[(snapIdx - 1 + SNAP_RING) % SNAP_RING];
+  // Stale: nothing for a second → report 0 rather than the last rate.
+  if (performance.now() - newest > 1000) return 0;
+  const n = Math.min(snapCount, SNAP_RING);
+  const oldest = snapTimes[(snapIdx - n + SNAP_RING) % SNAP_RING];
+  const span = (newest - oldest) / 1000;
+  return span > 0 ? (n - 1) / span : 0;
+}
+
+export function resetSnapshotRate() { snapIdx = 0; snapCount = 0; }
+
 function onMsg(ev) {
+  if (ev.target !== socket) return;
   if (typeof ev.data !== "string") {
     // Binary -> FFT frame
     const buf = ev.data instanceof ArrayBuffer ? ev.data : null;
     if (buf) {
       const f32 = decodeFftBinary(buf);
       // Defensive: ignore stray FFT frames if the server has reported FFT as
-      // disabled. Shouldn't normally happen (the server gates its own send),
-      // but this guarantees the UI can never paint live bars while the
-      // toggle / sidepanel reflect the disabled state.
+      // disabled, so the UI can never paint live bars while the toggle /
+      // side panel reflect the disabled state.
       if (f32 && store.meta?.fft_enabled !== false) store.fft_bins = f32;
     }
     return;
@@ -97,12 +184,11 @@ function onMsg(ev) {
   try { msg = JSON.parse(ev.data); }
   catch { return; }
   // Track snapshot rate independently of FFT binary frames so the badge
-  // reflects "how often does the server push L/M/H state" — invariant under
-  // the FFT enable toggle.
+  // reflects "how often does the server push L/M/H state".
   if (msg.type === "snapshot") {
-    const now = performance.now();
-    store.snapshotTimestamps.push(now);
-    if (store.snapshotTimestamps.length > 60) store.snapshotTimestamps.shift();
+    snapTimes[snapIdx] = performance.now();
+    snapIdx = (snapIdx + 1) % SNAP_RING;
+    snapCount++;
   }
   const h = handlers[msg.type];
   if (h) h(msg);
@@ -112,15 +198,20 @@ function onMsg(ev) {
 }
 
 export function connect() {
+  if (socket) return;
+  if (state !== "connected" && attempts > 0) setState("reconnecting");
   try {
-    socket = new WebSocket(WS_URL);
-    socket.binaryType = "arraybuffer";
-    socket.addEventListener("open", onOpen);
-    socket.addEventListener("close", onClose);
-    socket.addEventListener("error", onWsError);
-    socket.addEventListener("message", onMsg);
+    const s = new WebSocket(WS_URL);
+    s.binaryType = "arraybuffer";
+    s.addEventListener("open", onOpen);
+    s.addEventListener("close", onClose);
+    s.addEventListener("error", onWsError);
+    s.addEventListener("message", onMsg);
+    socket = s;
+    renderBadge();
   } catch (e) {
-    setTimeout(connect, backoffMs);
-    backoffMs = Math.min(backoffMs * 2, 2000);
+    socket = null;
+    setState("reconnecting");
+    scheduleReconnect();
   }
 }

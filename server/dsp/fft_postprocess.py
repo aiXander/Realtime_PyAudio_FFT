@@ -316,8 +316,10 @@ class FFTPostProcessor:
             if self._empty_idx is None:
                 self._build_sentinel_interp_lut(db_in)
             if self._empty_idx.size > 0:
-                np.take(self.interp_db, self._left_idx, out=self._left_vals)
-                np.take(self.interp_db, self._right_idx, out=self._right_vals)
+                # mode="clip": indices are in range by construction, and the
+                # default mode="raise" always buffers `out` (allocates).
+                np.take(self.interp_db, self._left_idx, out=self._left_vals, mode="clip")
+                np.take(self.interp_db, self._right_idx, out=self._right_vals, mode="clip")
                 np.multiply(self._left_vals, self._w_left, out=self._left_vals)
                 np.multiply(self._right_vals, self._w_right, out=self._right_vals)
                 np.add(self._left_vals, self._right_vals, out=self._left_vals)

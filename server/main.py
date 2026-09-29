@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import logging
 import signal
 import sys
@@ -27,13 +28,15 @@ from .audio import devices as devmod
 from .audio.callback import AudioCallback
 from .audio.ringbuffer import SlotRing
 from .audio.stream import StreamHandle, open_input_stream
-from .config import CANONICAL_CONFIG_PATH, Config, Persister, config_to_dict, load_config
+from .config import (
+    CANONICAL_CONFIG_PATH, Config, Persister, config_to_dict, load_config_or_fallback,
+)
 from .control import validate as V
 from .control.dispatcher import Dispatcher
 from .dsp.features import AutoScaler, ExpSmoother
 from .dsp.fft import FFTWorker
 from .dsp.fft_postprocess import FFTPostProcessor
-from .dsp.filters import FilterBank
+from .dsp.filters import FilterBank, clamp_band_edges
 from .dsp.onset import OnsetTracker
 from .dsp.worker import DSPWorker
 from .io.http_server import StaticHTTPServer
@@ -44,6 +47,37 @@ from .io.ws_server import WSServer
 from .priority import boost_current_thread
 
 log = logging.getLogger(__name__)
+
+_LOOP_ERR_LOG_INTERVAL_S = 5.0
+# OSC /audio/meta: resent at this period so late-joining OSC consumers pick
+# it up, plus (debounced to one per tick) whenever sr / bands / n_bins change.
+_OSC_META_PERIOD_S = 1.0
+_OSC_META_TICK_S = 0.05
+
+
+class StartupError(Exception):
+    """Expected startup failure (port in use, no audio device, bad config):
+    main() prints `message` + `hint` as plain lines and exits non-zero
+    instead of dumping a traceback."""
+
+    def __init__(self, message: str, hint: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.hint = hint
+
+
+def ring_slots_for(blocksize: int) -> int:
+    """SlotRing size (power of two, >= 32) that holds at least 2× the largest
+    accepted FFT window (validate.MAX_FFT_WINDOW) at this blocksize, so any
+    window the validators accept always fits with a full window of headroom
+    for the producer to keep writing while the FFT worker reads. blocksize
+    is fixed for the process lifetime (hot-switch keeps it), so this is
+    computed once."""
+    need = 2 * -(-V.MAX_FFT_WINDOW // int(blocksize))
+    n = 32
+    while n < need:
+        n *= 2
+    return n
 
 
 def _parse_args(argv):
@@ -79,7 +113,8 @@ class App:
         self.fft_store = FFTStore()
 
         # ----- Ring buffer -----
-        self.ring = SlotRing(n_slots_pow2=32, blocksize=cfg.audio.blocksize)
+        self.ring = SlotRing(n_slots_pow2=ring_slots_for(cfg.audio.blocksize),
+                             blocksize=cfg.audio.blocksize)
 
         # ----- Perf rings (int64 ns) -----
         self.perf_cb  = np.zeros(128, dtype=np.int64)
@@ -113,6 +148,65 @@ class App:
 
         self._filter_retune_handle: asyncio.TimerHandle | None = None
         self._device_switch_lock: asyncio.Lock | None = None
+        # OSC /audio/meta: dirty flag drained by _osc_meta_loop (<= 1 send
+        # per tick, so band drags don't flood) + a periodic resend.
+        self._osc_meta_dirty = False
+        self._osc_meta_task: asyncio.Task | None = None
+        # Counter baselines so the status panel's overruns/drops count from
+        # the current device session: a hot-switch resets the ring and the
+        # workers' read pointers, which can register a few spurious drops.
+        self._drops_base = {"cb": 0, "dsp": 0, "fft": 0}
+        self._last_err_log: dict[str, float] = {}
+
+    @property
+    def device_switch_lock(self) -> asyncio.Lock:
+        """Serialises every PortAudio stream open/close (hot-switch, probe)."""
+        return self._device_switch_lock
+
+    # ----------------- meta fan-out -----------------
+    def mark_meta_dirty(self) -> None:
+        """Ask the WS broadcaster for one coalesced meta on its next tick."""
+        if self.ws is not None:
+            self.ws.mark_meta_dirty()
+
+    def mark_osc_meta_dirty(self) -> None:
+        """Ask _osc_meta_loop to resend /audio/meta on its next tick."""
+        self._osc_meta_dirty = True
+
+    def send_osc_meta(self) -> None:
+        if self.osc_sender is None or self.stream is None:
+            return
+        self.osc_sender.send_meta(
+            sr=int(self.stream.samplerate),
+            blocksize=self.cfg.audio.blocksize,
+            n_fft_bins=self.cfg.fft.n_bins,
+            bands=self._bands_tuple_dict(),
+        )
+
+    async def _osc_meta_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        last_sent = loop.time()  # start() already sent one
+        while True:
+            await asyncio.sleep(_OSC_META_TICK_S)
+            try:
+                now = loop.time()
+                if self._osc_meta_dirty or now - last_sent >= _OSC_META_PERIOD_S:
+                    self._osc_meta_dirty = False
+                    last_sent = now
+                    self.send_osc_meta()
+            except Exception:
+                self._log_loop_error("osc meta loop")
+
+    def _log_loop_error(self, where: str) -> None:
+        now = time.monotonic()
+        if now - self._last_err_log.get(where, -1e9) >= _LOOP_ERR_LOG_INTERVAL_S:
+            self._last_err_log[where] = now
+            log.exception("%s iteration failed (continuing; repeats suppressed for %.0fs)",
+                          where, _LOOP_ERR_LOG_INTERVAL_S)
+
+    def start_background_tasks(self) -> None:
+        self._osc_meta_task = asyncio.get_running_loop().create_task(
+            self._osc_meta_loop(), name="osc-meta")
 
     # ----------------- starting up -----------------
     def _bands_tuple_dict(self) -> dict:
@@ -143,6 +237,7 @@ class App:
         self.auto_scaler.set_bands(self._bands_tuple_dict())
         if self.fft_postprocessor is not None:
             self.fft_postprocessor.update_bands(self._bands_meta_dict())
+        self.mark_osc_meta_dirty()
 
     def apply_smoothing(self) -> None:
         """Push current cfg.dsp.tau / tau_attack into both pipelines."""
@@ -207,6 +302,7 @@ class App:
         # n_bins controls FFT-viz log-bin density; AutoScaler caps its
         # noise budget at the per-band log-bin count, so keep it in sync.
         self.auto_scaler.set_fft_geometry(n_bins=n)
+        self.mark_osc_meta_dirty()
 
     def apply_fft_window(self, *, window_size: int | None = None,
                          hop: int | None = None, f_min: float | None = None) -> None:
@@ -253,8 +349,36 @@ class App:
         if self.fft_postprocessor is not None:
             self.fft_postprocessor.update_smear(v)
 
-    def _build_pipeline_for_sr(self, sr: float) -> None:
+    def _clamp_cfg_bands_for_sr(self, sr: float) -> bool:
+        """Clamp cfg band edges into the Nyquist-safe range for `sr`
+        (hi ≤ 0.45·sr, 1 Hz ≤ lo ≤ 0.9·hi — `clamp_band_edges`) and write
+        them back to cfg, so cfg, meta, OSC meta and the filters all agree.
+        A 16/22.05/24 kHz device would otherwise get a 13952 Hz high band it
+        can't represent. Returns True if anything changed (then meta is
+        marked dirty and, once the persister exists, a save is requested)."""
+        changed = False
+        for name in ("low", "mid", "high"):
+            b = getattr(self.cfg.dsp, name)
+            lo, hi = clamp_band_edges(b.lo_hz, b.hi_hz, sr)
+            if lo != b.lo_hz or hi != b.hi_hz:
+                log.warning("band %s [%.1f, %.1f] Hz not representable at sr=%.0f; "
+                            "clamped to [%.1f, %.1f] Hz",
+                            name, b.lo_hz, b.hi_hz, sr, lo, hi)
+                b.lo_hz, b.hi_hz = lo, hi
+                changed = True
+        if changed:
+            self.mark_meta_dirty()
+            self.mark_osc_meta_dirty()
+            if self.persister is not None:
+                self.persister.request(commit=True)
+        return changed
+
+    def _build_pipeline_for_sr(self, sr: float) -> bool:
+        """(Re)build every sr-dependent DSP object into self.* (NOT into the
+        workers — the caller swaps those in). Clamps cfg bands for `sr`
+        first; returns whether they were clamped."""
         cfg = self.cfg
+        clamped = self._clamp_cfg_bands_for_sr(sr)
         self.filter_bank = FilterBank(
             sr=sr,
             bands=self._bands_tuple_dict(),
@@ -278,6 +402,13 @@ class App:
             db_floor=cfg.fft.db_floor,
             db_ceiling=cfg.fft.db_ceiling,
         )
+        if self.onset_tracker is not None:
+            # Hot-switch: alphas depend on dt = blocksize / sr. User-tuned
+            # per-band params are persisted on the instance and survive
+            # reconfigure().
+            self.onset_tracker.reconfigure(sr, cfg.audio.blocksize)
+            self.onset_tracker.reset()
+            return clamped
         self.onset_tracker = OnsetTracker(
             sr=sr,
             blocksize=cfg.audio.blocksize,
@@ -296,10 +427,11 @@ class App:
                          "abs_floor": cfg.onset.high.abs_floor},
             },
         )
+        return clamped
 
     def start(self) -> None:
         cfg = self.cfg
-        self.loop = asyncio.get_event_loop()
+        self.loop = asyncio.get_running_loop()
         self._device_switch_lock = asyncio.Lock()
 
         # -------- Resolve & open audio device --------
@@ -318,14 +450,22 @@ class App:
             blocksize=cfg.audio.blocksize,
             perf_ring=self.perf_cb,
         )
-        self.stream = open_input_stream(
-            device=device_idx,
-            blocksize=cfg.audio.blocksize,
-            channels=cfg.audio.channels,
-            callback=self.callback,
-        )
+        try:
+            self.stream = open_input_stream(
+                device=device_idx,
+                blocksize=cfg.audio.blocksize,
+                channels=cfg.audio.channels,
+                callback=self.callback,
+            )
+        except Exception as e:
+            which = "the system default input" if device_idx is None else f"input device {device_idx}"
+            raise StartupError(
+                f"could not open {which}: {e}",
+                "plug in / enable a microphone, or pick another input with --device N "
+                "(list them with `uv run python -m sounddevice`)",
+            ) from e
 
-        self._build_pipeline_for_sr(self.stream.samplerate)
+        bands_clamped = self._build_pipeline_for_sr(self.stream.samplerate)
 
         # -------- OSC: wire sender + publisher BEFORE workers so they can
         # dispatch directly on their own threads (no asyncio hop). --------
@@ -393,17 +533,15 @@ class App:
         self.dsp_worker.start()
         self.fft_worker.start()
 
-        # Send the one-shot OSC meta packet now that the sender is wired.
-        self.osc_sender.send_meta(
-            sr=int(self.stream.samplerate),
-            blocksize=cfg.audio.blocksize,
-            n_fft_bins=cfg.fft.n_bins,
-            bands=self._bands_tuple_dict(),
-        )
+        # Send the OSC meta packet now that the sender is wired (resent at
+        # 1 Hz + on change by _osc_meta_loop).
+        self.send_osc_meta()
 
         # -------- Persister --------
         self.persister = Persister(self.config_path, get_state=lambda: config_to_dict(self.cfg))
         self.persister.attach(self.loop)
+        if bands_clamped:
+            self.persister.request(commit=True)
 
         # -------- WebSocket server (optional) --------
         if cfg.ws.enabled and not self.args.no_ws:
@@ -428,19 +566,26 @@ class App:
             # Static HTTP server for the UI (ES modules need http://, not file://).
             ui_root = (Path(__file__).resolve().parent.parent / "ui")
             if ui_root.exists():
-                self.http = StaticHTTPServer(host=cfg.ws.host, port=cfg.ws.http_port, root=ui_root)
+                http = StaticHTTPServer(host=cfg.ws.host, port=cfg.ws.http_port, root=ui_root)
                 try:
-                    self.http.start()
+                    http.start()
                 except OSError as e:
-                    log.warning("static http server failed to bind on port %d: %s", cfg.ws.http_port, e)
-                    self.http = None
+                    raise _bind_error("UI HTTP", cfg.ws.host, cfg.ws.http_port,
+                                      "ws.http_port", e) from e
+                self.http = http
             else:
                 log.warning("ui directory not found at %s; static http server skipped", ui_root)
         else:
             self.ws = None
 
         # -------- Start stream LAST, after workers are up --------
-        self.stream.start()
+        try:
+            self.stream.start()
+        except Exception as e:
+            raise StartupError(
+                f"could not start audio input device {self.stream.device}: {e}",
+                "the device may be busy or unplugged; pick another with --device N",
+            ) from e
 
         # -------- Optional UI launch --------
         if self.args.open:
@@ -597,9 +742,13 @@ class App:
 
         return {
             "type": "server_status",
-            "cb_overruns": int(self.callback.cb_overruns) if self.callback else 0,
-            "dsp_drops": int(self.dsp_worker.dsp_drops) if self.dsp_worker else 0,
-            "fft_drops": int(self.fft_worker.fft_drops) if self.fft_worker else 0,
+            # Counted from the current device session (see _drops_base).
+            "cb_overruns": max(0, int(self.callback.cb_overruns) - self._drops_base["cb"])
+                           if self.callback else 0,
+            "dsp_drops": max(0, int(self.dsp_worker.dsp_drops) - self._drops_base["dsp"])
+                         if self.dsp_worker else 0,
+            "fft_drops": max(0, int(self.fft_worker.fft_drops) - self._drops_base["fft"])
+                         if self.fft_worker else 0,
             "perf": {
                 "block_period_ms": block_period_ms,
                 "hop_period_ms": hop_period_ms,
@@ -633,114 +782,150 @@ class App:
             0.05, lambda: self.filter_bank.retune(self._bands_tuple_dict())
         )
 
+    def _capture_drop_baselines(self) -> None:
+        self._drops_base = {
+            "cb": int(self.callback.cb_overruns) if self.callback else 0,
+            "dsp": int(self.dsp_worker.dsp_drops) if self.dsp_worker else 0,
+            "fft": int(self.fft_worker.fft_drops) if self.fft_worker else 0,
+        }
+
+    def _teardown_stream(self) -> None:
+        if self.stream is not None:
+            self.stream.stop()
+            self.stream.close()
+            self.stream = None
+
+    def _reset_stream_state(self) -> None:
+        """Rewind ring + worker read pointers + perf rings for a fresh stream.
+        Only called while no stream is running (callback fires nothing)."""
+        self.ring.reset()
+        self.dsp_worker.read_block_idx = 0
+        self.fft_worker.reset()
+        # zero perf rings so new sr's load is visible cleanly
+        for r in (self.perf_cb, self.perf_dsp, self.perf_fft, self.perf_ws,
+                  self.perf_lmh_e2e, self.perf_fft_e2e):
+            r.fill(0)
+        self.perf_e2e_idx["lmh"] = 0
+        self.perf_e2e_idx["fft"] = 0
+        self.callback.perf_idx = 0
+        self.dsp_worker.perf_idx = 0
+        self.fft_worker.perf_idx = 0
+        if self.ws is not None:
+            self.ws.reset_perf()
+
+    def _install_stream(self, idx: int | None) -> None:
+        """Open `idx`, rebuild the sr-dependent pipeline, swap it into the
+        workers and start the stream. On failure closes whatever it opened
+        (self.stream stays None) and re-raises; the caller rolls back."""
+        stream = open_input_stream(
+            device=idx,
+            blocksize=self.cfg.audio.blocksize,
+            channels=self.cfg.audio.channels,
+            callback=self.callback,
+        )
+        try:
+            new_sr = stream.samplerate
+            # Rebuild filter + autoscaler + smoother + onset alphas for the
+            # new sr (clamps cfg bands to the new Nyquist first).
+            self._build_pipeline_for_sr(new_sr)
+            # Swap into worker (idle: no stream is running).
+            self.dsp_worker.filter_bank = self.filter_bank
+            self.dsp_worker.smoother = self.smoother
+            self.dsp_worker.auto_scaler = self.auto_scaler
+            # FFT worker rebuild for sr (this also reconfigures the
+            # post-processor's hop_period_s / sr — see FFTWorker.reconfigure).
+            self.fft_worker.reconfigure(sr=new_sr)
+            self.fft_postprocessor.update_bands(self._bands_meta_dict())
+            self.fft_postprocessor.reset()
+            self.stream = stream
+            stream.start()
+        except Exception:
+            self.stream = None
+            stream.stop()
+            stream.close()
+            raise
+
     async def hot_switch_device(self, new_idx: int) -> None:
         """Tear down stream, rebuild for new device, start fresh.
+
+        Transactional: if anything fails (index vanished, device unplugged
+        or busy, filter design error), the previous device, sample rate and
+        pipeline are restored and the old stream restarted, then ValueError
+        is raised so the dispatcher replies with an error + snap-back meta.
 
         The DSP/FFT workers stay alive — they idle on dsp_event/fft_event
         timeouts while the stream is down (callback fires nothing).
         """
         async with self._device_switch_lock:
-            old_stream = self.stream
-            old_stream.stop()
-            old_stream.close()
+            # Upper-bound / existence check BEFORE touching the running
+            # stream: the index must be a current input device.
+            available = {d["index"] for d in devmod.list_input_devices()}
+            if new_idx not in available:
+                raise ValueError(f"device {new_idx} is not an available input device")
 
-            # Reset state
-            self.ring.reset()
-            self.filter_bank.reset_state()
-            self.auto_scaler.reset()
-            self.smoother.reset()
-            self.dsp_worker.read_block_idx = 0
-            self.fft_worker.reset()
-            # zero perf rings so new sr's load is visible cleanly
-            self.perf_cb.fill(0); self.perf_dsp.fill(0); self.perf_fft.fill(0); self.perf_ws.fill(0)
-            self.perf_lmh_e2e.fill(0); self.perf_fft_e2e.fill(0)
-            self.perf_e2e_idx["lmh"] = 0
-            self.perf_e2e_idx["fft"] = 0
-            self.callback.perf_idx = 0
-            self.dsp_worker.perf_idx = 0
-            self.fft_worker.perf_idx = 0
-            if self.ws is not None:
-                self.ws.reset_perf()
+            old_idx = self.stream.device if self.stream is not None else None
+            if not isinstance(old_idx, int):
+                old_idx = self.cfg.audio.device.index
+            d = self.cfg.dsp
+            old_bands = {n: (getattr(d, n).lo_hz, getattr(d, n).hi_hz)
+                         for n in ("low", "mid", "high")}
 
-            # Open new stream
-            self.stream = open_input_stream(
-                device=new_idx,
-                blocksize=self.cfg.audio.blocksize,
-                channels=self.cfg.audio.channels,
-                callback=self.callback,
-            )
-            new_sr = self.stream.samplerate
-
-            # Rebuild filter + autoscaler + smoother for new sr (alphas depend on sr)
-            self.filter_bank = FilterBank(
-                sr=new_sr,
-                bands=self._bands_tuple_dict(),
-                blocksize=self.cfg.audio.blocksize,
-                order=self.cfg.dsp.filter_order,
-            )
-            self.smoother = ExpSmoother(
-                sr=new_sr,
-                blocksize=self.cfg.audio.blocksize,
-                tau=self.cfg.dsp.tau,
-                tau_attack=self.cfg.dsp.tau_attack,
-            )
-            self.auto_scaler = AutoScaler(
-                sr=new_sr,
-                blocksize=self.cfg.audio.blocksize,
-                tau_attack_s=self.cfg.autoscale.tau_attack_s,
-                tau_release_s=self.cfg.autoscale.tau_release_s,
-                noise_floor=self.cfg.autoscale.noise_floor,
-                strength=self.cfg.autoscale.strength,
-                tilt_db_per_oct=self.cfg.fft.tilt_db_per_oct,
-                bands=self._bands_tuple_dict(),
-                n_fft_window=self.cfg.fft.window_size,
-                fft_n_bins=self.cfg.fft.n_bins,
-                fft_f_min=self.cfg.fft.f_min,
-                db_floor=self.cfg.fft.db_floor,
-                db_ceiling=self.cfg.fft.db_ceiling,
-            )
-            # Onset tracker: alphas depend on dt = blocksize / sr. User-tuned
-            # per-band params (sensitivity / refractory / slow_tau_s) are
-            # persisted on the instance and survive reconfigure().
-            self.onset_tracker.reconfigure(new_sr, self.cfg.audio.blocksize)
-            self.onset_tracker.reset()
-            # Swap into worker
-            self.dsp_worker.filter_bank = self.filter_bank
-            self.dsp_worker.smoother = self.smoother
-            self.dsp_worker.auto_scaler = self.auto_scaler
-            # FFT worker rebuild for sr (this also reconfigures the post-processor's
-            # hop_period_s / sr — see FFTWorker.reconfigure).
-            self.fft_worker.reconfigure(sr=new_sr)
-            self.fft_postprocessor.reset()
+            self._teardown_stream()
+            self._reset_stream_state()
+            try:
+                self._install_stream(new_idx)
+            except Exception as e:
+                log.warning("switch to device %s failed (%s); rolling back to device %s",
+                            new_idx, e, old_idx)
+                # Undo any band clamp done for the failed device's sr.
+                for n, (lo, hi) in old_bands.items():
+                    getattr(d, n).lo_hz, getattr(d, n).hi_hz = lo, hi
+                self._reset_stream_state()
+                try:
+                    self._install_stream(old_idx)
+                except Exception as e2:
+                    log.error("rollback to device %s also failed (%s); audio input is "
+                              "stopped — pick a device in the UI", old_idx, e2)
+                self._after_stream_change()
+                raise ValueError(f"could not switch to device {new_idx}: {e}") from e
 
             # Update cfg with the device choice
             info = devmod.device_info(new_idx) or {}
             self.cfg.audio.device.index = new_idx
             self.cfg.audio.device.name = info.get("name")
+            self._after_stream_change()
 
-            # Start the new stream
-            self.stream.start()
-
-            # Push fresh meta over OSC
-            self.osc_sender.send_meta(
-                sr=int(new_sr),
-                blocksize=self.cfg.audio.blocksize,
-                n_fft_bins=self.cfg.fft.n_bins,
-                bands=self._bands_tuple_dict(),
-            )
+    def _after_stream_change(self) -> None:
+        # Push fresh meta over OSC now (sr may have changed) + WS meta on the
+        # next broadcast tick.
+        self.send_osc_meta()
+        self.mark_meta_dirty()
+        # Count drops/overruns from this device session. Re-baseline once
+        # more shortly after, to exclude the few spurious drops the workers
+        # can register while self-healing their read pointers onto the reset
+        # ring on the new stream's first blocks.
+        self._capture_drop_baselines()
+        if self.loop is not None:
+            self.loop.call_later(0.25, self._capture_drop_baselines)
 
     # ----------------- shutdown -----------------
     async def shutdown(self) -> None:
+        # Also used to clean up after a failed start(), so every step
+        # tolerates partially-initialised state.
+        if self._osc_meta_task is not None:
+            self._osc_meta_task.cancel()
+            try:
+                await self._osc_meta_task
+            except (asyncio.CancelledError, Exception):
+                pass
         log.info("shutdown: stopping audio stream")
-        if self.stream is not None:
-            self.stream.stop()
-            self.stream.close()
+        self._teardown_stream()
         log.info("shutdown: stopping workers")
         self.stop_flag.set()
         self.dsp_event.set()
         self.fft_event.set()
         for w in (self.dsp_worker, self.fft_worker):
-            if w is not None:
+            if w is not None and w.is_alive():
                 w.join(timeout=1.0)
         if self.ws is not None:
             await self.ws.stop()
@@ -750,11 +935,30 @@ class App:
             self.persister.flush_now_sync()
 
 
+def _bind_error(what: str, host: str, port: int, cfg_key: str, e: OSError) -> StartupError:
+    if e.errno == errno.EADDRINUSE:
+        return StartupError(
+            f"{what} port {port} on {host} is already in use",
+            f"another audio-server is probably running (check `lsof -i :{port}`); "
+            f"stop it, or change {cfg_key} in the config",
+        )
+    return StartupError(f"{what} server could not bind {host}:{port}: {e}",
+                        f"check ws.host / {cfg_key} in the config")
+
+
 async def _run(args, cfg, config_path):
     app = App(args, cfg, config_path)
-    app.start()
-    if app.ws is not None:
-        await app.ws.start()
+    try:
+        app.start()
+        if app.ws is not None:
+            try:
+                await app.ws.start()
+            except OSError as e:
+                raise _bind_error("WebSocket", cfg.ws.host, cfg.ws.port, "ws.port", e) from e
+        app.start_background_tasks()
+    except BaseException:
+        await app.shutdown()
+        raise
 
     stop_event = asyncio.Event()
 
@@ -845,12 +1049,27 @@ def _resolve_config_path(arg_value: str | None) -> Path:
     return cwd_candidate  # surface a sensible path in the error message
 
 
+def _fatal(message: str, hint: str = "") -> int:
+    print(f"audio-server: error: {message}", file=sys.stderr)
+    if hint:
+        print(f"audio-server: hint: {hint}", file=sys.stderr)
+    return 1
+
+
 def main(argv=None):
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    # Python's default GIL switch interval is 5 ms: a thread that wants the
+    # GIL (the audio callback's Python body, the DSP/FFT workers after an
+    # event wake) waits up to that long whenever another thread (typically
+    # the asyncio loop JSON-encoding WS frames) holds it without blocking —
+    # a few consecutive hand-offs add up to ~10+ ms of wake-up latency, i.e.
+    # multiple audio blocks. 0.5 ms keeps the hand-off well under one block
+    # period (5.3 ms at 48k/256) for a small context-switch overhead.
+    sys.setswitchinterval(5e-4)
     # Lift the main thread (which becomes the asyncio loop thread, running
     # the OSC sender / WS broadcaster / dispatcher). Best-effort; no-ops on
     # platforms / permissions where it can't apply.
@@ -867,22 +1086,31 @@ def main(argv=None):
             shutil.copyfile(example, config_path)
             log.info("seeded %s from %s", config_path, example)
     if not config_path.exists():
-        raise SystemExit(f"config file not found: {config_path}")
+        return _fatal(f"config file not found: {config_path}",
+                      "omit --config to use configs/main.yaml (seeded from main.example.yaml)")
     log.info("loading config from %s", config_path)
-    cfg = load_config(config_path)
+    example = config_path.parent / "main.example.yaml"
+    if not example.exists():
+        example = CANONICAL_CONFIG_PATH.parent / "main.example.yaml"
+    try:
+        # A torn / empty / unparseable file is backed up as
+        # <name>.corrupt-<timestamp> and replaced by the example defaults.
+        cfg = load_config_or_fallback(config_path, example)
+    except (ValueError, OSError) as e:
+        return _fatal(f"invalid config: {e}",
+                      f"fix the value in {config_path.name}, or delete the file to "
+                      "regenerate it from configs/main.example.yaml")
     if args.no_ws:
         cfg.ws.enabled = False
     try:
         asyncio.run(_run(args, cfg, config_path))
     except KeyboardInterrupt:
         pass
+    except StartupError as e:
+        return _fatal(e.message, e.hint)
     except sd.PortAudioError as e:
-        log.warning(
-            "no usable audio input device (%s) — audio-server exiting cleanly; "
-            "plug in a mic and restart, or pick a device in the UI",
-            e,
-        )
-        return 0
+        return _fatal(f"audio device error: {e}",
+                      "plug in a mic and restart, or pick another input with --device N")
     return 0
 
 

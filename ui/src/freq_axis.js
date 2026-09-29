@@ -14,9 +14,10 @@ const F_AXIS_MIN = 20;
 const F_AXIS_MAX = 22000;
 const MIN_GAP_HZ = 50;
 
-// Internal SVG canvas units. Scaled to 100% width with preserveAspectRatio="none"
-// on x, so x is in viewBox units; y is in real px after the height: 78px style.
-const W = 600;
+// SVG user units == CSS px: the viewBox width tracks the element's real width
+// (ResizeObserver), so text is never stretched/squished horizontally the way
+// a fixed viewBox + preserveAspectRatio="none" would. H is fixed.
+let W = 600;
 const H = 78;
 const PAD_TOP = 28;       // room for two rows of edge labels
 const PAD_BOT = 14;       // room for tick labels
@@ -64,7 +65,8 @@ function el(name, attrs) {
 export function makeFreqAxis(container, getSr) {
   const svg = el("svg", {
     viewBox: `0 0 ${W} ${H}`,
-    preserveAspectRatio: "none",
+    role: "group",
+    "aria-label": "Bandpass edge editor",
   });
   svg.style.width = "100%";
   svg.style.height = `${H}px`;
@@ -78,24 +80,41 @@ export function makeFreqAxis(container, getSr) {
   const x2f = (x) => Math.exp(lmin + (x / W) * (lmax - lmin));
 
   // Base track background.
-  svg.appendChild(el("rect", {
-    x: 0, y: TRACK_Y, width: W, height: TRACK_H,
+  const track = el("rect", {
+    x: 0.5, y: TRACK_Y, width: W - 1, height: TRACK_H,
     fill: "#0a0b0d", stroke: "#2a2e34", "stroke-width": 1, rx: 2,
-  }));
+  });
+  svg.appendChild(track);
 
-  // Tick lines + labels.
-  for (const f of TICKS) {
-    const x = f2x(f);
-    svg.appendChild(el("line", {
-      x1: x, x2: x, y1: TRACK_Y, y2: TRACK_Y + TRACK_H,
-      stroke: "#1f2227", "stroke-width": 1,
-    }));
+  // Tick lines + labels (x positions set in layoutStatic()).
+  const ticks = TICKS.map((f) => {
+    const line = el("line", {
+      y1: TRACK_Y, y2: TRACK_Y + TRACK_H, stroke: "#1f2227", "stroke-width": 1,
+    });
     const t = el("text", {
-      x, y: H - 3, "font-size": 9, "text-anchor": "middle", fill: "#6e757d",
+      y: H - 3, "font-size": 9, "text-anchor": "middle", fill: "#6e757d",
     });
     t.textContent = fmtTick(f);
+    svg.appendChild(line);
     svg.appendChild(t);
+    return { f, line, t };
+  });
+
+  function layoutStatic() {
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    track.setAttribute("width", Math.max(1, W - 1));
+    // Thin out tick labels when narrow so they never collide.
+    let lastX = -Infinity;
+    for (const { f, line, t } of ticks) {
+      const x = f2x(f);
+      line.setAttribute("x1", x); line.setAttribute("x2", x);
+      t.setAttribute("x", x);
+      const show = x - lastX >= 26 && x > 6 && x < W - 6;
+      t.style.display = show ? "" : "none";
+      if (show) lastX = x;
+    }
   }
+  layoutStatic();
 
   // Per-band shapes.
   const bands = {};
@@ -288,7 +307,7 @@ export function makeFreqAxis(container, getSr) {
     const { name } = drag;
     drag = null;
     bands[name].rect.style.cursor = "grab";
-    try { svg.releasePointerCapture(evt.pointerId); } catch (e) {}
+    try { if (evt && svg.hasPointerCapture(evt.pointerId)) svg.releasePointerCapture(evt.pointerId); } catch (e) {}
     const s = state[name];
     send({ type: "set_band", band: name, lo_hz: s.lo_hz, hi_hz: s.hi_hz, commit: true });
   }
@@ -312,6 +331,14 @@ export function makeFreqAxis(container, getSr) {
   svg.addEventListener("pointermove",   onMove);
   svg.addEventListener("pointerup",     endDrag);
   svg.addEventListener("pointercancel", endDrag);
+  svg.addEventListener("lostpointercapture", endDrag);
+  window.addEventListener("blur", () => endDrag(null));
+
+  // Track the real width so user units stay 1:1 with CSS px.
+  new ResizeObserver((entries) => {
+    const w = Math.round(entries[entries.length - 1].contentRect.width);
+    if (w > 0 && w !== W) { W = w; layoutStatic(); render(); }
+  }).observe(svg);
 
   // Clicks anywhere else on the page → deselect.
   document.addEventListener("pointerdown", (evt) => {
@@ -327,13 +354,18 @@ export function makeFreqAxis(container, getSr) {
     syncBands(metaBands) {
       if (drag) return;
       if (!metaBands) return;
+      let changed = false;
       for (const name of ORDER) {
         const b = metaBands[name];
         if (b && typeof b.lo_hz === "number" && typeof b.hi_hz === "number") {
-          state[name] = { lo_hz: b.lo_hz, hi_hz: b.hi_hz };
+          const cur = state[name];
+          if (cur.lo_hz !== b.lo_hz || cur.hi_hz !== b.hi_hz) {
+            state[name] = { lo_hz: b.lo_hz, hi_hz: b.hi_hz };
+            changed = true;
+          }
         }
       }
-      render();
+      if (changed) render();
     },
   };
 }

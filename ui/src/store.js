@@ -61,12 +61,14 @@ export const store = {
   show_onsets: false,
 
   // Visual history window (seconds) for the L/M/H rolling-lines chart. UI-only
-  // — not persisted, not sent to the server. Range: 5..30s.
+  // — not persisted, not sent to the server. Range: 2..30s.
   lines_history_s: 5,
 
-  // Server-side snapshot rate measurement (only JSON snapshot messages are
-  // counted, so the FFT enable toggle doesn't change this number).
-  snapshotTimestamps: [], // last 60 perf.now() of any inbound "snapshot" msg
+  // Connection state mirror ("connecting" | "connected" | "reconnecting")
+  // and whether the first meta after (re)connect has arrived. Controls stay
+  // disabled until `synced` so they never show stale values as live.
+  conn: "connecting",
+  synced: false,
 
   // Browser-side perf
   raf_ms_ring: new Array(60).fill(0),
@@ -89,6 +91,15 @@ export function recordVizPerf(name, ms) {
   if (!v) return;
   v.ring[v.idx % v.ring.length] = ms;
   v.idx++;
+}
+
+/** Drop all live signal state (on disconnect) so nothing frozen is shown. */
+export function clearLive() {
+  store.low = store.mid = store.high = 0;
+  store.low_raw = store.mid_raw = store.high_raw = 0;
+  store.low_onset_pulse_t = store.mid_onset_pulse_t = store.high_onset_pulse_t = -Infinity;
+  store.bpm = 0;
+  store.fft_bins = null;
 }
 
 export function avgRing(ring) {

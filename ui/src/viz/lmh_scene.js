@@ -2,11 +2,13 @@
 //   low  -> central glowing disc (radius + alpha grow with low)
 //   mid  -> full-screen background color hue (alpha grows with mid)
 //   high -> bright random noise sprinkled across the screen (count + alpha
-//           grow with high), resampled fresh every frame
+//           grow with high), resampled fresh every frame (every ~320 ms
+//           and dimmer under prefers-reduced-motion)
 // Layering (bottom -> top): dark base, mid hue tint, low disc, high noise.
 
 import { store, recordVizPerf } from "../store.js";
 import { LMH } from "../colors.js";
+import { makeSurface } from "./surface.js";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tuning. All visual knobs live here — tweak freely.
@@ -61,35 +63,71 @@ const CONFIG = {
 };
 // ─────────────────────────────────────────────────────────────────────────
 
+// Low-disc sprites: a radial gradient (alpha 1 → midStopAlphaScale → 0) at
+// one of LIGHT_STEPS lightness levels, rendered once and scaled + alpha'd
+// with drawImage/globalAlpha each frame instead of building a new gradient.
+const LIGHT_STEPS = 24;
+const SPRITE_PX = 256;
+
+const reducedMotionMq = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
+
 export function makeScene(canvas) {
   const ctx = canvas.getContext("2d", { alpha: false });
+  const surf = makeSurface(canvas);
 
-  let cssW = 0, cssH = 0;
-  {
-    const r0 = canvas.getBoundingClientRect();
-    cssW = r0.width; cssH = r0.height;
-    const ro = new ResizeObserver((entries) => {
-      const e = entries[entries.length - 1];
-      const cr = e.contentRect;
-      cssW = cr.width; cssH = cr.height;
-    });
-    ro.observe(canvas);
+  const sprites = new Array(LIGHT_STEPS).fill(null);
+  function sprite(k) {
+    let c = sprites[k];
+    if (c) return c;
+    c = document.createElement("canvas");
+    c.width = c.height = SPRITE_PX;
+    const g = c.getContext("2d");
+    const r = SPRITE_PX / 2;
+    const light = CONFIG.low.lightnessMin + (CONFIG.low.lightnessMax - CONFIG.low.lightnessMin) * (k / (LIGHT_STEPS - 1));
+    const col = (a) => `hsla(${LMH.low.hue}, ${CONFIG.low.saturation}%, ${light}%, ${a})`;
+    const grad = g.createRadialGradient(r, r, 0, r, r, r);
+    grad.addColorStop(0, col(1));
+    grad.addColorStop(CONFIG.low.midStop, col(CONFIG.low.midStopAlphaScale));
+    grad.addColorStop(1, col(0));
+    g.fillStyle = grad;
+    g.fillRect(0, 0, SPRITE_PX, SPRITE_PX);
+    sprites[k] = c;
+    return c;
   }
 
-  function fitCanvas() {
-    const dpr = window.devicePixelRatio || 1;
-    const w = Math.max(1, Math.floor(cssW * dpr));
-    const h = Math.max(1, Math.floor(cssH * dpr));
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w; canvas.height = h;
+  const MID_FILL  = `hsl(${LMH.mid.hue}, ${CONFIG.mid.saturation}%, ${CONFIG.mid.lightness}%)`;
+  const HIGH_FILL = `hsl(${LMH.high.hue}, ${CONFIG.high.saturation}%, ${CONFIG.high.lightness}%)`;
+
+  // Sparkle positions. Normally resampled every frame (the flicker is the
+  // effect); with prefers-reduced-motion they're resampled at ~3 Hz and drawn
+  // dimmer, so the field shimmers gently instead of strobing.
+  const px = new Float32Array(CONFIG.high.maxPoints);
+  const py = new Float32Array(CONFIG.high.maxPoints);
+  let lastResample = -Infinity, sampledW = 0, sampledH = 0;
+
+  function resample(w, h, n) {
+    const cx = w / 2, cy = h / 2, halfW = w * 0.5, halfH = h * 0.5;
+    const bias = CONFIG.high.edgeBias;
+    for (let i = 0; i < n; i++) {
+      // Rejection sample with edge-biased acceptance, capped attempts.
+      let x = 0, y = 0;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        x = Math.random() * w;
+        y = Math.random() * h;
+        const dx = (x - cx) / halfW;
+        const dy = (y - cy) / halfH;
+        const d = Math.min(1, Math.sqrt(dx * dx + dy * dy));
+        if (Math.random() < (1 - bias) + bias * d) break;
+      }
+      px[i] = x | 0; py[i] = y | 0;
     }
+    sampledW = w; sampledH = h;
   }
 
   function draw() {
     const t0 = performance.now();
-    fitCanvas();
-    const w = canvas.width, h = canvas.height;
-    const dpr = window.devicePixelRatio || 1;
+    const { w, h, dpr } = surf.fit();
+    const reduced = !!(reducedMotionMq && reducedMotionMq.matches);
 
     const lo = Math.max(0, Math.min(1, store.low));
     const md = Math.max(0, Math.min(1, store.mid));
@@ -99,57 +137,44 @@ export function makeScene(canvas) {
     const baseR = Math.min(w, h) * 0.5;
 
     // --- Layer 0: solid dark background. ---
+    ctx.globalAlpha = 1;
     ctx.fillStyle = CONFIG.bgColor;
     ctx.fillRect(0, 0, w, h);
 
     // --- Layer 1: MID full-screen tint (base hue, behind everything). ---
     const midAlpha = CONFIG.mid.alphaMin + (CONFIG.mid.alphaMax - CONFIG.mid.alphaMin) * md;
     if (midAlpha > 0.001) {
-      ctx.fillStyle = `hsla(${LMH.mid.hue}, ${CONFIG.mid.saturation}%, ${CONFIG.mid.lightness}%, ${midAlpha})`;
+      ctx.globalAlpha = midAlpha;
+      ctx.fillStyle = MID_FILL;
       ctx.fillRect(0, 0, w, h);
     }
 
-    // --- Layer 2: LOW central disc with radial gradient. ---
+    // --- Layer 2: LOW central disc (prerendered gradient sprite). ---
     const lowR = baseR * (CONFIG.low.radiusBase + CONFIG.low.radiusGain * lo) * CONFIG.low.radiusScale;
     const lowAlpha = CONFIG.low.alphaMin + (CONFIG.low.alphaMax - CONFIG.low.alphaMin) * lo;
     if (lowAlpha > 0.001 && lowR > 0.5) {
-      const light = CONFIG.low.lightnessMin + (CONFIG.low.lightnessMax - CONFIG.low.lightnessMin) * lo;
-      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, lowR);
-      grad.addColorStop(0,                  `hsla(${LMH.low.hue}, ${CONFIG.low.saturation}%, ${light}%, ${lowAlpha})`);
-      grad.addColorStop(CONFIG.low.midStop, `hsla(${LMH.low.hue}, ${CONFIG.low.saturation}%, ${light}%, ${lowAlpha * CONFIG.low.midStopAlphaScale})`);
-      grad.addColorStop(1,                  `hsla(${LMH.low.hue}, ${CONFIG.low.saturation}%, ${light}%, 0)`);
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(cx, cy, lowR, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.globalAlpha = lowAlpha;
+      ctx.drawImage(sprite(Math.round(lo * (LIGHT_STEPS - 1))), cx - lowR, cy - lowR, 2 * lowR, 2 * lowR);
     }
 
-    // --- Layer 3: HIGH bright random noise (resampled every frame). ---
-    const hiAlpha = CONFIG.high.alphaMin + (CONFIG.high.alphaMax - CONFIG.high.alphaMin) * hi;
+    // --- Layer 3: HIGH bright random noise. ---
+    let hiAlpha = CONFIG.high.alphaMin + (CONFIG.high.alphaMax - CONFIG.high.alphaMin) * hi;
+    if (reduced) hiAlpha *= 0.55;
     if (hiAlpha > 0.001) {
       const nPoints = Math.round(CONFIG.high.minPoints + (CONFIG.high.maxPoints - CONFIG.high.minPoints) * hi);
       const sz = Math.max(1, Math.round(CONFIG.high.pointSize * dpr));
-      const halfW = w * 0.5, halfH = h * 0.5;
-      const bias = CONFIG.high.edgeBias;
-      ctx.fillStyle = `hsla(${LMH.high.hue}, ${CONFIG.high.saturation}%, ${CONFIG.high.lightness}%, ${hiAlpha})`;
-      ctx.beginPath();
-      for (let i = 0; i < nPoints; i++) {
-        // Rejection sample with edge-biased acceptance, capped attempts so
-        // we never loop forever in pathological cases.
-        let x = 0, y = 0;
-        for (let attempt = 0; attempt < 4; attempt++) {
-          x = Math.random() * w;
-          y = Math.random() * h;
-          const dx = (x - cx) / halfW;
-          const dy = (y - cy) / halfH;
-          const d = Math.min(1, Math.sqrt(dx * dx + dy * dy));
-          const accept = (1 - bias) + bias * d;
-          if (Math.random() < accept) break;
-        }
-        ctx.rect(x | 0, y | 0, sz, sz);
+      const interval = reduced ? 320 : 0;
+      if (t0 - lastResample >= interval || sampledW !== w || sampledH !== h) {
+        lastResample = t0;
+        resample(w, h, reduced ? CONFIG.high.maxPoints : nPoints);
       }
+      ctx.globalAlpha = hiAlpha;
+      ctx.fillStyle = HIGH_FILL;
+      ctx.beginPath();
+      for (let i = 0; i < nPoints; i++) ctx.rect(px[i], py[i], sz, sz);
       ctx.fill();
     }
+    ctx.globalAlpha = 1;
 
     recordVizPerf("scene", performance.now() - t0);
   }

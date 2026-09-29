@@ -3,6 +3,12 @@
 Returns (targeted_replies, broadcasts) — never raises. The WS layer turns
 exceptions into {"type":"error",...}; the dispatcher prefers to do that
 itself with a precise reason.
+
+Meta is NOT returned per message: handlers that change state call
+`_meta_changed()`, which marks meta dirty and lets the WS broadcast loop
+send at most one coalesced meta per tick to every client (slider drags used
+to broadcast the full meta per message). Error replies carry an immediate
+targeted meta so the requesting UI snaps its controls back at once.
 """
 from __future__ import annotations
 
@@ -14,6 +20,7 @@ import yaml
 
 from . import validate as V
 from ..config import write_yaml_atomic
+from ..dsp.filters import clamp_band_edges
 
 log = logging.getLogger(__name__)
 
@@ -62,10 +69,28 @@ class Dispatcher:
         try:
             return await h(self, msg)
         except ValueError as e:
-            return [{"type": "error", "reason": str(e)}], []
+            return self._error_reply(str(e))
         except Exception as e:
             log.exception("dispatcher handler %s failed", t)
-            return [{"type": "error", "reason": f"internal: {e}"}], []
+            return self._error_reply(f"internal: {e}")
+
+    def _error_reply(self, reason: str):
+        """Error + the current meta, targeted at the requester, so the UI's
+        optimistic control state (slider position, device dropdown) snaps
+        back to the server's truth immediately. Also marks meta dirty in
+        case a partial change did land before the failure."""
+        replies = [{"type": "error", "reason": reason}]
+        try:
+            replies.append({"type": "meta", **self.app.snapshot_meta()})
+        except Exception:
+            log.exception("snapshot_meta failed while building error reply")
+        self.app.mark_meta_dirty()
+        return replies, []
+
+    def _meta_changed(self):
+        """State changed: coalesced meta broadcast on the next WS tick."""
+        self.app.mark_meta_dirty()
+        return [], []
 
     # ---------- handlers ----------
 
@@ -90,7 +115,7 @@ class Dispatcher:
         # whenever the UI says FFT is on.
         self.app.cfg.osc.send_fft = enabled
         self.app.persister.request(commit=True)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _set_band(self, msg):
         band = msg.get("band")
@@ -98,7 +123,11 @@ class Dispatcher:
             raise ValueError("band must be 'low', 'mid', or 'high'")
         commit = bool(msg.get("commit", True))
         sr = self.app.current_sr()
-        lo, hi = V.validate_band(band, msg.get("lo_hz"), msg.get("hi_hz"), sr)
+        # Structural checks here; edges above the device's Nyquist-safe
+        # range are clamped (hi ≤ 0.45·sr), not rejected — the coalesced
+        # meta reports the clamped values back to the UI.
+        lo, hi = V.validate_band(band, msg.get("lo_hz"), msg.get("hi_hz"))
+        lo, hi = clamp_band_edges(lo, hi, sr)
         getattr(self.app.cfg.dsp, band).lo_hz = lo
         getattr(self.app.cfg.dsp, band).hi_hz = hi
         # IIR retune is debounced (50ms); pipeline knobs that depend on the
@@ -107,7 +136,7 @@ class Dispatcher:
         self.app.schedule_filter_retune()
         self.app.apply_bands()
         self.app.persister.request(commit=commit)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _set_smoothing(self, msg):
         commit = bool(msg.get("commit", True))
@@ -119,7 +148,7 @@ class Dispatcher:
             self.app.cfg.dsp.tau_attack = {**self.app.cfg.dsp.tau_attack, **tau_atk}
         self.app.apply_smoothing()
         self.app.persister.request(commit=commit)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _set_autoscale(self, msg):
         commit = bool(msg.get("commit", True))
@@ -132,25 +161,32 @@ class Dispatcher:
         )
         self.app.apply_autoscale(ok)
         self.app.persister.request(commit=commit)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _list_devices(self, msg):
         probe = bool(msg.get("probe", False))
-        items = await asyncio.to_thread(self.app.list_devices_with_probe, probe)
+        # Hold the device-switch lock: the probe opens/closes PortAudio
+        # streams on a worker thread, which must not overlap a hot-switch's
+        # open/close on the loop thread (PortAudio isn't safe for concurrent
+        # stream open/close across threads).
+        async with self.app.device_switch_lock:
+            items = await asyncio.to_thread(self.app.list_devices_with_probe, probe)
         return [{"type": "devices", "items": items}], []
 
     async def _set_device(self, msg):
         idx = V.validate_device_index(msg.get("index"))
+        # Transactional: on failure the previous device is restored and this
+        # raises ValueError → error + snap-back meta to the requester.
         await self.app.hot_switch_device(idx)
         self.app.persister.request(commit=True)
-        return [], [{"type": "meta", **self.app.snapshot_meta()},
-                    {"type": "devices", "items": self.app.list_devices_with_probe(False)}]
+        self.app.mark_meta_dirty()
+        return [], [{"type": "devices", "items": self.app.list_devices_with_probe(False)}]
 
     async def _set_n_fft_bins(self, msg):
         n = V.validate_n_fft_bins(msg.get("n"))
         self.app.apply_fft_n_bins(n)
         self.app.persister.request(commit=True)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _set_ws_snapshot_hz(self, msg):
         commit = bool(msg.get("commit", True))
@@ -158,7 +194,7 @@ class Dispatcher:
         self.app.ws.set_snapshot_hz(hz)
         self.app.cfg.ws.snapshot_hz = hz
         self.app.persister.request(commit=commit)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     # ---------- presets ----------
 
@@ -208,12 +244,19 @@ class Dispatcher:
             bands_raw = {k: d.get(k) for k in ("low", "mid", "high") if isinstance(d.get(k), dict)}
             if len(bands_raw) != 3:
                 raise _SkipSection
-            ok = V.validate_bands(bands_raw, sr)
+            ok = V.validate_bands(bands_raw)
             for nm, (lo, hi) in ok.items():
                 cfg_band = getattr(self.app.cfg.dsp, nm)
-                cfg_band.lo_hz, cfg_band.hi_hz = lo, hi
+                cfg_band.lo_hz, cfg_band.hi_hz = clamp_band_edges(lo, hi, sr)
             self.app.schedule_filter_retune()
             self.app.apply_bands()
+
+        with _preset_section("dsp.filter_order", applied):
+            if "filter_order" not in d:
+                raise _SkipSection
+            n = V.validate_filter_order(d["filter_order"])
+            if n != self.app.cfg.dsp.filter_order:
+                self.app.apply_filter_order(n)
 
         with _preset_section("dsp.tau", applied):
             if "tau" not in d and "tau_attack" not in d:
@@ -283,53 +326,53 @@ class Dispatcher:
         if not applied:
             raise ValueError(f"preset {name!r} produced no valid fields")
         self.app.persister.request(commit=True)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _set_fft_send_raw_db(self, msg):
         send_raw = bool(msg.get("send_raw_db", False))
         self.app.cfg.fft.send_raw_db = send_raw
         self.app.persister.request(commit=True)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _set_fft_peak_smear(self, msg):
         commit = bool(msg.get("commit", True))
         v = V.validate_peak_smear_oct(msg.get("peak_smear_oct"))
         self.app.apply_fft_peak_smear(v)
         self.app.persister.request(commit=commit)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _set_ui_layout(self, msg):
         commit = bool(msg.get("commit", True))
         layout = V.validate_ui_layout(msg.get("layout") or {})
         self.app.cfg.ui.layout = layout
         self.app.persister.request(commit=commit)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _set_peak_decay(self, msg):
         commit = bool(msg.get("commit", True))
         v = V.validate_peak_decay_per_s(msg.get("peak_decay_per_s"))
         self.app.cfg.ui.peak_decay_per_s = v
         self.app.persister.request(commit=commit)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _set_show_onsets(self, msg):
         self.app.cfg.ui.show_onsets = bool(msg.get("show_onsets", False))
         self.app.persister.request(commit=True)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _set_fft_tilt(self, msg):
         commit = bool(msg.get("commit", True))
         v = V.validate_fft_tilt_db_per_oct(msg.get("tilt_db_per_oct"))
         self.app.apply_fft_tilt(v)
         self.app.persister.request(commit=commit)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _set_filter_order(self, msg):
         commit = bool(msg.get("commit", True))
         n = V.validate_filter_order(msg.get("order"))
         self.app.apply_filter_order(n)
         self.app.persister.request(commit=commit)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     async def _set_onset(self, msg):
         commit = bool(msg.get("commit", True))
@@ -344,7 +387,7 @@ class Dispatcher:
             raise ValueError("set_onset needs at least one of sensitivity / refractory_s / slow_tau_s / abs_floor")
         self.app.apply_onset(band, ok)
         self.app.persister.request(commit=commit)
-        return [], [{"type": "meta", **self.app.snapshot_meta()}]
+        return self._meta_changed()
 
     _handlers = {
         "set_fft": _set_fft,

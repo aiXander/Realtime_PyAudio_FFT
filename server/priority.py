@@ -11,7 +11,11 @@ macOS: pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED) per-thread.
   QOS_CLASS_USER_INTERACTIVE — that tier is for UI-critical work and would
   be impolite for a long-running background server.
 
-Linux: os.nice(-5) per-thread (Linux niceness is per-thread). Will silently
+Linux: absolute niceness -5 per-thread via setpriority(PRIO_PROCESS, 0, -5)
+  (on Linux, who=0 targets the calling thread; niceness is per-thread). Must
+  be absolute, not os.nice(-5): nice() is relative, and threads spawned after
+  the main thread was boosted inherit its -5 and would compound to -10. Never
+  lowers a thread that already runs at or below the target. Will silently
   no-op without CAP_SYS_NICE / appropriate rlimits.
 
 Windows / other: no-op.
@@ -33,6 +37,9 @@ log = logging.getLogger(__name__)
 
 # <sys/qos.h>
 _QOS_CLASS_USER_INITIATED = 0x19
+
+# Linux absolute target niceness for boosted threads.
+_LINUX_TARGET_NICE = -5
 
 _set_qos = None
 _macos_probed = False
@@ -66,8 +73,11 @@ def boost_current_thread(label: str = "thread") -> bool:
                 log.debug("priority: pthread_set_qos rc=%d for %s", rc, label)
         elif sys.platform.startswith("linux"):
             try:
-                os.nice(-5)
-                log.info("priority: %s -> nice -5", label)
+                cur = os.getpriority(os.PRIO_PROCESS, 0)
+                if cur <= _LINUX_TARGET_NICE:
+                    return True  # already at/above target priority (inherited or preset)
+                os.setpriority(os.PRIO_PROCESS, 0, _LINUX_TARGET_NICE)
+                log.info("priority: %s -> nice %d", label, _LINUX_TARGET_NICE)
                 return True
             except (PermissionError, OSError):
                 pass

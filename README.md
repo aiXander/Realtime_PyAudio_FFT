@@ -74,19 +74,33 @@ sudo apt install libportaudio2 portaudio19-dev
 Uses [minimal dependencies](pyproject.toml), should be safe to install anywhere.
 
 ```bash
+# Recommended (uv): creates a .venv from uv.lock — no manual activation needed
+uv sync
+
+# Or with plain pip
 pip install -e ".[dev]"
 ```
 
 ## Run
 
 ```bash
-audio-server                    # reads ./configs/main.yaml, opens WS on 8765, UI on 8766
-audio-server --open             # also opens the UI in your default browser
-audio-server --no-ws            # headless OSC-only mode
-audio-server --config /path/to/cfg.yaml --log-level DEBUG
+# ⭐ The one command: start the server + open the UI in your browser
+uv run audio-server --open
 ```
 
-Equivalent to `python -m server.main`.
+More options:
+
+```bash
+uv run audio-server                    # reads ./configs/main.yaml, opens WS on 8765, UI on 8766
+uv run audio-server --open             # also opens the UI in your default browser
+uv run audio-server --no-ws            # headless OSC-only mode
+uv run audio-server --config /path/to/cfg.yaml --log-level DEBUG
+```
+
+Equivalent to `uv run python -m server.main`.
+
+> Using plain pip instead of uv? Drop the `uv run` prefix (e.g. `audio-server --open`),
+> but make sure the environment you installed into is active first.
 
 The browser UI is available at **http://127.0.0.1:8766** once the server
 is running. Don't open `ui/index.html` directly with `file://` — ES modules
@@ -394,7 +408,7 @@ relying on the auto stereo mono-mix.
 If you don't need the browser UI or runtime control (eg running on a raspberry Pi in performance mode):
 
 ```bash
-audio-server --no-ws
+uv run audio-server --no-ws
 ```
 
 The WS server, broadcaster, and dispatcher are not started; only OSC + the

@@ -118,6 +118,14 @@ class OnsetTracker:
             self.slow_tau_s[i] = float(p.get("slow_tau_s", self.DEFAULT_SLOW_TAU_S))
             self.abs_floor[i] = float(p.get("abs_floor", self.DEFAULT_ABS_FLOOR))
         self.alpha_slow = np.empty(3, dtype=np.float64)
+        # Monotonic per-band counters. The WS broadcaster reads these and
+        # emits an onset flag whenever the counter advances between snapshots,
+        # so onsets that fall between WS snapshot ticks (audio block rate
+        # ≈ 187 Hz at 48k/256 vs ws_snapshot_hz default 60) are never lost.
+        # Allocated once and NEVER reset (not even by reset()): the
+        # broadcaster compares with `!=`, so zeroing them on a device switch
+        # would emit a spurious onset on every band.
+        self.onset_count = np.zeros(3, dtype=np.int64)
         self._configure(sr, blocksize)
         self.reset()
 
@@ -158,14 +166,18 @@ class OnsetTracker:
         self.armed = [False, False, False]
         self.t_now = 0.0
         self.last_fire_t = np.full(3, -1e9, dtype=np.float64)
-        # Monotonic per-band counters. The WS broadcaster reads these and
-        # emits an onset flag whenever the counter advances between snapshots,
-        # so onsets that fall between WS snapshot ticks (audio block rate
-        # ≈ 187 Hz at 48k/256 vs ws_snapshot_hz default 60) are never lost.
-        self.onset_count = np.zeros(3, dtype=np.int64)
+        # onset_count is deliberately NOT reset — see __init__.
         # BPM state (low band only)
         self.onset_times: list[float] = []
         self.bpm_smoothed = 0.0
+
+    def advance(self, n_blocks: int) -> None:
+        """Advance the detector clock by `n_blocks` blocks that were
+        dropped without being processed (DSPWorker backlog skip / failed
+        ring read). Keeps IOIs — and so BPM — on real audio time across
+        stalls. Envelope state is left as-is. Called on the DSP worker."""
+        if n_blocks > 0:
+            self.t_now += n_blocks * self.dt
 
     def update(self, lmh: np.ndarray, out_onsets: np.ndarray) -> float:
         """One block. Writes per-band onset pulses (0/1) into `out_onsets`

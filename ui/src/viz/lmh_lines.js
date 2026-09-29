@@ -1,18 +1,23 @@
 // Three rolling polylines for low/mid/high.
 //
-// - Horizontal alpha gradient: line goes 1.0 (right, newest) → 0.1 (left, oldest).
-// - Subtle per-band area fill at ~0.10 alpha on the right, fading to ~0.02 on the left.
+// - Horizontal alpha gradient: line goes 1.0 (right, newest) → 0 (left, oldest).
+// - Subtle per-band area fill at ~0.10 alpha on the right, fading to 0 on the left.
 // - Faint y-axis labels (0..1) on the left edge.
 // - History window (2..30s, log-scale) via store.lines_history_s. Each sample is
 //   plotted at x = w * (1 - age_ms / window_ms), so the time axis is absolute:
 //   a half-empty buffer leaves the left portion of the canvas blank, and new
 //   samples flow in from the right rather than re-stretching the existing curve.
+//
+// Static content (background, mid grid line, axis labels) lives in an
+// offscreen layer rebuilt only on resize / DPR change; each frame is one
+// drawImage + three fill/stroke pairs. No per-frame allocation.
 
 import { store, recordVizPerf } from "../store.js";
 import { LMH } from "../colors.js";
+import { makeSurface, makeLayer, FONT_MONO, BG } from "./surface.js";
 
 // Ring big enough to cover 30s of history at the top UI refresh rate (120 fps)
-// with comfortable headroom — 4096 * 4 bytes * 4 arrays ≈ 64 KB total.
+// with comfortable headroom.
 const N_MAX = 4096;
 
 const FILL_ALPHA_RIGHT   = 0.10;
@@ -22,74 +27,72 @@ const STROKE_ALPHA_LEFT  = 0.0;
 
 export function makeLines(canvas) {
   const ctx = canvas.getContext("2d", { alpha: false });
+  const surf = makeSurface(canvas);
+  const layer = makeLayer();
   const buf = {
     low:  new Float32Array(N_MAX),
     mid:  new Float32Array(N_MAX),
     high: new Float32Array(N_MAX),
   };
-  const ts = new Float32Array(N_MAX); // ms since epoch0 (Float32 precision is fine for windows < ~30s)
+  // Float64: ms since epoch0. Float32 has only ~24 bits of mantissa, so after
+  // a few hours of uptime timestamps quantize to several ms and the x
+  // positions visibly jitter.
+  const ts = new Float64Array(N_MAX);
   const epoch0 = performance.now();
   let head = 0, count = 0;
 
-  // Cached per-resize.
-  let cw = 0, ch = 0;
+  let gradVersion = -1;
   let strokeGrads = null, fillGrads = null;
 
   // rAF pauses while the tab is hidden, so the ring's newest sample is
   // timestamped from when we last drew. On refocus, drop the stale history
   // and let the curve fill in from the right edge again.
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) { head = 0; count = 0; }
+    if (!document.hidden) reset();
   });
 
-  function hexToRgb(hex) {
-    const m = hex.replace("#", "");
-    if (m.length === 3) return m.split("").map((c) => parseInt(c + c, 16));
-    return [parseInt(m.slice(0, 2), 16), parseInt(m.slice(2, 4), 16), parseInt(m.slice(4, 6), 16)];
-  }
+  function reset() { head = 0; count = 0; }
 
   function buildGradients(w) {
-    const mk = (hex, a0, a1) => {
-      const [r, g, b] = hexToRgb(hex);
+    const mk = (rgb, a0, a1) => {
       const grad = ctx.createLinearGradient(0, 0, w, 0);
-      grad.addColorStop(0, `rgba(${r},${g},${b},${a0})`);
-      grad.addColorStop(1, `rgba(${r},${g},${b},${a1})`);
+      grad.addColorStop(0, `rgba(${rgb},${a0})`);
+      grad.addColorStop(1, `rgba(${rgb},${a1})`);
       return grad;
     };
     strokeGrads = {
-      low:  mk(LMH.low.hex,  STROKE_ALPHA_LEFT, STROKE_ALPHA_RIGHT),
-      mid:  mk(LMH.mid.hex,  STROKE_ALPHA_LEFT, STROKE_ALPHA_RIGHT),
-      high: mk(LMH.high.hex, STROKE_ALPHA_LEFT, STROKE_ALPHA_RIGHT),
+      low:  mk(LMH.low.rgb,  STROKE_ALPHA_LEFT, STROKE_ALPHA_RIGHT),
+      mid:  mk(LMH.mid.rgb,  STROKE_ALPHA_LEFT, STROKE_ALPHA_RIGHT),
+      high: mk(LMH.high.rgb, STROKE_ALPHA_LEFT, STROKE_ALPHA_RIGHT),
     };
     fillGrads = {
-      low:  mk(LMH.low.hex,  FILL_ALPHA_LEFT, FILL_ALPHA_RIGHT),
-      mid:  mk(LMH.mid.hex,  FILL_ALPHA_LEFT, FILL_ALPHA_RIGHT),
-      high: mk(LMH.high.hex, FILL_ALPHA_LEFT, FILL_ALPHA_RIGHT),
+      low:  mk(LMH.low.rgb,  FILL_ALPHA_LEFT, FILL_ALPHA_RIGHT),
+      mid:  mk(LMH.mid.rgb,  FILL_ALPHA_LEFT, FILL_ALPHA_RIGHT),
+      high: mk(LMH.high.rgb, FILL_ALPHA_LEFT, FILL_ALPHA_RIGHT),
     };
   }
 
-  let cssW = 0, cssH = 0;
-  {
-    const r0 = canvas.getBoundingClientRect();
-    cssW = r0.width; cssH = r0.height;
-    const ro = new ResizeObserver((entries) => {
-      const e = entries[entries.length - 1];
-      const cr = e.contentRect;
-      cssW = cr.width; cssH = cr.height;
-    });
-    ro.observe(canvas);
-  }
-
-  function fitCanvas() {
-    const dpr = window.devicePixelRatio || 1;
-    const w = Math.max(1, Math.floor(cssW * dpr));
-    const h = Math.max(1, Math.floor(cssH * dpr));
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w; canvas.height = h;
+  function buildStatic(w, h, dpr) {
+    const c = layer.canvas, g = layer.ctx;
+    c.width = w; c.height = h;
+    g.fillStyle = BG;
+    g.fillRect(0, 0, w, h);
+    // Quarter grid, faint; mid line slightly stronger.
+    g.lineWidth = Math.max(1, Math.round(dpr));
+    for (const [f, a] of [[0.25, 0.025], [0.5, 0.05], [0.75, 0.025]]) {
+      const y = Math.round(f * h) + 0.5;
+      g.strokeStyle = `rgba(255,255,255,${a})`;
+      g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
     }
-    if (w !== cw || h !== ch) {
-      cw = w; ch = h;
-      buildGradients(w);
+    g.fillStyle = "rgba(255,255,255,0.32)";
+    g.font = `${Math.round(10 * dpr)}px ${FONT_MONO}`;
+    g.textBaseline = "middle";
+    g.textAlign = "left";
+    const padL = 4 * dpr;
+    for (const [f, label] of [[0.0, "1.0"], [0.5, "0.5"], [1.0, "0"]]) {
+      const y = f * h;
+      const yy = f === 0.0 ? y + 7 * dpr : f === 1.0 ? y - 7 * dpr : y;
+      g.fillText(label, padL, yy);
     }
   }
 
@@ -116,15 +119,13 @@ export function makeLines(canvas) {
     return k;
   }
 
-  // Scratch arrays for one series' (x,y) — sized lazily.
-  let _xs = new Float32Array(N_MAX);
-  let _ys = new Float32Array(N_MAX);
+  // Scratch arrays for one series' (x,y).
+  const _xs = new Float32Array(N_MAX);
+  const _ys = new Float32Array(N_MAX);
 
   function drawSeries(arr, fillGrad, strokeGrad, K, w, h, dpr, histMs, nowRel) {
     if (K < 2) return;
     const latest = (head - 1 + N_MAX) % N_MAX;
-    // Walk the ring once; record (x,y) so we can issue a stroke + fill on
-    // the same Path2D without re-tracing.
     for (let i = 0; i < K; i++) {
       const idx = (latest - (K - 1 - i) + N_MAX) % N_MAX;
       const v = arr[idx];
@@ -134,10 +135,7 @@ export function makeLines(canvas) {
     const firstX = _xs[0];
     const lastX  = _xs[K - 1];
 
-    // Fill first (closed to baseline), stroke on top — preserves original
-    // layering. The expensive part of the old code was the per-point ring
-    // index + timestamp math; doing that once and replaying lineTo's twice
-    // is cheap.
+    // Fill first (closed to baseline), stroke on top.
     ctx.beginPath();
     ctx.moveTo(_xs[0], _ys[0]);
     for (let i = 1; i < K; i++) ctx.lineTo(_xs[i], _ys[i]);
@@ -156,39 +154,16 @@ export function makeLines(canvas) {
     ctx.stroke();
   }
 
-  function drawGrid(w, h) {
-    ctx.strokeStyle = "rgba(255,255,255,0.05)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (const f of [0.5]) {
-      const y = Math.round(f * h) + 0.5;
-      ctx.moveTo(0, y); ctx.lineTo(w, y);
-    }
-    ctx.stroke();
-  }
-
-  function drawAxisLabels(h, dpr) {
-    ctx.fillStyle = "rgba(255,255,255,0.32)";
-    ctx.font = `${10 * dpr}px ui-monospace, SFMono-Regular, Menlo, monospace`;
-    ctx.textBaseline = "middle";
-    ctx.textAlign = "left";
-    const padL = 4 * dpr;
-    for (const [f, label] of [[0.0, "1.0"], [0.5, "0.5"], [1.0, "0"]]) {
-      const y = f * h;
-      const yy = f === 0.0 ? y + 7 * dpr : f === 1.0 ? y - 7 * dpr : y;
-      ctx.fillText(label, padL, yy);
-    }
-  }
-
   function draw() {
     const t0 = performance.now();
-    fitCanvas();
+    const { w, h, dpr, version } = surf.fit();
+    if (version !== gradVersion) {
+      gradVersion = version;
+      buildGradients(w);
+      buildStatic(w, h, dpr);
+    }
     update();
-    const dpr = window.devicePixelRatio || 1;
-    const w = canvas.width, h = canvas.height;
-    ctx.fillStyle = "#0a0b0d";
-    ctx.fillRect(0, 0, w, h);
-    drawGrid(w, h);
+    ctx.drawImage(layer.canvas, 0, 0);
 
     const histS = Math.max(2, Math.min(30, store.lines_history_s ?? 5));
     const histMs = histS * 1000;
@@ -198,8 +173,7 @@ export function makeLines(canvas) {
     drawSeries(buf.mid,  fillGrads.mid,  strokeGrads.mid,  K, w, h, dpr, histMs, nowRel);
     drawSeries(buf.high, fillGrads.high, strokeGrads.high, K, w, h, dpr, histMs, nowRel);
 
-    drawAxisLabels(h, dpr);
     recordVizPerf("lines", performance.now() - t0);
   }
-  return { draw };
+  return { draw, reset };
 }

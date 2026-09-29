@@ -1,7 +1,7 @@
 // Entry point. Wires WS handlers -> store, sets up controls, runs RAF loop.
 
-import { connect, onMessage, onError } from "./ws.js";
-import { store, avgRing, p95Ring } from "./store.js";
+import { connect, onMessage, onError, onStatus, retryNow, snapshotRate, resetSnapshotRate } from "./ws.js";
+import { store, avgRing, p95Ring, clearLive } from "./store.js";
 import { setupControls } from "./controls.js";
 import { makeLines } from "./viz/lmh_lines.js";
 import { makeBars }  from "./viz/lmh_bars.js";
@@ -10,6 +10,7 @@ import { makeFft }   from "./viz/fft_2d.js";
 import { setupTooltips } from "./tooltips.js";
 import { setupLayout, applyLayout } from "./layout.js";
 import { setupSidebar } from "./sidebar.js";
+import { toast } from "./toast.js";
 
 setupSidebar();
 setupLayout();
@@ -20,9 +21,70 @@ const bars  = makeBars(document.getElementById("viz-bars"));
 const scene = makeScene(document.getElementById("viz-scene"));
 const fft   = makeFft(document.getElementById("viz-fft"));
 
-// ----- WS handlers -----
 const bpmEl = document.getElementById("bpm-readout");
-let bpmText = bpmEl ? bpmEl.textContent : "";
+const bpmVal = bpmEl ? bpmEl.querySelector(".bpm-value") : null;
+const fftTitleMode = document.getElementById("fft-title-mode");
+const bandpassFs = document.getElementById("fieldset-bandpass");
+const uiFpsEl = document.getElementById("ui-fps");
+const srvFpsEl = document.getElementById("server-fps");
+const overlay = document.getElementById("conn-overlay");
+const overlayMsg = document.getElementById("conn-overlay-msg");
+
+let bpmText = "";
+function setBpm(bpm) {
+  const text = bpm > 0 ? bpm.toFixed(1) : "—";
+  if (text === bpmText || !bpmVal) return;
+  bpmText = text;
+  bpmVal.textContent = text;
+  bpmEl.classList.toggle("locked", bpm > 0);
+}
+setBpm(0);
+
+// ----- Connection state -----
+// Offline: wipe live data (no frozen bars/spectrum/BPM), dim the canvases
+// behind an overlay, and disable every control until the server greets us
+// with a fresh meta — which then re-syncs everything.
+let syncFallback = null;
+function setLive(live) {
+  document.body.classList.toggle("offline", !live);
+  if (overlay) overlay.hidden = live;
+  controls.setLive(live);
+}
+
+onStatus((state) => {
+  store.conn = state;
+  if (retryBtn) retryBtn.hidden = state !== "reconnecting";
+  if (state === "connected") {
+    // Wait for the greeting meta before enabling controls. Safety net: if
+    // it never arrives, enable anyway after 3 s rather than lock the UI.
+    if (overlayMsg) overlayMsg.textContent = "Syncing with server…";
+    clearTimeout(syncFallback);
+    syncFallback = setTimeout(() => { if (!store.synced) { store.synced = true; setLive(true); } }, 3000);
+    return;
+  }
+  clearTimeout(syncFallback);
+  const wasSynced = store.synced;
+  store.synced = false;
+  clearLive();
+  resetSnapshotRate();
+  lines.reset();
+  bars.reset();
+  fft.reset();
+  setBpm(0);
+  if (srvFpsEl) srvFpsEl.textContent = "srv — Hz";
+  if (overlayMsg) {
+    overlayMsg.textContent = state === "connecting"
+      ? "Connecting to the audio server…"
+      : "Lost connection to the audio server. Retrying…";
+  }
+  setLive(false);
+  if (wasSynced) toast("Disconnected from the audio server", "err");
+});
+const retryBtn = document.getElementById("conn-overlay-retry");
+retryBtn?.addEventListener("click", retryNow);
+setLive(false); // until the first meta arrives
+
+// ----- WS handlers -----
 onMessage("snapshot", (m) => {
   store.low = m.low; store.mid = m.mid; store.high = m.high;
   store.low_raw = m.low_raw; store.mid_raw = m.mid_raw; store.high_raw = m.high_raw;
@@ -32,31 +94,39 @@ onMessage("snapshot", (m) => {
   if (m.high_onset) store.high_onset_pulse_t = now;
   if (typeof m.bpm === "number") {
     store.bpm = m.bpm;
-    // Only touch the DOM when the rendered string actually changes —
-    // snapshots arrive at up to 60 Hz and BPM moves at most a few times/sec.
-    const text = m.bpm > 0 ? `${m.bpm.toFixed(1)} BPM` : "— BPM";
-    if (bpmEl && text !== bpmText) { bpmText = text; bpmEl.textContent = text; }
+    setBpm(m.bpm); // touches the DOM only when the rendered text changes
   }
 });
 
+let lastFftEnabled = null, lastRawDb = null;
 onMessage("meta", (m) => {
   store.meta = { ...store.meta, ...m };
   if (m.fft_db_floor !== undefined) store.fft_db_floor = m.fft_db_floor;
   if (m.fft_db_ceiling !== undefined) store.fft_db_ceiling = m.fft_db_ceiling;
   if (m.fft_send_raw_db !== undefined) store.fft_send_raw_db = !!m.fft_send_raw_db;
-  if (m.ui_layout) applyLayout(m.ui_layout);
+  if (m.ui_layout) applyLayout(m.ui_layout); // no-op when unchanged
   // When FFT is disabled, drop the last frame so the viz shows "FFT disabled"
   // instead of a frozen spectrum from the moment of toggle-off.
   if (m.fft_enabled === false) store.fft_bins = null;
-  // Mirror the band-edit UI into the FFT canvas when FFT is on; hide the
-  // side-panel "Bandpass edges" fieldset since the canvas overlay replaces it.
   if (m.bands) fft.syncBands(m.bands);
-  if (m.fft_enabled !== undefined) {
+  if (m.fft_enabled !== undefined && m.fft_enabled !== lastFftEnabled) {
+    lastFftEnabled = m.fft_enabled;
+    // The FFT canvas band overlay replaces the side-panel "Bandpass edges"
+    // widget while FFT is on.
     fft.setInteractive(!!m.fft_enabled);
-    const fs = document.getElementById("fieldset-bandpass");
-    if (fs) fs.style.display = m.fft_enabled ? "none" : "";
+    if (bandpassFs) bandpassFs.hidden = !!m.fft_enabled;
+  }
+  const rawDb = !!store.meta.fft_send_raw_db;
+  if (rawDb !== lastRawDb && fftTitleMode) {
+    lastRawDb = rawDb;
+    fftTitleMode.textContent = rawDb ? "log-x · raw dB" : "log-x · scaled 0..1";
   }
   controls.syncMeta();
+  if (!store.synced && store.conn === "connected") {
+    store.synced = true;
+    clearTimeout(syncFallback);
+    setLive(true);
+  }
 });
 
 onMessage("devices", (m) => {
@@ -69,19 +139,29 @@ onMessage("presets", (m) => {
   controls.syncPresets();
 });
 
+const cbOverrunsEl = document.getElementById("cb_overruns");
+const dspDropsEl = document.getElementById("dsp_drops");
+const fftDropsEl = document.getElementById("fft_drops");
 onMessage("server_status", (m) => {
   store.status = m;
-  document.getElementById("cb_overruns").textContent = m.cb_overruns;
-  document.getElementById("dsp_drops").textContent = m.dsp_drops;
-  document.getElementById("fft_drops").textContent = m.fft_drops;
+  setCounter(cbOverrunsEl, m.cb_overruns);
+  setCounter(dspDropsEl, m.dsp_drops);
+  setCounter(fftDropsEl, m.fft_drops);
   renderPerfPanel();
 });
+function setCounter(el, v) {
+  if (!el) return;
+  const t = String(v ?? 0);
+  if (el.textContent !== t) el.textContent = t;
+  el.classList.toggle("nonzero", !!v);
+}
 
+const errLog = document.getElementById("err-log");
 onError((reason) => {
-  const log = document.getElementById("err-log");
   const ts = new Date().toLocaleTimeString();
-  log.textContent = `[${ts}] ${reason}\n` + log.textContent;
-  if (log.textContent.length > 4000) log.textContent = log.textContent.slice(0, 4000);
+  errLog.textContent = `[${ts}] ${reason}\n` + errLog.textContent;
+  if (errLog.textContent.length > 4000) errLog.textContent = errLog.textContent.slice(0, 4000);
+  toast(reason, "err");
   controls.snapBackOnError(reason);
 });
 
@@ -147,27 +227,28 @@ function ensurePerfRows() {
   for (const r of BROWSER_ROWS) addPerfRow("b_" + r.key, r.key, r.tooltip);
 }
 
+const perfRowEls = {};
+
 function addPerfRow(id, label, tooltip) {
   const row = document.createElement("div");
   row.className = "perf-row";
   row.id = "perf-" + id;
   if (tooltip) row.setAttribute("data-tooltip", tooltip);
-  row.innerHTML = `<span>${label}</span><div class="perf-bar"><div class="perf-bar-fill"></div></div><span class="perf-num">- / -</span>`;
+  row.innerHTML = `<span class="perf-label">${label}</span><div class="perf-bar"><div class="perf-bar-fill"></div></div><span class="perf-num">– / –</span>`;
   perfContainer.appendChild(row);
+  perfRowEls[id] = { row, fill: row.querySelector(".perf-bar-fill"), num: row.querySelector(".perf-num") };
 }
 
+const fmtMs = (x) => (x >= 10 ? x.toFixed(1) : x.toFixed(2));
 function setPerfRow(id, avg_ms, p95_ms, load_pct, disabled) {
-  const row = document.getElementById("perf-" + id);
-  if (!row) return;
-  row.classList.toggle("disabled", !!disabled);
-  const fill = row.querySelector(".perf-bar-fill");
-  const num  = row.querySelector(".perf-num");
-  fill.style.width = `${Math.min(100, load_pct)}%`;
-  fill.classList.remove("amber", "red");
-  if (load_pct >= 80) fill.classList.add("red");
-  else if (load_pct >= 50) fill.classList.add("amber");
-  const fmt = (x) => (x >= 10 ? x.toFixed(1) : x.toFixed(2));
-  num.textContent = `${fmt(avg_ms)} / ${fmt(p95_ms)} ms`;
+  const r = perfRowEls[id];
+  if (!r) return;
+  r.row.classList.toggle("disabled", !!disabled);
+  r.fill.style.width = `${Math.min(100, load_pct).toFixed(1)}%`;
+  r.fill.classList.toggle("red", load_pct >= 80);
+  r.fill.classList.toggle("amber", load_pct >= 50 && load_pct < 80);
+  const t = `${fmtMs(avg_ms)} / ${fmtMs(p95_ms)} ms`;
+  if (r.num.textContent !== t) r.num.textContent = t;
 }
 
 function renderPerfPanel() {
@@ -204,10 +285,11 @@ function renderPerfPanel() {
 // previous draw. The badge measures the actual draw rate, so changing the UI
 // refresh rate slider is reflected directly in the "ui X fps" indicator.
 let lastDrawT = performance.now();
+let offlineFramePainted = false;
 
 // Tooltips for the top-right badges so it's clear what each number means.
 {
-  const srv = document.getElementById("server-fps");
+  const srv = srvFpsEl;
   if (srv) srv.title = [
     "**Server snapshot rate.** How often the server is pushing L/M/H snapshot JSON over the WebSocket.",
     "",
@@ -215,7 +297,7 @@ let lastDrawT = performance.now();
     "",
     "*Independent of the FFT enable toggle — FFT frames are sent as separate binary messages and are not counted here.*",
   ].join("\n");
-  const ui = document.getElementById("ui-fps");
+  const ui = uiFpsEl;
   if (ui) ui.title = [
     "**Browser render rate.** How often the canvases are actually being redrawn.",
     "",
@@ -246,20 +328,24 @@ function frame(now) {
     if ((store.raf_idx & 15) === 0) {
       const avg = avgRing(store.raf_ms_ring);
       const fps = avg > 0 ? Math.round(1000 / avg) : 0;
-      document.getElementById("ui-fps").textContent = `ui ${fps} fps`;
+      const uiText = `ui ${fps} fps`;
+      if (uiFpsEl.textContent !== uiText) uiFpsEl.textContent = uiText;
       // Server snapshot rate (snapshot JSON only; binary FFT frames excluded
       // so the FFT enable toggle doesn't move this number).
-      const ts = store.snapshotTimestamps;
-      if (ts.length >= 2) {
-        const span = (ts[ts.length - 1] - ts[0]) / 1000;
-        const sfps = span > 0 ? Math.round((ts.length - 1) / span) : 0;
-        document.getElementById("server-fps").textContent = `srv ${sfps} Hz`;
+      if (store.conn === "connected") {
+        const srvText = `srv ${Math.round(snapshotRate())} Hz`;
+        if (srvFpsEl.textContent !== srvText) srvFpsEl.textContent = srvText;
       }
     }
-    lines.draw();
-    bars.draw();
-    scene.draw();
-    fft.draw();
+    // Offline: paint one cleared frame, then stop redrawing until live again
+    // (the overlay covers the canvases and there's no data to show).
+    if (store.conn === "connected" || !offlineFramePainted) {
+      offlineFramePainted = store.conn !== "connected";
+      lines.draw();
+      bars.draw();
+      scene.draw();
+      fft.draw();
+    }
   }
   requestAnimationFrame(frame);
 }

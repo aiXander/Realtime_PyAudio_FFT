@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import tempfile
+import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -143,15 +145,19 @@ def _build_config(d: dict) -> Config:
     dev = a.get("device") or {}
     audio = AudioCfg(
         device=DeviceCfg(name=dev.get("name"), index=dev.get("index")),
-        blocksize=int(a["blocksize"]),
+        blocksize=V.validate_blocksize(a["blocksize"]),
         channels=int(a["channels"]),
     )
 
     ds = d["dsp"]
     bands_raw = {k: ds[k] for k in ("low", "mid", "high")}
-    # validate_bands needs a sample rate; 48k is the standard guess used
-    # at config-load time (real sr applies on retune in main.App).
-    ok = V.validate_bands(bands_raw, 48000.0)
+    # The device sample rate isn't known at load time, so only the
+    # structural invariants (finite, lo > 0, hi > lo) are checked here.
+    # App clamps the edges against the ACTUAL sr (hi ≤ 0.45·sr) as soon as
+    # the stream is open, writes them back to cfg and persists
+    # (App._clamp_cfg_bands_for_sr). Validating against a guessed 48k here
+    # used to reject a config saved on a 96k device.
+    ok = V.validate_bands(bands_raw, None)
     dsp = DspCfg(
         low=BandCfg(*ok["low"]),
         mid=BandCfg(*ok["mid"]),
@@ -174,15 +180,22 @@ def _build_config(d: dict) -> Config:
     autoscale = AutoscaleCfg(**ok_as)
 
     fd = d["fft"]
+    # Same validator the preset loader / App.apply_fft_window use: window and
+    # hop must be positive multiples of blocksize (else FFTWorker spins on a
+    # zero-block geometry) and fit the SlotRing; f_min > 0.
+    ok_win = V.validate_fft_window(
+        window_size=fd["window_size"], hop=fd["hop"], f_min=fd["f_min"],
+        blocksize=audio.blocksize,
+    )
     fft = FftCfg(
         enabled=bool(fd["enabled"]),
         n_bins=V.validate_n_fft_bins(fd["n_bins"]),
-        window_size=int(fd["window_size"]),
-        hop=int(fd["hop"]),
-        f_min=float(fd["f_min"]),
+        window_size=ok_win["window_size"],
+        hop=ok_win["hop"],
+        f_min=ok_win["f_min"],
         db_floor=float(fd["db_floor"]),
         db_ceiling=float(fd["db_ceiling"]),
-        peak_smear_oct=float(fd["peak_smear_oct"]),
+        peak_smear_oct=V.validate_peak_smear_oct(fd["peak_smear_oct"]),
         tilt_db_per_oct=V.validate_fft_tilt_db_per_oct(fd["tilt_db_per_oct"]),
         send_raw_db=bool(fd["send_raw_db"]),
     )
@@ -249,23 +262,61 @@ def _build_config(d: dict) -> Config:
     return Config(audio=audio, dsp=dsp, autoscale=autoscale, fft=fft, onset=onset, osc=osc, ws=ws, ui=ui)
 
 
+class ConfigCorruptError(ValueError):
+    """The config file is unreadable as a config: YAML parse error, empty
+    file, non-mapping root, or a missing required section/key. Distinct from
+    a plain ValueError (parseable file with an invalid value), which the
+    caller reports instead of silently replacing the file."""
+
+
 def load_config(path: Path | str) -> Config:
     """Load and validate a config file. No fallbacks, no merging.
 
-    Raises ``FileNotFoundError`` if missing. Raises ``ValueError`` if the
-    file parses but a section is missing or invalid (missing keys surface
-    as KeyError from ``_build_config``, re-wrapped here for clarity).
+    Raises ``FileNotFoundError`` if missing, ``ConfigCorruptError`` if the
+    file doesn't parse / is empty / is missing required keys, and
+    ``ValueError`` if a value is invalid.
     """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"config file not found: {path}")
-    raw = yaml.safe_load(path.read_text())
+    try:
+        raw = yaml.safe_load(path.read_text())
+    except (yaml.YAMLError, UnicodeDecodeError) as e:
+        raise ConfigCorruptError(f"config {path} failed to parse: {e}") from e
     if not isinstance(raw, dict):
-        raise ValueError(f"config root must be a YAML mapping: {path}")
+        raise ConfigCorruptError(f"config root must be a YAML mapping (empty file?): {path}")
     try:
         return _build_config(raw)
-    except KeyError as e:
-        raise ValueError(f"config {path} missing required key: {e}") from e
+    except (KeyError, TypeError) as e:
+        # KeyError: missing section/key. TypeError: a section that's not a
+        # mapping (e.g. `dsp: null`) being subscripted.
+        raise ConfigCorruptError(f"config {path} missing/malformed required key: {e}") from e
+
+
+def load_config_or_fallback(path: Path | str, example_path: Path | str) -> Config:
+    """Load `path`; if it is corrupt (see ConfigCorruptError), move it aside
+    as ``<name>.corrupt-<timestamp>``, re-seed it from `example_path` and
+    load that instead, so a torn / emptied main.yaml never bricks startup.
+    Invalid-but-parseable values still raise ValueError (the user's file is
+    likely a hand edit worth fixing, not garbage)."""
+    path = Path(path)
+    try:
+        return load_config(path)
+    except ConfigCorruptError as e:
+        example_path = Path(example_path)
+        if not example_path.exists():
+            raise
+        stamp = time.strftime('%Y%m%d-%H%M%S')
+        backup = path.with_name(f"{path.name}.corrupt-{stamp}")
+        n = 1
+        while backup.exists():  # never overwrite an earlier backup
+            backup = path.with_name(f"{path.name}.corrupt-{stamp}-{n}")
+            n += 1
+        log.warning("%s — backing it up as %s and falling back to %s defaults",
+                    e, backup.name, example_path.name)
+        os.replace(path, backup)
+        shutil.copyfile(example_path, path)
+        return load_config(path)
 
 
 def config_to_dict(cfg: Config) -> dict:
@@ -273,14 +324,31 @@ def config_to_dict(cfg: Config) -> dict:
 
 
 def write_yaml_atomic(path: Path | str, data: dict) -> None:
-    """Atomic write: tmp file then os.replace. Never partial."""
+    """Atomic, durable write: tmp file → flush + fsync → os.replace → fsync
+    the directory. Without the fsync, a power loss shortly after the rename
+    can leave a zero-length main.yaml (the rename is journaled before the
+    data blocks hit disk)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w") as fh:
             yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp_path, path)
+        # Best-effort: persist the rename itself (POSIX; no-op elsewhere).
+        try:
+            dfd = os.open(str(path.parent), os.O_RDONLY)
+        except OSError:
+            dfd = None
+        if dfd is not None:
+            try:
+                os.fsync(dfd)
+            except OSError:
+                pass
+            finally:
+                os.close(dfd)
     except Exception:
         try:
             os.unlink(tmp_path)

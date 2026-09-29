@@ -34,26 +34,33 @@ def _finite_float(x, name, *, gt: float | None = None, ge: float | None = None):
     return v
 
 
-def validate_band(name, lo_hz, hi_hz, sr):
+def validate_band(name, lo_hz, hi_hz, sr=None):
     """Validate a single bandpass.
 
-    Hard invariants only: lo > 0, hi > lo, hi < sr/2 (Nyquist). Without these,
-    `scipy.signal.iirfilter` either errors or produces an unstable filter.
+    Hard invariants only: lo > 0, hi > lo, and (when `sr` is given)
+    hi < sr/2 (Nyquist). Without these, `scipy.signal.iirfilter` either
+    errors or produces an unstable filter.
+
+    Pass `sr=None` to skip the Nyquist check — used when the caller clamps
+    the edges to the live device's Nyquist-safe range afterwards
+    (`dsp.filters.clamp_band_edges`, hi ≤ 0.45·sr), and on YAML load, where
+    the device sample rate isn't known yet (App clamps once the stream opens).
     """
     lo_hz = _finite_float(lo_hz, f"{name}.lo_hz")
     hi_hz = _finite_float(hi_hz, f"{name}.hi_hz")
-    sr = _finite_float(sr, "sr")
     if lo_hz <= 0.0:
         raise ValueError(f"{name}: lo_hz must be > 0")
     if hi_hz <= lo_hz:
         raise ValueError(f"{name}: hi_hz must be > lo_hz")
-    nyq = 0.5 * sr
-    if hi_hz >= nyq:
-        raise ValueError(f"{name}: hi_hz must be < sr/2 ({nyq:.0f} Hz)")
+    if sr is not None:
+        sr = _finite_float(sr, "sr")
+        nyq = 0.5 * sr
+        if hi_hz >= nyq:
+            raise ValueError(f"{name}: hi_hz must be < sr/2 ({nyq:.0f} Hz)")
     return lo_hz, hi_hz
 
 
-def validate_bands(bands_dict, sr):
+def validate_bands(bands_dict, sr=None):
     """Validate {low: {lo_hz, hi_hz}, mid: {...}, high: {...}}. Returns {name: (lo, hi)}."""
     if not isinstance(bands_dict, dict):
         raise ValueError("bands must be a dict")
@@ -89,12 +96,42 @@ def validate_filter_order(n):
     return n
 
 
+# ---- n_fft_bins cap: the /audio/fft OSC packet must fit in one UDP datagram.
+# macOS caps outgoing UDP datagrams at net.inet.udp.maxdgram = 9216 bytes by
+# default; a larger packet makes every `sendto` fail with EMSGSIZE (silently —
+# the OSC sender logs at DEBUG), so FFT output just vanishes. Packet layout
+# (see `server.io.osc_sender._build_fft_packet`):
+#   address "/audio/fft"  10 chars → NUL-padded to 12 bytes
+#   type tag "," + "f"·n  (n+1) chars → NUL-padded (≥1 NUL) to a multiple of 4
+#   payload               n big-endian float32 = 4·n bytes
+# → 12 + 4·((n+1)//4 + 1) + 4·n bytes. The largest n under 9216 is 1840
+# (exactly 9216 bytes). The WS binary frame has no such limit (u16 n_bins).
+OSC_MAX_UDP_DATAGRAM = 9216
+
+
+def osc_fft_packet_bytes(n_bins: int) -> int:
+    """Size in bytes of the `/audio/fft ,f…f <f32·n>` OSC packet."""
+    return 12 + 4 * ((n_bins + 1) // 4 + 1) + 4 * n_bins
+
+
+MAX_N_FFT_BINS = max(n for n in range(1, 4096)
+                     if osc_fft_packet_bytes(n) <= OSC_MAX_UDP_DATAGRAM)  # = 1840
+
+
 def validate_n_fft_bins(n):
+    """Positive int; values above MAX_N_FFT_BINS are clamped (not rejected)
+    so an old config / preset with a bigger value still loads."""
     if not isinstance(n, int) or isinstance(n, bool):
         raise ValueError("n_fft_bins must be an int")
     if n < 1:
         raise ValueError("n_fft_bins must be >= 1")
-    return n
+    return min(n, MAX_N_FFT_BINS)
+
+
+# Largest FFT window (samples). The SlotRing is sized at startup to hold at
+# least 2× this many samples (see server.main.ring_slots_for), so any
+# accepted window always fits the ring regardless of blocksize.
+MAX_FFT_WINDOW = 16384
 
 
 def validate_fft_window(window_size=None, hop=None, f_min=None, *, blocksize):
@@ -104,6 +141,8 @@ def validate_fft_window(window_size=None, hop=None, f_min=None, *, blocksize):
       FFTWorker._allocate derives its block counts by integer division; a
       sub-blocksize or non-multiple value leaves the worker with a
       zero-block window/hop that spins without advancing the read pointer.
+    - window_size / hop must be <= MAX_FFT_WINDOW so the window always fits
+      the SlotRing (sized from MAX_FFT_WINDOW at startup).
     - f_min must be a positive finite frequency (log-spaced bin edges take
       log10(f_min)).
 
@@ -116,12 +155,16 @@ def validate_fft_window(window_size=None, hop=None, f_min=None, *, blocksize):
             raise ValueError("window_size must be an int")
         if window_size < blocksize or window_size % blocksize:
             raise ValueError(f"window_size must be a positive multiple of blocksize ({blocksize})")
+        if window_size > MAX_FFT_WINDOW:
+            raise ValueError(f"window_size must be <= {MAX_FFT_WINDOW}")
         out["window_size"] = window_size
     if hop is not None:
         if not isinstance(hop, int) or isinstance(hop, bool):
             raise ValueError("hop must be an int")
         if hop < blocksize or hop % blocksize:
             raise ValueError(f"hop must be a positive multiple of blocksize ({blocksize})")
+        if hop > MAX_FFT_WINDOW:
+            raise ValueError(f"hop must be <= {MAX_FFT_WINDOW}")
         out["hop"] = hop
     if f_min is not None:
         out["f_min"] = _finite_float(f_min, "f_min", gt=0.0)
@@ -148,12 +191,23 @@ def validate_peak_smear_oct(v):
     return _finite_float(v, "peak_smear_oct")
 
 
+# Clamp ranges shared with the UI sliders (the UI widens its sliders to
+# exactly these bounds). Out-of-range values are clamped, not rejected, so an
+# older config/preset still loads.
+FFT_TILT_RANGE = (-6.0, 12.0)          # dB/oct
+PEAK_DECAY_RANGE = (0.05, 3.0)         # 1/s
+
+
+def _clamp(v, lo_hi):
+    return min(max(v, lo_hi[0]), lo_hi[1])
+
+
 def validate_fft_tilt_db_per_oct(v):
-    return _finite_float(v, "tilt_db_per_oct")
+    return _clamp(_finite_float(v, "tilt_db_per_oct"), FFT_TILT_RANGE)
 
 
 def validate_peak_decay_per_s(v):
-    return _finite_float(v, "peak_decay_per_s")
+    return _clamp(_finite_float(v, "peak_decay_per_s"), PEAK_DECAY_RANGE)
 
 
 def validate_onset(sensitivity=None, refractory_s=None, slow_tau_s=None,
@@ -226,6 +280,17 @@ def validate_ui_layout(layout):
     if sorted(quads) != sorted(CARD_IDS):
         raise ValueError(f"quadrants must be a permutation of {list(CARD_IDS)}")
     return {"split_x": sx, "split_y": sy, "quadrants": list(quads)}
+
+
+def validate_blocksize(n):
+    """Audio block size (samples). Must be a positive int no larger than the
+    biggest FFT window (window_size is a multiple of blocksize). The 16-sample
+    floor keeps the SlotRing slot count (2·MAX_FFT_WINDOW / blocksize) sane."""
+    if not isinstance(n, int) or isinstance(n, bool):
+        raise ValueError("blocksize must be an int")
+    if not (16 <= n <= MAX_FFT_WINDOW):
+        raise ValueError(f"blocksize must be in 16..{MAX_FFT_WINDOW}")
+    return n
 
 
 def validate_device_index(idx):

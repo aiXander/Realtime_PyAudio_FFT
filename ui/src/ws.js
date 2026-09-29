@@ -19,14 +19,16 @@ import { store } from "./store.js";
 //  - http:// on LAN (the audio-server's own UI on :8766) → keep the legacy
 //    direct ws://host:8765 so dev / hotspot access still works unchanged.
 //  - file:// or unknown → fall back to 127.0.0.1:8765.
+// `?ws_port=N` overrides the port (e.g. a second dev server on other ports).
 const WS_URL = (() => {
   if (location.protocol === "https:") {
     return `wss://${location.host}/ws`;
   }
+  const port = Number(new URLSearchParams(location.search).get("ws_port")) || 8765;
   if (location.protocol === "http:") {
-    return `ws://${location.hostname}:8765`;
+    return `ws://${location.hostname}:${port}`;
   }
-  return "ws://127.0.0.1:8765";
+  return `ws://127.0.0.1:${port}`;
 })();
 
 let socket = null;
@@ -39,6 +41,7 @@ let state = "connecting";
 const handlers = {};
 const errSinks = [];
 const statusSinks = [];
+const fftSinks = [];
 
 export function onMessage(type, fn) {
   handlers[type] = fn;
@@ -46,6 +49,12 @@ export function onMessage(type, fn) {
 
 export function onError(fn) {
   errSinks.push(fn);
+}
+
+/** fn(Float32Array) on every accepted binary FFT frame, at arrival time
+ *  (the FFT history for the 3D view must not depend on draw cadence). */
+export function onFftFrame(fn) {
+  fftSinks.push(fn);
 }
 
 /** fn(state) on every connection-state change: "connecting" | "connected" | "reconnecting". */
@@ -175,7 +184,10 @@ function onMsg(ev) {
       // Defensive: ignore stray FFT frames if the server has reported FFT as
       // disabled, so the UI can never paint live bars while the toggle /
       // side panel reflect the disabled state.
-      if (f32 && store.meta?.fft_enabled !== false) store.fft_bins = f32;
+      if (f32 && store.meta?.fft_enabled !== false) {
+        store.fft_bins = f32;
+        for (const fn of fftSinks) fn(f32);
+      }
     }
     return;
   }

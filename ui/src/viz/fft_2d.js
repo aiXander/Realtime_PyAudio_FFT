@@ -22,25 +22,33 @@
 // side-panel "Bandpass edges" UI.
 
 import { store, recordVizPerf } from "../store.js";
-import { LMH, LMH_ORDER } from "../colors.js";
+import { LMH, LMH_ORDER, theme, hexRgb } from "../colors.js";
 import { send } from "../ws.js";
-import { makeSurface, makeLayer, FONT_UI, BG } from "./surface.js";
+import { makeSurface, makeLayer, FONT_UI } from "./surface.js";
 
 // Bar colors: the old per-bin 256-entry LUT, quantized to N_BUCKETS so the
 // bar pass is one path + one fill per bucket instead of a fillStyle switch
 // per bin (sampled at bucket centers — visually indistinguishable).
+// The ramp comes from the palette (theme.ramp: evenly spaced hex stops; null
+// = the original blue → green → red formula) and rebuilds when it changes.
 const N_BUCKETS = 32;
-const BUCKET_STR = (() => {
-  const out = new Array(N_BUCKETS);
+const BUCKET_STR = new Array(N_BUCKETS);
+function buildBuckets() {
+  const stops = theme.ramp ? theme.ramp.map(hexRgb) : null;
   for (let k = 0; k < N_BUCKETS; k++) {
     const t = (k + 0.5) / N_BUCKETS;
-    const r = Math.round(255 * Math.min(1, Math.max(0, -0.2 + 1.6 * t)));
-    const g = Math.round(255 * (0.1 + 0.85 * Math.sin(Math.PI * t)));
-    const b = Math.round(255 * Math.max(0, 1 - 1.6 * t + 0.5 * Math.pow(t, 4)));
-    out[k] = `rgb(${r},${g},${b})`;
+    let r, g, b;
+    if (stops) {
+      const p = t * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(p)), f = p - i;
+      [r, g, b] = stops[i].map((v, j) => Math.round(v + (stops[i + 1][j] - v) * f));
+    } else {
+      r = Math.round(255 * Math.min(1, Math.max(0, -0.2 + 1.6 * t)));
+      g = Math.round(255 * (0.1 + 0.85 * Math.sin(Math.PI * t)));
+      b = Math.round(255 * Math.max(0, 1 - 1.6 * t + 0.5 * Math.pow(t, 4)));
+    }
+    BUCKET_STR[k] = `rgb(${r},${g},${b})`;
   }
-  return out;
-})();
+}
 
 const SENTINEL_THRESHOLD = -500;
 const MIN_BAR_PX = 1;          // CSS px, so silent bins stay visible in 0..1 mode
@@ -57,15 +65,21 @@ const ORDER = ["low", "mid", "high"];
 // Plot padding, CSS px.
 const PAD_L = 38, PAD_R = 6, PAD_T = 4, PAD_B = 16;
 
-// Precomputed overlay colors per band.
+// Precomputed overlay colors per band (rebuilt with the bucket ramp).
 const BAND_STYLE = {};
-for (const name of LMH_ORDER) {
-  const c = LMH[name].rgb;
-  BAND_STYLE[name] = {
-    fillSel: `rgba(${c},0.30)`, fillEdit: `rgba(${c},0.10)`, fillPassive: `rgba(${c},0.15)`,
-    edgeSel: `rgba(${c},1)`, edge: `rgba(${c},0.55)`, handle: `rgba(${c},0.95)`,
-  };
+let colorVersion = -1;
+function buildColors() {
+  buildBuckets();
+  for (const name of LMH_ORDER) {
+    const c = LMH[name].rgb;
+    BAND_STYLE[name] = {
+      fillSel: `rgba(${c},0.30)`, fillEdit: `rgba(${c},0.10)`, fillPassive: `rgba(${c},0.15)`,
+      edgeSel: `rgba(${c},1)`, edge: `rgba(${c},0.55)`, handle: `rgba(${c},0.95)`,
+    };
+  }
+  colorVersion = theme.version;
 }
+buildColors();
 
 // Mirrors snapHz in controls.js / freq_axis.js so the overlay and sliders
 // agree on values.
@@ -108,7 +122,7 @@ export function makeFft(canvas) {
   // Static layer: background, grid, axis labels — or the empty-state
   // message. Rebuilt only when this key changes.
   function staticKey(version, rawDb, floor, ceiling, fMin, sr, empty) {
-    return `${version}|${rawDb ? 1 : 0}|${floor}|${ceiling}|${fMin}|${sr}|${empty}`;
+    return `${version}|${theme.version}|${rawDb ? 1 : 0}|${floor}|${ceiling}|${fMin}|${sr}|${empty}`;
   }
   // Cheap pre-check so the key string is only built when an input changed.
   let kVersion = -1, kRaw = null, kFloor = NaN, kCeil = NaN, kFmin = NaN, kSr = NaN, kEmpty = null;
@@ -116,7 +130,7 @@ export function makeFft(canvas) {
   function buildStatic(w, h, dpr, rawDb, floor, ceiling, fMin, fMax, empty) {
     const c = layer.canvas, g = layer.ctx;
     c.width = w; c.height = h;
-    g.fillStyle = BG;
+    g.fillStyle = theme.bg;
     g.fillRect(0, 0, w, h);
     if (empty) {
       g.fillStyle = "#5a6068";
@@ -193,6 +207,7 @@ export function makeFft(canvas) {
     const n = bins ? bins.length : 0;
     const empty = n > 0 ? "" : (meta.fft_enabled ? "waiting for data…" : "FFT disabled");
 
+    if (colorVersion !== theme.version) { buildColors(); kVersion = -1; }
     if (version !== kVersion || rawDb !== kRaw || floor !== kFloor || ceiling !== kCeil
         || fMin !== kFmin || sr !== kSr || empty !== kEmpty) {
       kVersion = version; kRaw = rawDb; kFloor = floor; kCeil = ceiling; kFmin = fMin; kSr = sr; kEmpty = empty;

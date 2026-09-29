@@ -1,14 +1,16 @@
 // Entry point. Wires WS handlers -> store, sets up controls, runs RAF loop.
 
-import { connect, onMessage, onError, onStatus, retryNow, snapshotRate, resetSnapshotRate } from "./ws.js";
+import { connect, onMessage, onError, onStatus, onFftFrame, retryNow, snapshotRate, resetSnapshotRate } from "./ws.js";
 import { store, avgRing, p95Ring, clearLive } from "./store.js";
 import { setupControls } from "./controls.js";
 import { makeLines } from "./viz/lmh_lines.js";
 import { makeBars }  from "./viz/lmh_bars.js";
 import { makeScene } from "./viz/lmh_scene.js";
 import { makeFft }   from "./viz/fft_2d.js";
+import { makeFft3d } from "./viz/fft_3d.js";
+import { STYLES } from "./viz/fft3d_styles/index.js";
 import { setupTooltips } from "./tooltips.js";
-import { setupLayout, applyLayout } from "./layout.js";
+import { setupLayout, applyLayout, setupFullscreen } from "./layout.js";
 import { setupSidebar } from "./sidebar.js";
 import { toast } from "./toast.js";
 
@@ -19,11 +21,18 @@ const controls = setupControls();
 const lines = makeLines(document.getElementById("viz-lines"));
 const bars  = makeBars(document.getElementById("viz-bars"));
 const scene = makeScene(document.getElementById("viz-scene"));
-const fft   = makeFft(document.getElementById("viz-fft"));
+// The FFT card has one canvas and two renderers; store.fft_view picks which
+// one draws. The 3D one records history from every frame on arrival.
+const fftCanvas = document.getElementById("viz-fft");
+const fft   = makeFft(fftCanvas);
+const fft3d = makeFft3d(fftCanvas);
+onFftFrame((bins) => fft3d.push(bins));
+setupFullscreen("fft", document.getElementById("fft-fullscreen"));
 
 const bpmEl = document.getElementById("bpm-readout");
 const bpmVal = bpmEl ? bpmEl.querySelector(".bpm-value") : null;
 const fftTitleMode = document.getElementById("fft-title-mode");
+const fft3dStyleWrap = document.getElementById("fft3d-style-wrap");
 const bandpassFs = document.getElementById("fieldset-bandpass");
 const uiFpsEl = document.getElementById("ui-fps");
 const srvFpsEl = document.getElementById("server-fps");
@@ -70,6 +79,7 @@ onStatus((state) => {
   lines.reset();
   bars.reset();
   fft.reset();
+  fft3d.reset();
   setBpm(0);
   if (srvFpsEl) srvFpsEl.textContent = "srv — Hz";
   if (overlayMsg) {
@@ -98,7 +108,7 @@ onMessage("snapshot", (m) => {
   }
 });
 
-let lastFftEnabled = null, lastRawDb = null;
+let lastFftEnabled = null, lastRawDb = null, lastFftView = null, lastStyle = null;
 onMessage("meta", (m) => {
   store.meta = { ...store.meta, ...m };
   if (m.fft_db_floor !== undefined) store.fft_db_floor = m.fft_db_floor;
@@ -109,19 +119,32 @@ onMessage("meta", (m) => {
   // instead of a frozen spectrum from the moment of toggle-off.
   if (m.fft_enabled === false) store.fft_bins = null;
   if (m.bands) fft.syncBands(m.bands);
-  if (m.fft_enabled !== undefined && m.fft_enabled !== lastFftEnabled) {
-    lastFftEnabled = m.fft_enabled;
-    // The FFT canvas band overlay replaces the side-panel "Bandpass edges"
-    // widget while FFT is on.
-    fft.setInteractive(!!m.fft_enabled);
-    if (bandpassFs) bandpassFs.hidden = !!m.fft_enabled;
+  controls.syncMeta(); // sets store.fft_view from meta.ui_fft_view
+  const fftEnabled = !!store.meta.fft_enabled;
+  const view = store.fft_view;
+  if (fftEnabled !== lastFftEnabled || view !== lastFftView) {
+    lastFftEnabled = fftEnabled;
+    // The 2D FFT canvas band overlay replaces the side-panel "Bandpass
+    // edges" widget while FFT is on; the 3D view has no band editor, so the
+    // side panel widget comes back there.
+    const canvasEdits = fftEnabled && view === "2d";
+    fft.setInteractive(canvasEdits);
+    if (bandpassFs) bandpassFs.hidden = canvasEdits;
   }
   const rawDb = !!store.meta.fft_send_raw_db;
-  if (rawDb !== lastRawDb && fftTitleMode) {
+  const style = store.fft3d_style;
+  if ((rawDb !== lastRawDb || view !== lastFftView || style !== lastStyle) && fftTitleMode) {
     lastRawDb = rawDb;
-    fftTitleMode.textContent = rawDb ? "log-x · raw dB" : "log-x · scaled 0..1";
+    lastStyle = style;
+    const scale = rawDb ? "raw dB" : "scaled 0..1";
+    const label = (STYLES[style]?.label || style).toLowerCase();
+    fftTitleMode.textContent = view === "3d" ? `3D · ${label} · ${scale}` : `log-x · ${scale}`;
   }
-  controls.syncMeta();
+  if (fft3dStyleWrap) fft3dStyleWrap.hidden = view !== "3d";
+  if (view !== lastFftView) {
+    lastFftView = view;
+    fftCanvas.setAttribute("aria-label", view === "3d" ? "FFT spectrum history, 3D" : "FFT spectrum");
+  }
   if (!store.synced && store.conn === "connected") {
     store.synced = true;
     clearTimeout(syncFallback);
@@ -206,14 +229,18 @@ const PERF_ROWS = [
       "Numbers are `avg / p95 ms`. Bar is scaled against one snapshot interval (`1 / ws_snapshot_hz`).",
     ].join("\n") },
 ];
-const VIZ_NAMES = ["lines", "bars", "scene", "fft"];
+const VIZ_NAMES = ["lines", "bars", "scene", "fft", "fft_gpu"];
 const BROWSER_ROWS = [
   { key: "raf", tooltip: [
       "**Browser inter-draw interval.** Wall-clock time between consecutive canvas redraws. Throttled to the UI refresh rate slider.",
       "",
       "Numbers are `avg / p95 ms`. Bar shows how far the average exceeds the target frame period (0% = on target).",
     ].join("\n") },
-  ...VIZ_NAMES.map((name) => ({ key: name, tooltip: [
+  ...VIZ_NAMES.map((name) => ({ key: name, tooltip: name === "fft_gpu" ? [
+      "**3D FFT GPU cost.** GPU time per frame of the 3D view (WebGL timer query) — fill rate, post-processing (glow), overdraw. The `fft` row above only measures CPU time.",
+      "",
+      "Only in 3D view, and only when the browser exposes GPU timers. Numbers are `avg / p95 ms`. Bar is scaled against one UI frame period.",
+    ].join("\n") : [
       `**\`${name}\` canvas paint cost.** Time spent inside its draw() call per frame.`,
       "",
       "Numbers are `avg / p95 ms`. Bar is scaled against one UI frame period (1 / refresh rate).",
@@ -344,7 +371,8 @@ function frame(now) {
       lines.draw();
       bars.draw();
       scene.draw();
-      fft.draw();
+      if (store.fft_view === "3d") fft3d.draw();
+      else fft.draw();
     }
   }
   requestAnimationFrame(frame);

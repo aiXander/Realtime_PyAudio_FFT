@@ -7,14 +7,13 @@
 // Layering (bottom -> top): dark base, mid hue tint, low disc, high noise.
 
 import { store, recordVizPerf } from "../store.js";
-import { LMH } from "../colors.js";
+import { LMH, theme } from "../colors.js";
 import { makeSurface } from "./surface.js";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tuning. All visual knobs live here — tweak freely.
 // ─────────────────────────────────────────────────────────────────────────
 const CONFIG = {
-  bgColor: "#0a0b0d",
 
   low: {
     // Radius scales with low: lowR = baseR * (radiusBase + radiusGain*lo) * radiusScale
@@ -84,7 +83,8 @@ export function makeScene(canvas) {
     const g = c.getContext("2d");
     const r = SPRITE_PX / 2;
     const light = CONFIG.low.lightnessMin + (CONFIG.low.lightnessMax - CONFIG.low.lightnessMin) * (k / (LIGHT_STEPS - 1));
-    const col = (a) => `hsla(${LMH.low.hue}, ${CONFIG.low.saturation}%, ${light}%, ${a})`;
+    const sat = Math.min(CONFIG.low.saturation, LMH.low.sat);   // grey palettes stay grey
+    const col = (a) => `hsla(${LMH.low.hue}, ${sat}%, ${light}%, ${a})`;
     const grad = g.createRadialGradient(r, r, 0, r, r, r);
     grad.addColorStop(0, col(1));
     grad.addColorStop(CONFIG.low.midStop, col(CONFIG.low.midStopAlphaScale));
@@ -95,8 +95,14 @@ export function makeScene(canvas) {
     return c;
   }
 
-  const MID_FILL  = `hsl(${LMH.mid.hue}, ${CONFIG.mid.saturation}%, ${CONFIG.mid.lightness}%)`;
-  const HIGH_FILL = `hsl(${LMH.high.hue}, ${CONFIG.high.saturation}%, ${CONFIG.high.lightness}%)`;
+  // Palette-derived fills; the sprite cache and fills rebuild on palette change.
+  let MID_FILL = "", HIGH_FILL = "", fillVersion = -1;
+  function buildFills() {
+    MID_FILL  = `hsl(${LMH.mid.hue}, ${Math.min(CONFIG.mid.saturation, LMH.mid.sat)}%, ${CONFIG.mid.lightness}%)`;
+    HIGH_FILL = `hsl(${LMH.high.hue}, ${Math.min(CONFIG.high.saturation, LMH.high.sat)}%, ${CONFIG.high.lightness}%)`;
+    sprites.fill(null);
+    fillVersion = theme.version;
+  }
 
   // Sparkle positions. Normally resampled every frame (the flicker is the
   // effect); with prefers-reduced-motion they're resampled at ~3 Hz and drawn
@@ -128,6 +134,7 @@ export function makeScene(canvas) {
     const t0 = performance.now();
     const { w, h, dpr } = surf.fit();
     const reduced = !!(reducedMotionMq && reducedMotionMq.matches);
+    if (fillVersion !== theme.version) buildFills();
 
     const lo = Math.max(0, Math.min(1, store.low));
     const md = Math.max(0, Math.min(1, store.mid));
@@ -138,7 +145,7 @@ export function makeScene(canvas) {
 
     // --- Layer 0: solid dark background. ---
     ctx.globalAlpha = 1;
-    ctx.fillStyle = CONFIG.bgColor;
+    ctx.fillStyle = theme.bg;
     ctx.fillRect(0, 0, w, h);
 
     // --- Layer 1: MID full-screen tint (base hue, behind everything). ---

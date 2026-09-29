@@ -85,6 +85,9 @@ ws:
 ui:
   peak_decay_per_s: 0.5
   show_onsets: false
+  fft_view: 2d    # FFT card: 2d spectrum or 3d history ("ocean")
+  fft3d_style: cloud   # 3D look: cloud | aurora | topo | synthwave | engraving | embers
+  palette: classic     # UI colors: classic | neon | ember | ocean | sunset | mono | okabe
   layout:
     split_x: 0.34536064701337327
     split_y: 0.3863162718337408

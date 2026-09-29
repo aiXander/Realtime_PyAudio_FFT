@@ -6,10 +6,11 @@
 // cached in an offscreen layer keyed on size + the onset toggle. Per frame:
 // one drawImage, three bar rects, three peak ticks, up to three flashes.
 // Onset flash colors come from a precomputed ramp — no per-frame strings.
+// Both the layer and the ramp are rebuilt when the palette changes.
 
 import { store, recordVizPerf } from "../store.js";
-import { LMH, LMH_HEX, LMH_ORDER } from "../colors.js";
-import { makeSurface, makeLayer, FONT_UI, BG } from "./surface.js";
+import { LMH, LMH_HEX, LMH_ORDER, theme } from "../colors.js";
+import { makeSurface, makeLayer, FONT_UI } from "./surface.js";
 
 const COLORS = LMH_HEX;
 const LABELS = LMH_ORDER;
@@ -21,16 +22,19 @@ const ONSET_FLASH_DECAY_S = 0.20;
 const FLASH_STEPS = 32;
 
 // FLASH_RAMP[band][k] = band color mixed toward white by k / (FLASH_STEPS-1).
-const FLASH_RAMP = LMH_ORDER.map((name) => {
-  const [r, g, b] = LMH[name].rgb.split(",").map(Number);
-  const out = new Array(FLASH_STEPS);
-  for (let k = 0; k < FLASH_STEPS; k++) {
-    const t = k / (FLASH_STEPS - 1);
-    const mix = (c) => Math.round(c + (255 - c) * t);
-    out[k] = `rgb(${mix(r)},${mix(g)},${mix(b)})`;
-  }
-  return out;
-});
+const FLASH_RAMP = LMH_ORDER.map(() => new Array(FLASH_STEPS));
+let rampVersion = -1;
+function buildFlashRamp() {
+  LMH_ORDER.forEach((name, i) => {
+    const [r, g, b] = LMH[name].rgb.split(",").map(Number);
+    for (let k = 0; k < FLASH_STEPS; k++) {
+      const t = k / (FLASH_STEPS - 1);
+      const mix = (c) => Math.round(c + (255 - c) * t);
+      FLASH_RAMP[i][k] = `rgb(${mix(r)},${mix(g)},${mix(b)})`;
+    }
+  });
+  rampVersion = theme.version;
+}
 
 export function makeBars(canvas) {
   const ctx = canvas.getContext("2d", { alpha: false });
@@ -61,7 +65,7 @@ export function makeBars(canvas) {
   function buildStatic(w, h, dpr) {
     const c = layer.canvas, g = layer.ctx;
     c.width = w; c.height = h;
-    g.fillStyle = BG;
+    g.fillStyle = theme.bg;
     g.fillRect(0, 0, w, h);
     g.font = `${Math.round(10 * dpr)}px ${FONT_UI}`;
     g.textAlign = "center";
@@ -84,8 +88,9 @@ export function makeBars(canvas) {
     lastT = now;
     const showOnsets = !!store.show_onsets;
     geometry(w, h, dpr, showOnsets);
-    const key = showOnsets ? version * 2 + 1 : version * 2;
+    const key = (showOnsets ? version * 2 + 1 : version * 2) * 1024 + theme.version;
     if (layer.key !== key) { layer.key = key; buildStatic(w, h, dpr); }
+    if (rampVersion !== theme.version) buildFlashRamp();
     ctx.drawImage(layer.canvas, 0, 0);
 
     vals[0] = store.low; vals[1] = store.mid; vals[2] = store.high;

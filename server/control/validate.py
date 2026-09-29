@@ -210,6 +210,36 @@ def validate_peak_decay_per_s(v):
     return _clamp(_finite_float(v, "peak_decay_per_s"), PEAK_DECAY_RANGE)
 
 
+FFT_VIEWS = ("2d", "3d")
+
+
+def validate_fft_view(v):
+    """FFT card view mode (UI-only): 2D spectrum or 3D history."""
+    if v not in FFT_VIEWS:
+        raise ValueError(f"fft_view must be one of {list(FFT_VIEWS)}")
+    return v
+
+
+# Keep in sync with the style modules in ui/src/viz/fft3d_styles/ and the
+# palettes in ui/src/colors.js (the UI only offers these names).
+FFT3D_STYLES = ("cloud", "aurora", "topo", "synthwave", "engraving", "embers")
+PALETTES = ("classic", "neon", "ember", "ocean", "sunset", "mono", "okabe")
+
+
+def validate_fft3d_style(v):
+    """3D FFT view look (UI-only)."""
+    if v not in FFT3D_STYLES:
+        raise ValueError(f"fft3d_style must be one of {list(FFT3D_STYLES)}")
+    return v
+
+
+def validate_palette(v):
+    """UI color palette (UI-only)."""
+    if v not in PALETTES:
+        raise ValueError(f"palette must be one of {list(PALETTES)}")
+    return v
+
+
 def validate_onset(sensitivity=None, refractory_s=None, slow_tau_s=None,
                    abs_floor=None):
     """Per-band onset-detector tunables. Hard invariants only:

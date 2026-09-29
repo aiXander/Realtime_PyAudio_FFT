@@ -18,6 +18,11 @@
   --accent-hi: #95b8ff;
   --accent-lo: #6a96f0;
   --accent-glow: rgba(125, 166, 255, 0.32);
+  --accent-soft: rgba(125, 166, 255, 0.22);
+  /* Band colors — overridden at runtime by the palette (ui/src/colors.js). */
+  --low: #5a8dee;
+  --mid: #79d17a;
+  --high: #e8a857;
   --ok: #7fd17f;
   --warn: #f5a623;
   --err: #d17f7f;
@@ -32,8 +37,8 @@ html, body {
   padding: 0;
   height: 100%;
   background:
-    radial-gradient(ellipse 1200px 600px at 18% -10%, rgba(125, 166, 255, 0.045), transparent 70%),
-    radial-gradient(ellipse 1000px 800px at 100% 110%, rgba(232, 168, 87, 0.025), transparent 60%),
+    radial-gradient(ellipse 1200px 600px at 18% -10%, color-mix(in srgb, var(--accent) 4.5%, transparent), transparent 70%),
+    radial-gradient(ellipse 1000px 800px at 100% 110%, color-mix(in srgb, var(--high) 2.5%, transparent), transparent 60%),
     var(--bg-1);
   color: var(--text-1);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -73,7 +78,7 @@ body.col-resizing, body.col-resizing * { cursor: ew-resize !important; user-sele
   flex: 0 0 auto;
   padding: 7px 16px;
   border-bottom: 1px solid var(--border-1);
-  background: linear-gradient(180deg, #181b21 0%, #14161a 100%);
+  background: linear-gradient(180deg, var(--bg-2-top) 0%, var(--bg-2) 100%);
   position: relative;
 }
 .topbar::after {
@@ -81,7 +86,7 @@ body.col-resizing, body.col-resizing * { cursor: ew-resize !important; user-sele
   position: absolute;
   left: 0; right: 0; bottom: -1px;
   height: 1px;
-  background: linear-gradient(90deg, transparent 0%, rgba(125, 166, 255, 0.22) 50%, transparent 100%);
+  background: linear-gradient(90deg, transparent 0%, var(--accent-soft) 50%, transparent 100%);
   pointer-events: none;
 }
 
@@ -117,7 +122,7 @@ body.col-resizing, body.col-resizing * { cursor: ew-resize !important; user-sele
 }
 .bpm-value { font-size: 13px; font-weight: 600; min-width: 3.4ch; text-align: right; letter-spacing: 0.2px; }
 .bpm-unit { font-size: 9.5px; letter-spacing: 0.8px; text-transform: uppercase; }
-.bpm-readout.locked { color: var(--text-1); border-color: color-mix(in srgb, #5a8dee 45%, var(--border-2)); }
+.bpm-readout.locked { color: var(--text-1); border-color: color-mix(in srgb, var(--low) 45%, var(--border-2)); }
 .bpm-readout.locked .bpm-unit { color: var(--text-4); }
 
 .topbar-right {
@@ -137,7 +142,36 @@ body.col-resizing, body.col-resizing * { cursor: ew-resize !important; user-sele
   text-transform: none;
 }
 .topbar-fps input[type="range"] { width: 90px; vertical-align: middle; }
+select.title-select { padding: 2px 5px; font-size: 11px; line-height: 1.2; }
+
+/* Palette picker: a button + listbox, so each palette can show its colors. */
+.palette-picker { position: relative; }
+.pal-btn, .pal-menu li {
+  display: inline-flex; align-items: center; gap: 7px;
+  font: inherit; font-size: 11px; color: var(--text-1); white-space: nowrap;
+}
+.pal-btn {
+  background: var(--bg-0); border: 1px solid var(--border-2); border-radius: 4px;
+  padding: 3px 7px; cursor: pointer; transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.pal-btn:hover { border-color: var(--border-3); }
+.pal-btn[aria-expanded="true"], .pal-btn:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.pal-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.pal-btn::after { content: "▾"; color: var(--text-4); font-size: 9px; }
+.pal-sw { display: inline-flex; gap: 2px; padding: 2px; border-radius: 3px; }
+.pal-sw i { width: 9px; height: 12px; border-radius: 2px; display: block; }
+.pal-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 1000;
+  margin: 0; padding: 4px; list-style: none; min-width: 100%;
+  background: var(--bg-2); border: 1px solid var(--border-3); border-radius: 6px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+}
+.pal-menu li { display: flex; padding: 5px 8px; border-radius: 4px; cursor: pointer; }
+.pal-menu li:hover, .pal-menu li.active { background: var(--accent-soft); }
+.pal-menu li[aria-selected="true"] { color: var(--accent-hi); }
+.pal-menu li[aria-selected="true"]::after { content: "✓"; margin-left: auto; padding-left: 10px; }
 .topbar-fps #ws-hz-val { min-width: 44px; text-align: right; }
+.topbar-fps #history-s-val { min-width: 26px; text-align: right; }
 
 .badges { display: flex; gap: 6px; }
 
@@ -259,8 +293,8 @@ button.badge:active { transform: none; }
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(125, 166, 255, 0.08);
-  border: 1px solid rgba(125, 166, 255, 0.28);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
   border-radius: 4px;
   color: var(--accent-hi);
   cursor: pointer;
@@ -271,7 +305,7 @@ button.badge:active { transform: none; }
 .controls-expand-btn:hover {
   color: var(--text-1);
   border-color: var(--accent);
-  background: rgba(125, 166, 255, 0.18);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .viz-grid {
@@ -939,3 +973,63 @@ input[type="checkbox"]:focus-visible { box-shadow: none; outline: 2px solid var(
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---- Small square icon button in a card title (e.g. FFT full screen) ---- */
+.icon-btn {
+  padding: 0;
+  width: 20px;
+  height: 18px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-3);
+}
+.icon-btn:hover { color: var(--text-1); }
+
+/* ---- A viz card in browser full screen (FFT). The UA stylesheet already
+   pins it to the viewport; this just drops the card chrome. ---- */
+.viz-card:fullscreen {
+  border-radius: 0;
+  border: 0;
+  padding: 12px 14px 14px;
+  background: var(--bg-0);
+}
+.viz-grid.free-layout .viz-card:fullscreen .viz-title { font-size: 11px; cursor: default; }
+
+/* ---- Segmented radio toggle (e.g. FFT 2D | 3D) ---- */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border-2);
+  border-radius: 5px;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.seg label {
+  display: inline-flex;
+  padding: 0;
+  position: relative;
+  cursor: pointer;
+}
+.seg input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+.seg label > span {
+  min-width: 0;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: none;
+  color: var(--text-4);
+  background: rgba(31, 34, 39, 0.5);
+  transition: background 120ms ease, color 120ms ease;
+}
+.seg label + label > span { border-left: 1px solid var(--border-2); }
+.seg label:hover > span { color: var(--text-1); }
+.seg input:checked + span { background: var(--accent-soft); color: var(--accent-hi); }
+.seg input:focus-visible + span { box-shadow: inset 0 0 0 1px var(--accent); }
+.seg input:disabled + span { opacity: 0.5; cursor: not-allowed; }

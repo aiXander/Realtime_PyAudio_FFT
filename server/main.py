@@ -621,6 +621,7 @@ class App:
             "fft_db_floor": cfg.fft.db_floor,
             "fft_db_ceiling": cfg.fft.db_ceiling,
             "fft_f_min": cfg.fft.f_min,
+            "fft_window_size": cfg.fft.window_size,
             "fft_send_raw_db": cfg.fft.send_raw_db,
             "fft_peak_smear_oct": cfg.fft.peak_smear_oct,
             "fft_tilt_db_per_oct": cfg.fft.tilt_db_per_oct,
@@ -657,6 +658,9 @@ class App:
             "ws_snapshot_hz": self.ws.snapshot_hz if self.ws else cfg.ws.snapshot_hz,
             "ui_peak_decay_per_s": cfg.ui.peak_decay_per_s,
             "ui_show_onsets": cfg.ui.show_onsets,
+            "ui_fft_view": cfg.ui.fft_view,
+            "ui_fft3d_style": cfg.ui.fft3d_style,
+            "ui_palette": cfg.ui.palette,
             "ui_layout": cfg.ui.layout,
             "device": device,
         }

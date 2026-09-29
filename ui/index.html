@@ -12,7 +12,7 @@
   </head>
   <body class="offline">
     <header class="topbar">
-      <h1 class="brand"><svg class="brand-mark" viewBox="0 0 16 16" aria-hidden="true"><rect x="1" y="9" width="3" height="6" rx="1" fill="#5a8dee"/><rect x="6.5" y="4" width="3" height="11" rx="1" fill="#79d17a"/><rect x="12" y="7" width="3" height="8" rx="1" fill="#e8a857"/></svg><span class="brand-name">Realtime Audio Server</span></h1>
+      <h1 class="brand"><svg class="brand-mark" viewBox="0 0 16 16" aria-hidden="true"><rect x="1" y="9" width="3" height="6" rx="1" style="fill: var(--low)"/><rect x="6.5" y="4" width="3" height="11" rx="1" style="fill: var(--mid)"/><rect x="12" y="7" width="3" height="8" rx="1" style="fill: var(--high)"/></svg><span class="brand-name">Realtime Audio Server</span></h1>
       <span id="bpm-readout" class="bpm-readout" title="**Live tempo estimate.**
 
 Rolling BPM derived from the **low-band onset stream** (the same `/audio/onset/low` events sent over OSC and shown by the square flash above the L bar). Reads `— BPM` until a few onsets have accumulated, or after long silence.
@@ -21,6 +21,19 @@ Tune the detector by tuning the `low` signal: bandpass edges, smoothing tau, aut
 
 Also published as OSC `/audio/bpm <f>` (per audio block). The `mid` and `high` onset streams are pure rising-edge triggers and do not feed BPM."><span class="bpm-value">—</span><span class="bpm-unit">BPM</span></span>
       <div class="topbar-right">
+        <label class="topbar-fps" title="**History window** (seconds).
+
+How far back in time both history views reach:
+
+- **L/M/H rolling lines** — the width of the chart
+- **FFT 3D** — the distance to the horizon
+
+Larger values pack more time into the same space (and slow the 3D waves down).
+
+*Visual only — not persisted, not sent to the server.*">History <input type="range" id="history-s" min="2" max="30" step="0.001" data-log="1" aria-label="History window" /> <span id="history-s-val"></span></label>
+        <div class="topbar-fps palette-picker"><span id="palette-label">Palette</span> <button type="button" id="palette-select" class="pal-btn" title="**Color palette** for the whole UI: band colors (bars, lines, scene, FFT overlays), the 2D spectrum ramp, the accent, the background tint — and every 3D style, which maps its own roles onto the low / mid / high colors (e.g. *Synthwave* + *Neon* = classic outrun).
+
+*Visual only — saved on the server so every browser shows the same palette.*" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="palette-label palette-select"></button><ul id="palette-menu" class="pal-menu" role="listbox" aria-label="Color palette" tabindex="-1" hidden></ul></div>
         <label class="topbar-fps" title="**UI refresh rate.** Target frame rate for the browser visualization.
 
 Drives both:
@@ -94,11 +107,7 @@ Rolling history of the same three signals as the bar graph. The colored polyline
 
 # WebSocket
 
-Also available in the JSON `snapshot` frames on `ws://127.0.0.1:8765` (field `scaled.{low,mid,high}`).">L/M/H rolling lines</span> <span class="viz-tools"><label class="inline" title="**Rolling history window** (seconds).
-
-How far back the rolling chart extends. Larger values pack more time into the same canvas width.
-
-*Visual only.*"><input type="range" id="history-s" class="title-slider" min="2" max="30" step="0.001" data-log="1" aria-label="Rolling history window" /> <span id="history-s-val"></span></label></span></div>
+Also available in the JSON `snapshot` frames on `ws://127.0.0.1:8765` (field `scaled.{low,mid,high}`).">L/M/H rolling lines</span></div>
           <canvas id="viz-lines" width="640" height="200" role="img" aria-label="Rolling history of low, mid and high band energy"></canvas>
         </div>
         <div class="viz-card" data-card="scene">
@@ -135,7 +144,28 @@ Disabling saves CPU when you only need L/M/H."><input type="checkbox" id="fft-to
 - **OFF** (default): server runs the same per-bin pipeline as L/M/H (smoother → asymmetric auto-scaler → soft gate → tanh → strength blend) and sends `[0..1]` post-processed values.
 - **ON**: server sends the raw wire-dB log spectrum (sentinels rendered as gaps).
 
-The server is authoritative — toggling sends `set_fft_send_raw_db`; the OSC payload switches in lockstep with the visualization."><input type="checkbox" id="fft-raw-db" /> raw dB</label></span></div>
+The server is authoritative — toggling sends `set_fft_send_raw_db`; the OSC payload switches in lockstep with the visualization."><input type="checkbox" id="fft-raw-db" /> raw dB</label> <label class="inline" title="**FFT bins** — how many log-spaced frequency bins the spectrum has (`n_fft_bins`, from `f_min` up to Nyquist).
+
+- **More bins** → finer frequency detail, bigger `/audio/fft` OSC packets (4 bytes per bin). Max `1840` (the macOS UDP datagram limit).
+- **Fewer bins** → coarser, cheaper, smaller packets.
+
+The low end can't get finer than the FFT window allows (~47 Hz per linear bin at 1024 samples / 48 kHz); log bins narrower than that are filled by interpolation.
+
+**Changes the OSC payload**: downstream consumers see the new bin count on `/audio/meta`."><input type="range" id="fft-bins" class="title-slider" min="0" max="12" step="1" aria-label="FFT bin count" /> <span id="fft-bins-val"></span></label> <label class="inline" id="fft3d-style-wrap" hidden title="**3D style** — how the history is drawn.
+
+- **Cloud** — dust on a faint sea, in the palette's band colors
+- **Aurora** — curtains of light hanging from each spectrum
+- **Topo** — a survey map with contour lines, seen from above
+- **Synthwave** — neon wireframe rolling toward a striped sun
+- **Engraving** — ink hatching on warm paper
+- **Embers** — peaks throw sparks that drift off into the dark
+
+*Visual only — does not affect DSP or the OSC payload.*"><select id="fft3d-style" class="title-select" aria-label="3D style"></select></label> <span class="seg" role="radiogroup" aria-label="FFT view" title="**2D / 3D view.**
+
+- **2D**: spectrum with peak-hold ticks and the draggable band overlay.
+- **3D**: history "ocean" — the newest spectrum is the front wave; older spectra recede toward the horizon, shrinking and fading. Depth = the **History** slider in the top bar. Band edges are then edited from the side panel.
+
+*Visual only — does not affect DSP or the OSC payload.*"><label><input type="radio" name="fft-view" id="fft-view-2d" value="2d" /><span>2D</span></label><label><input type="radio" name="fft-view" id="fft-view-3d" value="3d" /><span>3D</span></label></span> <button type="button" class="icon-btn" id="fft-fullscreen" aria-label="Full screen" title="**Full screen** (Esc to exit).">⛶</button></span></div>
           <canvas id="viz-fft" width="640" height="200" role="img" aria-label="FFT spectrum"></canvas>
         </div>
         <div class="conn-overlay" id="conn-overlay" role="status">

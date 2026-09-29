@@ -29,13 +29,9 @@ const HANDLE_W = 8;       // edge-handle hit width in viewBox units
 // mid on outer row.
 const LABEL_Y = { low: 22, mid: 12, high: 22 };
 
-import { LMH, lmhRgba } from "./colors.js";
-
-const COLORS = {
-  low:  { fill: lmhRgba("low",  0.32), stroke: LMH.low.hex,  handle: LMH.low.hex  },
-  mid:  { fill: lmhRgba("mid",  0.32), stroke: LMH.mid.hex,  handle: LMH.mid.hex  },
-  high: { fill: lmhRgba("high", 0.32), stroke: LMH.high.hex, handle: LMH.high.hex },
-};
+// Colors are CSS custom properties (set by the palette), applied as inline
+// styles so a palette switch recolors the widget without rebuilding it.
+const bandFill = (name) => `color-mix(in srgb, var(--${name}) 32%, transparent)`;
 
 const TICKS = [20, 30, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const ORDER = ["low", "mid", "high"];
@@ -82,8 +78,9 @@ export function makeFreqAxis(container, getSr) {
   // Base track background.
   const track = el("rect", {
     x: 0.5, y: TRACK_Y, width: W - 1, height: TRACK_H,
-    fill: "#0a0b0d", stroke: "#2a2e34", "stroke-width": 1, rx: 2,
+    stroke: "#2a2e34", "stroke-width": 1, rx: 2,
   });
+  track.style.fill = "var(--bg-0)";
   svg.appendChild(track);
 
   // Tick lines + labels (x positions set in layoutStatic()).
@@ -119,25 +116,19 @@ export function makeFreqAxis(container, getSr) {
   // Per-band shapes.
   const bands = {};
   for (const name of ORDER) {
-    const c = COLORS[name];
-    const rect = el("rect", {
-      y: TRACK_Y, height: TRACK_H,
-      fill: c.fill, stroke: c.stroke, "stroke-width": 1,
-    });
+    const rect = el("rect", { y: TRACK_Y, height: TRACK_H, "stroke-width": 1 });
+    rect.style.fill = bandFill(name);
+    rect.style.stroke = `var(--${name})`;
     rect.style.cursor = "pointer";
     rect.dataset.band = name;
     rect.dataset.role = "body";
-    const handleLo = el("rect", {
-      y: TRACK_Y, height: TRACK_H, width: HANDLE_W,
-      fill: c.handle, opacity: 0.85,
-    });
+    const handleLo = el("rect", { y: TRACK_Y, height: TRACK_H, width: HANDLE_W, opacity: 0.85 });
+    handleLo.style.fill = `var(--${name})`;
     handleLo.style.cursor = "ew-resize";
     handleLo.dataset.band = name;
     handleLo.dataset.role = "lo";
-    const handleHi = el("rect", {
-      y: TRACK_Y, height: TRACK_H, width: HANDLE_W,
-      fill: c.handle, opacity: 0.85,
-    });
+    const handleHi = el("rect", { y: TRACK_Y, height: TRACK_H, width: HANDLE_W, opacity: 0.85 });
+    handleHi.style.fill = `var(--${name})`;
     handleHi.style.cursor = "ew-resize";
     handleHi.dataset.band = name;
     handleHi.dataset.role = "hi";

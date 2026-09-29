@@ -55,4 +55,3 @@ export function makeLayer() {
 
 export const FONT_UI = "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 export const FONT_MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
-export const BG = "#0a0b0d";

@@ -360,6 +360,21 @@ class Dispatcher:
         self.app.persister.request(commit=True)
         return self._meta_changed()
 
+    async def _set_fft_view(self, msg):
+        self.app.cfg.ui.fft_view = V.validate_fft_view(msg.get("view"))
+        self.app.persister.request(commit=True)
+        return self._meta_changed()
+
+    async def _set_fft3d_style(self, msg):
+        self.app.cfg.ui.fft3d_style = V.validate_fft3d_style(msg.get("style"))
+        self.app.persister.request(commit=True)
+        return self._meta_changed()
+
+    async def _set_palette(self, msg):
+        self.app.cfg.ui.palette = V.validate_palette(msg.get("palette"))
+        self.app.persister.request(commit=True)
+        return self._meta_changed()
+
     async def _set_fft_tilt(self, msg):
         commit = bool(msg.get("commit", True))
         v = V.validate_fft_tilt_db_per_oct(msg.get("tilt_db_per_oct"))
@@ -405,6 +420,9 @@ class Dispatcher:
         "set_filter_order": _set_filter_order,
         "set_peak_decay": _set_peak_decay,
         "set_show_onsets": _set_show_onsets,
+        "set_fft_view": _set_fft_view,
+        "set_fft3d_style": _set_fft3d_style,
+        "set_palette": _set_palette,
         "set_ui_layout": _set_ui_layout,
         "list_presets": _list_presets,
         "save_preset": _save_preset,

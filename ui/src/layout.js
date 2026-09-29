@@ -107,9 +107,12 @@ function pushLayout(commit) {
 
 // A drag may start only with the primary button, once the server's layout
 // has arrived (before that the cards sit in the CSS fallback grid and there
-// is nothing to resize), and not in the stacked narrow layout.
+// is nothing to resize), not in the stacked narrow layout, and not while a
+// card is full screen.
 function canDrag(e) {
   if (!layout || !container) return false;
+  if (document.fullscreenElement) return false; // a card is full screen: no tiling
+
   if (e.pointerType === "mouse" && e.button !== 0) return false;
   return !isStacked();
 }
@@ -191,8 +194,8 @@ function beginCenterDrag(e) {
 function addTitleDrag(card, title, id) {
   if (!title) return;
   title.addEventListener("pointerdown", (e) => {
-    const tag = e.target.tagName;
-    if (tag === "INPUT" || tag === "LABEL" || e.target.closest("label")) return;
+    // Controls inside the title (checkboxes, sliders, buttons) keep their clicks.
+    if (e.target.closest("label, input, button")) return;
     if (!canDrag(e)) return;
     e.preventDefault();
     const rect = container.getBoundingClientRect();
@@ -323,3 +326,23 @@ function endDrag(e) {
 }
 
 function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
+// ---------- full screen ----------
+
+/** Wire `btn` to toggle browser full screen on the card with id `cardId`.
+ *  Hidden where the Fullscreen API isn't available (e.g. iPhone Safari). */
+export function setupFullscreen(cardId, btn) {
+  const card = container && container.querySelector(`[data-card="${cardId}"]`);
+  if (!card || !btn) return;
+  if (!document.fullscreenEnabled || !card.requestFullscreen) { btn.hidden = true; return; }
+  btn.addEventListener("click", () => {
+    if (document.fullscreenElement === card) document.exitFullscreen().catch(() => {});
+    else card.requestFullscreen().catch(() => {});
+  });
+  document.addEventListener("fullscreenchange", () => {
+    const on = document.fullscreenElement === card;
+    btn.textContent = on ? "✕" : "⛶";
+    btn.setAttribute("aria-label", on ? "Exit full screen" : "Full screen");
+    btn.setAttribute("data-tooltip", on ? "**Exit full screen** (Esc)." : "**Full screen** (Esc to exit).");
+  });
+}

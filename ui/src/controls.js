@@ -8,6 +8,8 @@ import { store } from "./store.js";
 import { send } from "./ws.js";
 import { makeFreqAxis } from "./freq_axis.js";
 import { toast } from "./toast.js";
+import { PALETTES, PALETTE_ORDER, applyPalette } from "./colors.js";
+import { STYLE_ORDER } from "./viz/fft3d_styles/index.js";
 
 const PRESET_NAME_RE = /^[a-zA-Z0-9_\- ]+$/;
 
@@ -327,18 +329,38 @@ export function setupControls() {
     send: (v, commit) => send({ type: "set_peak_decay", peak_decay_per_s: v, commit }),
   });
 
-  // History window for the L/M/H rolling-lines chart (UI-only, not
-  // persisted). Log slider 2..30 s, snapped to whole seconds.
+  // History window shared by the L/M/H rolling lines and the 3D FFT view
+  // (UI-only, not persisted). Log slider 2..30 s, snapped to whole seconds.
   const historyEl  = $("history-s");
   const historyLab = $("history-s-val");
   const updateHistory = () => {
     const v = Math.max(2, Math.min(30, Math.round(readSlider(historyEl))));
     historyLab.textContent = `${v}s`;
-    store.lines_history_s = v;
+    store.history_s = v;
   };
   historyEl.addEventListener("input", updateHistory);
-  writeSlider(historyEl, Math.max(2, Math.min(30, store.lines_history_s ?? 5)));
+  writeSlider(historyEl, Math.max(2, Math.min(30, store.history_s ?? 5)));
   updateHistory();
+
+  // FFT bin count: discrete ~√2 steps up to the server's 1840 cap. Sent only
+  // on release — every change reconfigures the FFT worker and resets the
+  // per-bin auto-scaler state, so streaming drag values would just flicker.
+  // A config value off the ladder shows its true count; the thumb snaps to
+  // the nearest step.
+  const BIN_STEPS = [32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 1840];
+  const nearestBinStep = (n) => {
+    let best = 0;
+    for (let i = 1; i < BIN_STEPS.length; i++) {
+      if (Math.abs(Math.log(BIN_STEPS[i] / n)) < Math.abs(Math.log(BIN_STEPS[best] / n))) best = i;
+    }
+    return best;
+  };
+  const binsCtl = bindSlider($("fft-bins"), $("fft-bins-val"), {
+    toValue: (el) => BIN_STEPS[Math.round(parseFloat(el.value))],
+    toSlider: (v) => nearestBinStep(v),
+    fmt: (v) => `${v} bins`,
+    send: (v, commit) => { if (commit) send({ type: "set_n_fft_bins", n: v }); },
+  });
 
   // Bandpass filter order: {2, 4}.
   const filterOrderCtl = bindSlider($("filter-order"), $("filter-order-val"), {
@@ -357,7 +379,29 @@ export function setupControls() {
   fftRawDb.addEventListener("change", () => {
     send({ type: "set_fft_send_raw_db", send_raw_db: fftRawDb.checked });
   });
+  const fftView2d = $("fft-view-2d"), fftView3d = $("fft-view-3d");
+  for (const el of [fftView2d, fftView3d]) {
+    el.addEventListener("change", () => {
+      if (el.checked) send({ type: "set_fft_view", view: el.value });
+    });
+  }
   const setChecked = (el, v) => { if (el.checked !== v) el.checked = v; };
+
+  // Look pickers: send, then reflect the server's choice from meta.
+  const fillSelect = (el, items) => {
+    for (const [value, label] of items) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      el.appendChild(opt);
+    }
+  };
+  const setSelect = (el, v) => { if (el.value !== v) el.value = v; };
+  const styleSelect = $("fft3d-style");
+  fillSelect(styleSelect, STYLE_ORDER.map((st) => [st.name, st.label]));
+  styleSelect.addEventListener("change", () => send({ type: "set_fft3d_style", style: styleSelect.value }));
+  const palette = setupPalettePicker($("palette-select"), $("palette-menu"),
+    (name) => send({ type: "set_palette", palette: name }));
 
   // ---------------- Devices ----------------
   const deviceSelect = $("device-select");
@@ -467,7 +511,8 @@ export function setupControls() {
 
   // Everything that needs a live server: disabled while offline / unsynced.
   const aside = document.querySelector(".controls");
-  const liveInputs = ["ws-hz", "peak-decay", "show-onsets", "fft-toggle", "fft-raw-db"].map($);
+  const liveInputs = ["ws-hz", "peak-decay", "show-onsets", "fft-toggle", "fft-raw-db", "fft-view-2d", "fft-view-3d", "fft-bins",
+    "fft3d-style", "palette-select"].map($);
 
   function syncMeta(force = false) {
     const m = store.meta;
@@ -500,6 +545,21 @@ export function setupControls() {
     if (m.filter_order !== undefined) filterOrderCtl.setValue(m.filter_order, force);
     setChecked(fftToggle, !!m.fft_enabled);
     if (m.fft_send_raw_db !== undefined) setChecked(fftRawDb, !!m.fft_send_raw_db);
+    if (m.n_fft_bins !== undefined) binsCtl.setValue(m.n_fft_bins, force);
+    if (m.ui_fft_view !== undefined) {
+      store.fft_view = m.ui_fft_view === "3d" ? "3d" : "2d";
+      setChecked(fftView2d, store.fft_view === "2d");
+      setChecked(fftView3d, store.fft_view === "3d");
+    }
+    if (m.ui_fft3d_style !== undefined) {
+      store.fft3d_style = m.ui_fft3d_style;
+      setSelect(styleSelect, m.ui_fft3d_style);
+    }
+    if (m.ui_palette !== undefined) {
+      store.palette = m.ui_palette;
+      applyPalette(m.ui_palette);   // no-op when unchanged
+      palette.show(m.ui_palette);
+    }
 
     // Device: the switch is done once meta reports the requested index.
     const devIdx = m.device?.index ?? null;
@@ -587,6 +647,81 @@ export function setupControls() {
         if (pendingDevice !== null) clearPendingDevice();
         if (probeBtn.disabled) { probeBtn.disabled = false; probeBtn.classList.remove("busy"); setDeviceStatus(""); }
       }
+    },
+  };
+}
+
+/**
+ * Palette picker: a button showing the active palette's colors, opening a
+ * listbox with a swatch per palette (a native <select> can't show colors).
+ * Choosing sends via `onPick`; the button only changes when show() is called
+ * with the server's value from meta.
+ */
+function setupPalettePicker(btn, menu, onPick) {
+  const swatch = (p) => {
+    const sw = document.createElement("span");
+    sw.className = "pal-sw";
+    sw.style.background = p.bg[2];
+    for (const c of [p.low, p.mid, p.high]) {
+      const i = document.createElement("i");
+      i.style.background = c;
+      sw.appendChild(i);
+    }
+    return sw;
+  };
+  const items = PALETTE_ORDER.map((name) => {
+    const li = document.createElement("li");
+    li.role = "option";
+    li.id = `palette-opt-${name}`;
+    li.dataset.name = name;
+    li.append(swatch(PALETTES[name]), PALETTES[name].label);
+    li.addEventListener("click", () => { close(); onPick(name); btn.focus(); });
+    menu.appendChild(li);
+    return li;
+  });
+  let current = "", active = 0;
+
+  function setActive(i) {
+    active = (i + items.length) % items.length;
+    items.forEach((li, k) => li.classList.toggle("active", k === active));
+    menu.setAttribute("aria-activedescendant", items[active].id);
+    items[active].scrollIntoView({ block: "nearest" });
+  }
+  function open() {
+    menu.hidden = false;
+    btn.setAttribute("aria-expanded", "true");
+    setActive(Math.max(0, PALETTE_ORDER.indexOf(current)));
+    menu.focus();
+  }
+  function close() {
+    menu.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+  }
+  btn.addEventListener("click", () => (menu.hidden ? open() : close()));
+  btn.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); open(); }
+  });
+  menu.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") setActive(active + 1);
+    else if (e.key === "ArrowUp") setActive(active - 1);
+    else if (e.key === "Home") setActive(0);
+    else if (e.key === "End") setActive(items.length - 1);
+    else if (e.key === "Enter" || e.key === " ") { close(); onPick(PALETTE_ORDER[active]); btn.focus(); }
+    else if (e.key === "Escape" || e.key === "Tab") { close(); if (e.key === "Escape") btn.focus(); }
+    else return;
+    e.preventDefault();
+  });
+  document.addEventListener("pointerdown", (e) => {
+    if (!menu.hidden && !menu.contains(e.target) && !btn.contains(e.target)) close();
+  });
+
+  return {
+    /** Reflect the server's palette on the button and in the list. */
+    show(name) {
+      if (!PALETTES[name] || name === current) return;
+      current = name;
+      btn.replaceChildren(swatch(PALETTES[name]), PALETTES[name].label);
+      for (const li of items) li.setAttribute("aria-selected", String(li.dataset.name === name));
     },
   };
 }

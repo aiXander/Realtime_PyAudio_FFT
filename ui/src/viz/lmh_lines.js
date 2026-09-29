@@ -3,7 +3,7 @@
 // - Horizontal alpha gradient: line goes 1.0 (right, newest) → 0 (left, oldest).
 // - Subtle per-band area fill at ~0.10 alpha on the right, fading to 0 on the left.
 // - Faint y-axis labels (0..1) on the left edge.
-// - History window (2..30s, log-scale) via store.lines_history_s. Each sample is
+// - History window (2..30s, log-scale) via store.history_s. Each sample is
 //   plotted at x = w * (1 - age_ms / window_ms), so the time axis is absolute:
 //   a half-empty buffer leaves the left portion of the canvas blank, and new
 //   samples flow in from the right rather than re-stretching the existing curve.
@@ -13,8 +13,8 @@
 // drawImage + three fill/stroke pairs. No per-frame allocation.
 
 import { store, recordVizPerf } from "../store.js";
-import { LMH } from "../colors.js";
-import { makeSurface, makeLayer, FONT_MONO, BG } from "./surface.js";
+import { LMH, theme } from "../colors.js";
+import { makeSurface, makeLayer, FONT_MONO } from "./surface.js";
 
 // Ring big enough to cover 30s of history at the top UI refresh rate (120 fps)
 // with comfortable headroom.
@@ -41,7 +41,7 @@ export function makeLines(canvas) {
   const epoch0 = performance.now();
   let head = 0, count = 0;
 
-  let gradVersion = -1;
+  let gradVersion = -1, gradTheme = -1;
   let strokeGrads = null, fillGrads = null;
 
   // rAF pauses while the tab is hidden, so the ring's newest sample is
@@ -75,7 +75,7 @@ export function makeLines(canvas) {
   function buildStatic(w, h, dpr) {
     const c = layer.canvas, g = layer.ctx;
     c.width = w; c.height = h;
-    g.fillStyle = BG;
+    g.fillStyle = theme.bg;
     g.fillRect(0, 0, w, h);
     // Quarter grid, faint; mid line slightly stronger.
     g.lineWidth = Math.max(1, Math.round(dpr));
@@ -157,15 +157,16 @@ export function makeLines(canvas) {
   function draw() {
     const t0 = performance.now();
     const { w, h, dpr, version } = surf.fit();
-    if (version !== gradVersion) {
+    if (version !== gradVersion || theme.version !== gradTheme) {
       gradVersion = version;
+      gradTheme = theme.version;
       buildGradients(w);
       buildStatic(w, h, dpr);
     }
     update();
     ctx.drawImage(layer.canvas, 0, 0);
 
-    const histS = Math.max(2, Math.min(30, store.lines_history_s ?? 5));
+    const histS = Math.max(2, Math.min(30, store.history_s ?? 5));
     const histMs = histS * 1000;
     const nowRel = performance.now() - epoch0;
     const K = effectiveK(histMs, nowRel);

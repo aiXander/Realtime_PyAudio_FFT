@@ -110,6 +110,9 @@ class UiCfg:
     peak_decay_per_s: float
     layout: dict
     show_onsets: bool
+    fft_view: str
+    fft3d_style: str
+    palette: str
 
 
 @dataclass
@@ -257,9 +260,22 @@ def _build_config(d: dict) -> Config:
         # default to OFF (onset squares hidden — matches the user's first-run
         # expectation of a minimal bars+peak-hold view).
         show_onsets=bool(ud.get("show_onsets", False)),
+        # Added with the 3D FFT view; legacy configs default to the 2D view.
+        fft_view=V.validate_fft_view(ud.get("fft_view", "2d")),
+        # Look-only UI choices: an unknown name (e.g. a style that was
+        # removed) falls back to the default instead of failing the load.
+        fft3d_style=_or_default(V.validate_fft3d_style, ud.get("fft3d_style"), "cloud"),
+        palette=_or_default(V.validate_palette, ud.get("palette"), "classic"),
     )
 
     return Config(audio=audio, dsp=dsp, autoscale=autoscale, fft=fft, onset=onset, osc=osc, ws=ws, ui=ui)
+
+
+def _or_default(validate, v, default):
+    try:
+        return validate(v)
+    except ValueError:
+        return default
 
 
 class ConfigCorruptError(ValueError):

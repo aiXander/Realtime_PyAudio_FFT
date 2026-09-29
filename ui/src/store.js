@@ -60,9 +60,21 @@ export const store = {
   // from meta.ui_show_onsets and persisted to ui.show_onsets in YAML.
   show_onsets: false,
 
-  // Visual history window (seconds) for the L/M/H rolling-lines chart. UI-only
-  // — not persisted, not sent to the server. Range: 2..30s.
-  lines_history_s: 5,
+  // Visual history window (seconds) shared by the L/M/H rolling-lines chart
+  // (chart width) and the 3D FFT view (distance to the horizon). UI-only —
+  // not persisted, not sent to the server. Range: 2..30s.
+  history_s: 5,
+
+  // FFT card view: "2d" (spectrum + band editor) or "3d" (history ocean).
+  // Server-authoritative — mirrored from meta.ui_fft_view, persisted to
+  // ui.fft_view in YAML.
+  fft_view: "2d",
+
+  // 3D FFT look (a module in viz/fft3d_styles/) and the UI color palette
+  // (colors.js). Server-authoritative — mirrored from meta.ui_fft3d_style /
+  // meta.ui_palette, persisted to ui.fft3d_style / ui.palette in YAML.
+  fft3d_style: "cloud",
+  palette: "classic",
 
   // Connection state mirror ("connecting" | "connected" | "reconnecting")
   // and whether the first meta after (re)connect has arrived. Controls stay
@@ -79,7 +91,9 @@ export const store = {
     lines: { ring: new Array(60).fill(0), idx: 0 },
     bars:  { ring: new Array(60).fill(0), idx: 0 },
     scene: { ring: new Array(60).fill(0), idx: 0 },
-    fft:   { ring: new Array(60).fill(0), idx: 0 }
+    fft:   { ring: new Array(60).fill(0), idx: 0 },
+    // GPU time of the 3D FFT view (WebGL timer query), when the browser exposes it
+    fft_gpu: { ring: new Array(60).fill(0), idx: 0 }
   },
 
   // Last-confirmed values for slider snap-back on error

@@ -564,6 +564,28 @@ body.offline .viz-card canvas { opacity: 0.35; filter: grayscale(0.6); transitio
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.45);
 }
 
+/* A canvas with an overlay on top (the FFT card: the 3D view's WebGL canvas
+   sits over the 2D canvas, composited by the browser — copying it into the
+   2D canvas every frame halved the frame rate). Same box as a bare canvas. */
+.viz-stack {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.viz-card canvas.viz-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  box-shadow: none;
+  pointer-events: none;
+}
+.viz-card canvas.viz-overlay[hidden] { display: none; }
+
 .controls {
   transition: opacity 200ms ease;
   background: linear-gradient(180deg, var(--bg-2-top) 0%, var(--bg-2) 100%);
@@ -871,10 +893,16 @@ input[type="checkbox"]:focus-visible { box-shadow: none; outline: 2px solid var(
   overflow: hidden;
   position: relative;
 }
+/* The fill is scaled, not resized: a width transition re-laid-out the whole
+   side panel on every frame it ran (5 Hz status × 11 rows), a transform runs
+   on the compositor. */
 .perf-bar-fill {
   height: 100%;
+  width: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
   background: linear-gradient(90deg, #3b8b3e 0%, #4caf50 100%);
-  transition: width 80ms linear, background 80ms linear;
+  transition: transform 80ms linear;
   border-radius: 999px;
   box-shadow: 0 0 6px rgba(76, 175, 80, 0.25);
 }
@@ -886,7 +914,11 @@ input[type="checkbox"]:focus-visible { box-shadow: none; outline: 2px solid var(
   background: linear-gradient(90deg, #b53b3b 0%, #e64a4a 100%);
   box-shadow: 0 0 6px rgba(230, 74, 74, 0.35);
 }
-.perf-num { color: var(--text-2); font-variant-numeric: tabular-nums; text-align: right; min-width: 84px; font-size: 10.5px; }
+/* Fixed box + containment: its text changes at 5 Hz and must not relayout the panel. */
+.perf-num {
+  color: var(--text-2); font-variant-numeric: tabular-nums; text-align: right; font-size: 10.5px;
+  display: block; width: 92px; height: 14px; line-height: 14px; white-space: nowrap; contain: strict;
+}
 .perf-label { white-space: nowrap; }
 .perf-row.disabled { opacity: 0.4; }
 

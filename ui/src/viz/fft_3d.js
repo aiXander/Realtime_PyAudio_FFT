@@ -22,9 +22,12 @@
 // the style (server-persisted as ui.fft3d_style). See fft3d_styles/common.js
 // for the style contract.
 //
-// Rendering is WebGL2 on an offscreen canvas, composited into the card's 2D
-// canvas each frame (drawImage), on top of the static layer (background,
-// style art, axis labels).
+// Rendering is WebGL2 on its own canvas, overlaid on the card's 2D canvas
+// (a .viz-stack sibling, transparent, no pointer events) and composited by
+// the browser. The 2D canvas only holds the static layer (background, style
+// art, axis labels) and is repainted only when that changes. Don't go back
+// to drawImage'ing the GL canvas into the 2D one: that per-frame copy
+// stalled the pipeline and dropped the whole UI from 60 to ~35 fps.
 //
 // Rows are placed by arrival time (z = age / depth), not by row index, so the
 // scroll speed is constant in seconds whatever the WS frame rate is, and rows
@@ -148,7 +151,7 @@ export function makeFft3d(canvas) {
   let kernel = null, kernelKey = "";                // frequency smoothing (depends on FFT geometry)
   let upI = null, upT = null;                       // mesh col → source col + fraction
 
-  function reset() { head = -1; count = 0; rowStartT = -Infinity; }
+  function reset() { head = -1; count = 0; rowStartT = -Infinity; finalMc = 0; }
 
   function configure(nBins, rawDb) {
     n = nBins;
@@ -255,6 +258,10 @@ export function makeFft3d(canvas) {
 
     // ---- WebGL: shared mesh buffers; the style draws ----
   const glCanvas = document.createElement("canvas");
+  glCanvas.className = "viz-overlay";
+  glCanvas.setAttribute("aria-hidden", "true");
+  glCanvas.hidden = true;
+  canvas.after(glCanvas);
   let gl = null, glOk = false;
   let surfVao, surfVbo, surfIbo, hTex, rowTex;
   let iboCols = 0;                                  // meshCols the index buffer was built for
@@ -389,7 +396,16 @@ export function makeFft3d(canvas) {
     iboCols = mc;
   }
 
+  /** Show / hide the GL overlay (only touches the DOM on a change). */
+  function showGl(on) {
+    if (glCanvas.hidden === !on) return;
+    glCanvas.hidden = !on;
+  }
+
   // ---- static layer: background, style art, x-axis labels ----
+  // `painted`: the 2D canvas currently shows the static layer (the 2D view
+  // draws over it, and a resize clears it).
+  let painted = false;
   let kVersion = -1, kFmin = NaN, kSr = NaN, kEmpty = null, kDepth = NaN, kStyle = "", kTheme = -1;
 
   function geometry(W, H, dpr, style) {
@@ -455,15 +471,20 @@ export function makeFft3d(canvas) {
   }
 
   /**
-   * Copy the N rows in view into tA/tB and blur them across time, keeping
-   * max(value, blurred) so peaks keep their height. Returns the result buffer.
+   * Blur history rows lo..hi (indices into the rows in view) across time,
+   * keeping max(value, blurred) so peaks keep their height. Reads rows
+   * lo−PASSES..hi+PASSES (clamped to the view) into tA/tB at their own
+   * offsets. Returns the buffer holding the result.
    */
-  function blurTime(N) {
+  function blurTime(N, lo, hi) {
     const mc = meshCols;
-    for (let i = 0; i < N; i++) tA.set(sRing.subarray(dIdx[i] * mc, dIdx[i] * mc + mc), i * mc);
+    const a = Math.max(0, lo - TIME_BLUR_PASSES), b = Math.min(N - 1, hi + TIME_BLUR_PASSES);
+    for (let i = a; i <= b; i++) tA.set(sRing.subarray(dIdx[i] * mc, dIdx[i] * mc + mc), i * mc);
     let src = tA, dst = tB;
     for (let pass = 0; pass < TIME_BLUR_PASSES; pass++) {
-      for (let i = 0; i < N; i++) {
+      const grow = TIME_BLUR_PASSES - 1 - pass;           // later passes need a narrower range
+      const pa = Math.max(0, lo - grow), pb = Math.min(N - 1, hi + grow);
+      for (let i = pa; i <= pb; i++) {
         const o = i * mc;
         const op = (i > 0 ? i - 1 : 0) * mc, on = (i < N - 1 ? i + 1 : N - 1) * mc;
         for (let m = 0; m < mc; m++) {
@@ -477,12 +498,12 @@ export function makeFft3d(canvas) {
     return src;
   }
 
-  /** Fill meshH / meshZ / meshSeq from the N history rows in view. Returns the mesh row count. */
-  function buildMesh(N) {
+  /** Fill meshH for mesh rows ra..rb (Catmull-Rom across the time-blurred history rows). */
+  function buildHeights(N, ra, rb) {
     const mc = meshCols;
-    const rows = blurTime(N);
-    const R = (N - 1) * T_SUB + 1;
-    for (let r = 0; r < R; r++) {
+    const iA = Math.min(N - 2, Math.floor(ra / T_SUB)), iB = Math.min(N - 2, Math.floor(rb / T_SUB));
+    const rows = blurTime(N, Math.max(0, iA - 1), Math.min(N - 1, iB + 2));
+    for (let r = ra; r <= rb; r++) {
       const i = Math.min(N - 2, Math.floor(r / T_SUB));
       const t = r / T_SUB - i;
       const i0 = i > 0 ? i - 1 : 0, i2 = i + 1, i3 = i + 2 < N ? i + 2 : N - 1;
@@ -498,35 +519,98 @@ export function makeFft3d(canvas) {
         const v = w0 * rows[a0 + m] + w1 * rows[a1 + m] + w2 * rows[a2 + m] + w3 * rows[a3 + m];
         meshH[o + m] = v < 0 ? 0 : v > 1.25 ? 1.25 : v;
       }
-      meshZ[r] = dZ[i] + (dZ[i2] - dZ[i]) * t;
-      meshSeq[r] = dSeq[i] + (dSeq[i2] - dSeq[i]) * t;
     }
-    return R;
   }
 
-  /** Interleave height, depth, world-space slopes and the row key into vtx. */
-  function fillVertices(R) {
-    const mc = meshCols;
-    const dX = 2 / (mc - 1);
-    let o = 0;
+  /** meshZ / meshSeq for all R mesh rows, and the per-row (z, key) texture data. */
+  function buildRowTimes(N, R) {
     for (let r = 0; r < R; r++) {
+      const i = Math.min(N - 2, Math.floor(r / T_SUB));
+      const t = r / T_SUB - i;
+      meshZ[r] = dZ[i] + (dZ[i + 1] - dZ[i]) * t;
+      meshSeq[r] = dSeq[i] + (dSeq[i + 1] - dSeq[i]) * t;
+      rowZK[2 * r] = meshZ[r];
+      rowZK[2 * r + 1] = Math.round(meshSeq[r] * T_SUB) % 65536;   // stable per mesh row as it recedes
+    }
+  }
+
+  /** Interleave height, depth, world-space slopes and the row key into vtx, mesh rows ra..rb. */
+  function fillVertices(R, ra, rb) {
+    const mc = meshCols;
+    const sxScale = WORLD_HEIGHT / (2 * (2 / (mc - 1)));   // central difference over two columns
+    let o = ra * mc * VERT_FLOATS;
+    for (let r = ra; r <= rb; r++) {
       const rp = r > 0 ? r - 1 : 0, rn = r < R - 1 ? r + 1 : R - 1;
       const z = meshZ[r];
       // Rows run oldest (far) → newest (near), so rp is the farther neighbor.
       const dZw = (meshZ[rp] - meshZ[rn]) * WORLD_DEPTH;
       const invDz = dZw > 1e-6 ? WORLD_HEIGHT / dZw : 0;
-      const key = Math.round(meshSeq[r] * T_SUB) % 65536;   // stable per mesh row as it recedes
-      rowZK[2 * r] = z; rowZK[2 * r + 1] = key;
+      const key = rowZK[2 * r + 1];
       const row = r * mc, rowP = rp * mc, rowN = rn * mc;
       for (let m = 0; m < mc; m++) {
+        // One-sided difference at the ends (half the span, so twice the scale).
         const ml = m > 0 ? m - 1 : 0, mr = m < mc - 1 ? m + 1 : mc - 1;
+        const sx = (meshH[row + mr] - meshH[row + ml]) * (mr - ml === 2 ? sxScale : 2 * sxScale);
         vtx[o++] = meshH[row + m];
         vtx[o++] = z;
-        vtx[o++] = ((meshH[row + mr] - meshH[row + ml]) * WORLD_HEIGHT) / ((mr - ml) * dX);
+        vtx[o++] = sx;
         vtx[o++] = (meshH[rowP + m] - meshH[rowN + m]) * invDz;
         vtx[o++] = key;
       }
     }
+  }
+
+  // Incremental mesh. The history rows in view are a contiguous run of row
+  // numbers (rowSeq), so last frame's mesh maps onto this frame's by a shift
+  // of whole rows. A vertex row depends on the history rows from REACH_BACK
+  // before to REACH_FWD after its own (time blur ±PASSES, Catmull-Rom −1..+2,
+  // slopes ±1 mesh row). Once all of those are closed (no longer merging
+  // frames) and none is clamped at the back edge, its heights and slopes are
+  // final: they are carried over (copyWithin) and only z is rewritten. Per
+  // frame that leaves a few rows at the live front edge and at the horizon to
+  // recompute instead of the whole ~190 × 384 mesh. Their depth spacing is
+  // fixed too: closed rows' z differ by (rowT difference) / depth.
+  const REACH_BACK = TIME_BLUR_PASSES + 2, REACH_FWD = TIME_BLUR_PASSES + 3;
+  let finalSeq0 = NaN, finalLo = 0, finalHi = -1;   // last frame: first row number, final history-row range
+  let finalMc = 0, finalDepth = NaN;
+
+  /** Build meshH / meshZ / meshSeq / vtx from the N (≥ 2) history rows in view. Returns the mesh row count. */
+  function buildMesh(N, headOpen, depthMs) {
+    const mc = meshCols;
+    const R = (N - 1) * T_SUB + 1;
+    buildRowTimes(N, R);
+    // History rows final this frame: back neighbors in view, forward neighbors closed.
+    const lastClosed = headOpen ? N - 2 : N - 1;
+    const nowLo = REACH_BACK, nowHi = lastClosed - REACH_FWD;
+    // Carry over the rows that were final last frame (in this frame's indexing).
+    let lo = 1, hi = 0;
+    const shift = dSeq[0] - finalSeq0;
+    if (mc === finalMc && depthMs === finalDepth && shift >= 0) {
+      lo = Math.max(nowLo, finalLo - shift);
+      hi = Math.min(nowHi, finalHi - shift);
+    }
+    if (lo <= hi) {
+      const ra = lo * T_SUB, rb = hi * T_SUB + T_SUB - 1;        // carried mesh rows
+      const dr = shift * T_SUB;
+      if (dr > 0) {
+        meshH.copyWithin(ra * mc, (ra + dr) * mc, (rb + 1 + dr) * mc);
+        vtx.copyWithin(ra * mc * VERT_FLOATS, (ra + dr) * mc * VERT_FLOATS, (rb + 1 + dr) * mc * VERT_FLOATS);
+      }
+      // Recompute both sides; heights one row past each side feed the slopes.
+      if (ra > 0) { buildHeights(N, 0, ra); fillVertices(R, 0, ra - 1); }
+      if (rb < R - 1) { buildHeights(N, rb, R - 1); fillVertices(R, rb + 1, R - 1); }
+      // Carried rows: new depth only.
+      for (let r = ra, o = ra * mc * VERT_FLOATS + 1; r <= rb; r++) {
+        const z = meshZ[r];
+        for (let m = 0; m < mc; m++, o += VERT_FLOATS) vtx[o] = z;
+      }
+    } else {
+      buildHeights(N, 0, R - 1);
+      fillVertices(R, 0, R - 1);
+    }
+    finalSeq0 = dSeq[0]; finalLo = nowLo; finalHi = nowHi;
+    finalMc = mc; finalDepth = depthMs;
+    return R;
   }
 
   let lastDrawT = performance.now();
@@ -556,9 +640,14 @@ export function makeFft3d(canvas) {
       kStyle = style.name; kTheme = theme.version;
       buildStatic(W, H, dpr, fMin, fMax, empty, depthS, style);
       f.bgRgb.set(hex01(bgOf(style)));                 // fog / face color (style + palette)
+      painted = false;
     }
-    ctx.drawImage(layer.canvas, 0, 0);
+    if (!painted) {
+      ctx.drawImage(layer.canvas, 0, 0);
+      painted = true;
+    }
     if (empty) {
+      showGl(false);
       recordVizPerf("fft", performance.now() - t0);
       return;
     }
@@ -573,7 +662,9 @@ export function makeFft3d(canvas) {
       if (z > 1) continue;
       dIdx[N] = idx; dZ[N] = z < 0 ? 0 : z; dSeq[N] = rowSeq[idx]; N++;
     }
+    const headOpen = now < rowT[head];               // still merging frames
     if (N === 0) {
+      showGl(false);
       recordVizPerf("fft", performance.now() - t0);
       return;
     }
@@ -598,8 +689,7 @@ export function makeFft3d(canvas) {
     // Mesh (a single history row still gets a front edge).
     let R = 1;
     if (N >= 2) {
-      R = buildMesh(N);
-      fillVertices(R);
+      R = buildMesh(N, headOpen, depthMs);
     } else {
       const src = dIdx[0] * mc;
       for (let m = 0; m < mc; m++) meshH[m] = sRing[src + m];
@@ -674,9 +764,15 @@ export function makeFft3d(canvas) {
     gl.bindVertexArray(null);
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(true);
-    ctx.drawImage(glCanvas, 0, 0);
+    showGl(true);
     recordVizPerf("fft", performance.now() - t0);
   }
 
-  return { draw, push, reset };
+  /** The 2D view is drawing on the shared canvas: hide the overlay, repaint the static layer on return. */
+  function hide() {
+    showGl(false);
+    painted = false;
+  }
+
+  return { draw, push, reset, hide };
 }

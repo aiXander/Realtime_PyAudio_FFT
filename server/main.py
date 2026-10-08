@@ -591,6 +591,8 @@ class App:
         if self.args.open:
             if self.ws is not None and self.http is not None:
                 url = f"http://{cfg.ws.host}:{cfg.ws.http_port}/index.html"
+                if cfg.ws.port != 8765:  # the UI assumes 8765 unless told otherwise
+                    url += f"?ws_port={cfg.ws.port}"
                 try:
                     webbrowser.open(url)
                 except Exception as e:

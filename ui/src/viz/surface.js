@@ -33,7 +33,9 @@ export function makeSurface(canvas) {
       const ew = Math.round(cssW * dpr), eh = Math.round(cssH * dpr);
       const w = Math.max(1, devW && Math.abs(devW - ew) <= 2 ? devW : ew);
       const h = Math.max(1, devH && Math.abs(devH - eh) <= 2 ? devH : eh);
-      if (canvas.width !== w || canvas.height !== h || dpr !== s.dpr) {
+      // Compare against our own record too: two renderers can share one
+      // canvas (FFT 2D / 3D), and the other may already have resized it.
+      if (canvas.width !== w || canvas.height !== h || dpr !== s.dpr || s.w !== w || s.h !== h) {
         if (canvas.width !== w) canvas.width = w;
         if (canvas.height !== h) canvas.height = h;
         s.w = w; s.h = h; s.dpr = dpr;

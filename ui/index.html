@@ -166,7 +166,9 @@ The low end can't get finer than the FFT window allows (~47 Hz per linear bin at
 - **3D**: history "ocean" — the newest spectrum is the front wave; older spectra recede toward the horizon, shrinking and fading. Depth = the **History** slider in the top bar. Band edges are then edited from the side panel.
 
 *Visual only — does not affect DSP or the OSC payload.*"><label><input type="radio" name="fft-view" id="fft-view-2d" value="2d" /><span>2D</span></label><label><input type="radio" name="fft-view" id="fft-view-3d" value="3d" /><span>3D</span></label></span> <button type="button" class="icon-btn" id="fft-fullscreen" aria-label="Full screen" title="**Full screen** (Esc to exit).">⛶</button></span></div>
-          <canvas id="viz-fft" width="640" height="200" role="img" aria-label="FFT spectrum"></canvas>
+          <div class="viz-stack">
+            <canvas id="viz-fft" width="640" height="200" role="img" aria-label="FFT spectrum"></canvas>
+          </div>
         </div>
         <div class="conn-overlay" id="conn-overlay" role="status">
           <div class="conn-card">

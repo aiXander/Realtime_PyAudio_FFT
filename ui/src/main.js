@@ -271,7 +271,8 @@ function setPerfRow(id, avg_ms, p95_ms, load_pct, disabled) {
   const r = perfRowEls[id];
   if (!r) return;
   r.row.classList.toggle("disabled", !!disabled);
-  r.fill.style.width = `${Math.min(100, load_pct).toFixed(1)}%`;
+  const scale = `scaleX(${(Math.min(100, Math.max(0, load_pct)) / 100).toFixed(3)})`;
+  if (r.scale !== scale) { r.scale = scale; r.fill.style.transform = scale; }
   r.fill.classList.toggle("red", load_pct >= 80);
   r.fill.classList.toggle("amber", load_pct >= 50 && load_pct < 80);
   const t = `${fmtMs(avg_ms)} / ${fmtMs(p95_ms)} ms`;
@@ -372,7 +373,7 @@ function frame(now) {
       bars.draw();
       scene.draw();
       if (store.fft_view === "3d") fft3d.draw();
-      else fft.draw();
+      else { fft3d.hide(); fft.draw(); }
     }
   }
   requestAnimationFrame(frame);

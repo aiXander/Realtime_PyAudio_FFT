@@ -17,19 +17,50 @@ https://github.com/user-attachments/assets/83547924-0b8d-4667-ba55-5cb813fdc09d
 
 ## Features
 
-- 🎚️ **Low / mid / high band energies**: three independent bandpasses, each smoothed, noise-gated and auto-scaled into a steady `[0, 1]` signal.
-- 🌈 **Log-spaced FFT spectrum** (16–1024 bins) through the same auto-scaling pipeline, or as raw dB.
-- 🥁 **Per-band onset triggers + live BPM**: separate kick / snare / hat style triggers on `low`, `mid` and `high`, and a tempo estimate from the low band.
-- 📡 **OSC over UDP** at audio-block rate (~187 Hz) for TouchDesigner, Max/MSP, Unity, p5.js or your own script, plus a **WebSocket** for live control.
-- 🖥️ **Browser UI** to tune every knob live. It does no DSP of its own: the FFT graph shows exactly the bytes sent on `/audio/fft`, so what you see is what your app gets.
-- ⚡ **Realtime-safe**: the audio callback never allocates, locks or logs; all DSP runs in worker threads on vectorized NumPy / SciPy. Light enough for a Raspberry Pi.
-- 💾 **Persistent**: every setting is saved to `configs/main.yaml`, and you can save and load named presets.
+| | |
+|---|---|
+| **Band energies** | Three independent bandpasses (low / mid / high), each smoothed, noise-gated and auto-scaled to a stable `[0, 1]` signal. |
+| **FFT spectrum** | 16–1024 log-spaced bins, auto-scaled through the same pipeline or sent as raw dB. |
+| **Onsets and tempo** | Per-band onset triggers for kick, snare and hi-hat style transients, plus a BPM estimate from the low band. |
+| **OSC output** | UDP at audio-block rate (~187 Hz) for TouchDesigner, Max/MSP, Unity, p5.js or custom clients. A WebSocket handles live control. |
+| **Browser UI** | Tune every parameter live. The UI does no signal processing: the FFT graph renders the exact bytes sent on `/audio/fft`. |
+| **Realtime-safe** | The audio callback never allocates, locks or logs. All DSP runs in worker threads on vectorized NumPy / SciPy, light enough for a Raspberry Pi. |
+| **Persistence** | Every setting is saved to `configs/main.yaml`. Named presets can be saved and loaded. |
 
 ## The UI
 
 <p align="center">
   <img src="assets/screenshots/ui.webp" alt="Browser UI: band energy bars, rolling L/M/H lines, scene visualizer and the 3D FFT view, with the control panel on the right" width="100%">
 </p>
+
+## Quick start
+
+You need Python 3.10+, [uv](https://docs.astral.sh/uv/) and PortAudio.
+
+```bash
+brew install portaudio                               # macOS
+sudo apt install libportaudio2 portaudio19-dev       # Ubuntu / Debian / Raspberry Pi OS
+
+git clone https://github.com/aiXander/Realtime_PyAudio_FFT.git
+cd Realtime_PyAudio_FFT
+uv sync
+uv run audio-server --open                           # server + UI in your browser (or: make start)
+```
+
+The UI lives at **http://127.0.0.1:8766**. OSC goes to `127.0.0.1:9000` by default.
+
+| Flag | What it does |
+|---|---|
+| `--open` | Open the UI in your default browser |
+| `--device N` | Use input device `N` (pick it in the UI otherwise) |
+| `--no-ws` | Headless: OSC only, no UI or WebSocket (e.g. a Pi at a gig) |
+| `--config PATH` | Use another config file instead of `configs/main.yaml` |
+| `--log-level DEBUG` | More logging |
+
+> [!TIP]
+> To react to what your computer is *playing* rather than a mic, route system audio into a loopback device ([BlackHole](https://github.com/ExistentialAudio/BlackHole) on macOS, a loopback / monitor device on Linux or Windows) and select it as the input.
+
+## FFT views and palettes
 
 The FFT card has a **2D view**, the exact picture of the OSC payload with the three bandpasses overlaid (drag their edges right on the canvas), and a **3D view** that shows the last few seconds of spectrum as a landscape, in four styles:
 
@@ -59,33 +90,6 @@ Pick a palette from the top bar and it recolors everything, the 3D styles includ
     <td width="50%"><img src="assets/screenshots/palette_sunset.webp" alt="Sunset palette"><p align="center">Sunset</p></td>
   </tr>
 </table>
-
-## Quick start
-
-You need Python 3.10+, [uv](https://docs.astral.sh/uv/) and PortAudio.
-
-```bash
-brew install portaudio                               # macOS
-sudo apt install libportaudio2 portaudio19-dev       # Ubuntu / Debian / Raspberry Pi OS
-
-git clone https://github.com/aiXander/Realtime_PyAudio_FFT.git
-cd Realtime_PyAudio_FFT
-uv sync
-uv run audio-server --open                           # server + UI in your browser (or: make start)
-```
-
-The UI lives at **http://127.0.0.1:8766**. OSC goes to `127.0.0.1:9000` by default.
-
-| Flag | What it does |
-|---|---|
-| `--open` | Open the UI in your default browser |
-| `--device N` | Use input device `N` (pick it in the UI otherwise) |
-| `--no-ws` | Headless: OSC only, no UI or WebSocket (e.g. a Pi at a gig) |
-| `--config PATH` | Use another config file instead of `configs/main.yaml` |
-| `--log-level DEBUG` | More logging |
-
-> [!TIP]
-> To react to what your computer is *playing* rather than a mic, route system audio into a loopback device ([BlackHole](https://github.com/ExistentialAudio/BlackHole) on macOS, a loopback / monitor device on Linux or Windows) and select it as the input.
 
 ## Receiving features over OSC
 

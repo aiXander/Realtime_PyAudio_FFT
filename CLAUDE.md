@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository layout
 
+**Planned: full port of `server/` to Rust** — `docs/TODO/rust_port.md`. Until cutover the Python server is a **frozen reference**: bug fixes only; any DSP-semantics change must land in both engines (read the plan before touching `server/dsp/`).
+
 The design is documented in detail in `realtime_audio_server_plan.md`; if behavior in code seems surprising, the plan is the authoritative source for *why*. **Note:** the plan predates the FFT post-processor — for FFT processing semantics, the code (`server/dsp/fft_postprocess.py`) is the source of truth.
 
 ```

@@ -269,7 +269,10 @@ def validate_onset_band(band):
 
 
 def validate_ws_snapshot_hz(hz):
-    return int(round(_finite_float(hz, "hz", gt=0.0)))
+    value = _finite_float(hz, "hz", ge=15.0)
+    if value > 240.0:
+        raise ValueError("hz must be <= 240")
+    return int(round(value))
 
 
 _PRESET_NAME_RE = re.compile(r"^[a-zA-Z0-9_\- ]+$")

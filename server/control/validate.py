@@ -269,7 +269,10 @@ def validate_onset_band(band):
 
 
 def validate_ws_snapshot_hz(hz):
-    return int(round(_finite_float(hz, "hz", gt=0.0)))
+    # Clamped (not rejected) to the WS broadcaster's [15, 240] range so the
+    # persisted value matches what actually runs; a hand-edited out-of-range
+    # main.yaml still starts.
+    return max(15, min(240, int(round(_finite_float(hz, "hz")))))
 
 
 _PRESET_NAME_RE = re.compile(r"^[a-zA-Z0-9_\- ]+$")

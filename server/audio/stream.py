@@ -32,6 +32,14 @@ class StreamHandle:
         except Exception:
             pass
 
+    def abort(self):
+        """Stop without draining pending buffers — for a stream whose device
+        has gone away, where a draining stop() can block."""
+        try:
+            self.stream.abort(ignore_errors=True)
+        except Exception:
+            pass
+
     def close(self):
         try:
             self.stream.close(ignore_errors=True)

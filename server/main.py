@@ -50,9 +50,16 @@ log = logging.getLogger(__name__)
 
 _LOOP_ERR_LOG_INTERVAL_S = 5.0
 # OSC /audio/meta: resent at this period so late-joining OSC consumers pick
-# it up, plus (debounced to one per tick) whenever sr / bands / n_bins change.
+# it up, plus whenever sr / bands / n_bins change (at most one send per
+# _OSC_META_MIN_GAP_S, so band drags don't flood).
 _OSC_META_PERIOD_S = 1.0
-_OSC_META_TICK_S = 0.05
+_OSC_META_MIN_GAP_S = 0.05
+# Audio-input watchdog: no new block for _AUDIO_STALL_S means the input has
+# stalled (device unplugged, driver hung, or no stream after a failed
+# switch). A silent mic is not a stall — it still delivers blocks.
+_AUDIO_WATCHDOG_TICK_S = 0.25
+_AUDIO_STALL_S = 1.0
+_AUDIO_RECOVER_EVERY_S = 3.0
 
 
 class StartupError(Exception):
@@ -122,7 +129,8 @@ class App:
         self.perf_fft = np.zeros(64,  dtype=np.int64)
         self.perf_ws  = np.zeros(32,  dtype=np.int64)
         # End-to-end latency rings (audio-block receive -> OSC dispatch).
-        # Written by the OSC sender task on each successful send.
+        # Written by OscPublisher (on the DSP / FFT worker threads) on each
+        # successful send.
         self.perf_lmh_e2e = np.zeros(128, dtype=np.int64)
         self.perf_fft_e2e = np.zeros(64,  dtype=np.int64)
         self.perf_e2e_idx = {"lmh": 0, "fft": 0}
@@ -148,10 +156,15 @@ class App:
 
         self._filter_retune_handle: asyncio.TimerHandle | None = None
         self._device_switch_lock: asyncio.Lock | None = None
-        # OSC /audio/meta: dirty flag drained by _osc_meta_loop (<= 1 send
-        # per tick, so band drags don't flood) + a periodic resend.
-        self._osc_meta_dirty = False
-        self._osc_meta_task: asyncio.Task | None = None
+        # OSC /audio/meta: wakes _osc_meta_loop for an early resend.
+        self._osc_meta_dirty = asyncio.Event()
+        self._bg_tasks: list[asyncio.Task] = []
+        # Name of the device the live stream uses (indices shift when devices
+        # come and go; names don't) and the sr the DSP pipeline was built for.
+        self.active_device_name: str | None = None
+        self._pipeline_sr: float | None = None
+        # loop.time() when the input stalled; None while audio blocks flow.
+        self.audio_stalled_since: float | None = None
         # Counter baselines so the status panel's overruns/drops count from
         # the current device session: a hot-switch resets the ring and the
         # workers' read pointers, which can register a few spurious drops.
@@ -170,8 +183,8 @@ class App:
             self.ws.mark_meta_dirty()
 
     def mark_osc_meta_dirty(self) -> None:
-        """Ask _osc_meta_loop to resend /audio/meta on its next tick."""
-        self._osc_meta_dirty = True
+        """Ask _osc_meta_loop to resend /audio/meta soon."""
+        self._osc_meta_dirty.set()
 
     def send_osc_meta(self) -> None:
         if self.osc_sender is None or self.stream is None:
@@ -187,15 +200,20 @@ class App:
         loop = asyncio.get_running_loop()
         last_sent = loop.time()  # start() already sent one
         while True:
-            await asyncio.sleep(_OSC_META_TICK_S)
+            # Sleep until a change or the periodic resend is due — no idle
+            # polling. The min gap rate-limits sends during band drags.
+            timeout = max(0.0, last_sent + _OSC_META_PERIOD_S - loop.time())
             try:
-                now = loop.time()
-                if self._osc_meta_dirty or now - last_sent >= _OSC_META_PERIOD_S:
-                    self._osc_meta_dirty = False
-                    last_sent = now
-                    self.send_osc_meta()
+                await asyncio.wait_for(self._osc_meta_dirty.wait(), timeout)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                self._osc_meta_dirty.clear()
+                last_sent = loop.time()
+                self.send_osc_meta()
             except Exception:
                 self._log_loop_error("osc meta loop")
+            await asyncio.sleep(_OSC_META_MIN_GAP_S)
 
     def _log_loop_error(self, where: str) -> None:
         now = time.monotonic()
@@ -205,8 +223,64 @@ class App:
                           where, _LOOP_ERR_LOG_INTERVAL_S)
 
     def start_background_tasks(self) -> None:
-        self._osc_meta_task = asyncio.get_running_loop().create_task(
-            self._osc_meta_loop(), name="osc-meta")
+        loop = asyncio.get_running_loop()
+        self._bg_tasks = [
+            loop.create_task(self._osc_meta_loop(), name="osc-meta"),
+            loop.create_task(self._audio_watchdog_loop(), name="audio-watchdog"),
+        ]
+
+    async def _audio_watchdog_loop(self) -> None:
+        """Detect a stalled input and keep reopening it until audio flows.
+
+        On stall: one warning, `/audio/lmh 0 0 0` + `/audio/bpm 0` over OSC
+        (so downstream doesn't hold the last level), `audio_stalled` in
+        server_status (the UI clears its viz and shows a badge), then a
+        reopen attempt every _AUDIO_RECOVER_EVERY_S — PortAudio re-init,
+        same device by name, else the system default.
+        """
+        loop = asyncio.get_running_loop()
+        last_wi = self.ring.write_idx
+        last_change = loop.time()
+        next_attempt = 0.0
+        while True:
+            await asyncio.sleep(_AUDIO_WATCHDOG_TICK_S)
+            try:
+                now = loop.time()
+                if self._device_switch_lock.locked():
+                    # A switch / refresh owns the stream: fresh window after.
+                    last_change = now
+                    continue
+                wi = self.ring.write_idx
+                if wi != last_wi:
+                    last_wi, last_change = wi, now
+                    if self.audio_stalled_since is not None:
+                        log.info("audio input recovered on %r after %.1f s",
+                                 self.active_device_name, now - self.audio_stalled_since)
+                        self.audio_stalled_since = None
+                    continue
+                if now - last_change < _AUDIO_STALL_S:
+                    continue
+                if self.audio_stalled_since is None:
+                    self.audio_stalled_since = last_change
+                    log.warning("audio input stalled: no audio from %r for %.1f s "
+                                "(unplugged?); trying to reopen every %.0f s",
+                                self.active_device_name, now - last_change,
+                                _AUDIO_RECOVER_EVERY_S)
+                    if self.osc_sender is not None:
+                        self.osc_sender.send_silence()
+                    next_attempt = now
+                if now >= next_attempt:
+                    next_attempt = now + _AUDIO_RECOVER_EVERY_S
+                    async with self._device_switch_lock:
+                        try:
+                            self._reopen_input()
+                        except Exception as e:
+                            log.debug("audio input reopen failed: %s", e)
+                        self._after_stream_change()
+                    last_wi = self.ring.write_idx
+                    last_change = loop.time()  # give the new stream a window
+            except Exception:
+                self._log_loop_error("audio watchdog")
 
     # ----------------- starting up -----------------
     def _bands_tuple_dict(self) -> dict:
@@ -379,6 +453,7 @@ class App:
         first; returns whether they were clamped."""
         cfg = self.cfg
         clamped = self._clamp_cfg_bands_for_sr(sr)
+        self._pipeline_sr = sr
         self.filter_bank = FilterBank(
             sr=sr,
             bands=self._bands_tuple_dict(),
@@ -464,6 +539,7 @@ class App:
                 "plug in / enable a microphone, or pick another input with --device N "
                 "(list them with `uv run python -m sounddevice`)",
             ) from e
+        self.active_device_name = self._stream_device_name(self.stream)
 
         bands_clamped = self._build_pipeline_for_sr(self.stream.samplerate)
 
@@ -748,6 +824,8 @@ class App:
 
         return {
             "type": "server_status",
+            # True while the audio watchdog sees no input blocks.
+            "audio_stalled": self.audio_stalled_since is not None,
             # Counted from the current device session (see _drops_base).
             "cb_overruns": max(0, int(self.callback.cb_overruns) - self._drops_base["cb"])
                            if self.callback else 0,
@@ -795,9 +873,17 @@ class App:
             "fft": int(self.fft_worker.fft_drops) if self.fft_worker else 0,
         }
 
-    def _teardown_stream(self) -> None:
+    @staticmethod
+    def _stream_device_name(stream: StreamHandle) -> str | None:
+        info = devmod.device_info(int(stream.device)) if isinstance(stream.device, int) else None
+        return info.get("name") if info else None
+
+    def _teardown_stream(self, abort: bool = False) -> None:
         if self.stream is not None:
-            self.stream.stop()
+            if abort:
+                self.stream.abort()
+            else:
+                self.stream.stop()
             self.stream.close()
             self.stream = None
 
@@ -819,10 +905,14 @@ class App:
         if self.ws is not None:
             self.ws.reset_perf()
 
-    def _install_stream(self, idx: int | None) -> None:
+    def _install_stream(self, idx: int | None, *, keep_state: bool = False) -> None:
         """Open `idx`, rebuild the sr-dependent pipeline, swap it into the
         workers and start the stream. On failure closes whatever it opened
-        (self.stream stays None) and re-raises; the caller rolls back."""
+        (self.stream stays None) and re-raises; the caller rolls back.
+
+        `keep_state` (reopening the same device after a refresh / stall):
+        if the sample rate is unchanged, keep the live DSP objects and their
+        smoother / auto-scaler state, so levels don't re-normalise."""
         stream = open_input_stream(
             device=idx,
             blocksize=self.cfg.audio.blocksize,
@@ -831,25 +921,63 @@ class App:
         )
         try:
             new_sr = stream.samplerate
-            # Rebuild filter + autoscaler + smoother + onset alphas for the
-            # new sr (clamps cfg bands to the new Nyquist first).
-            self._build_pipeline_for_sr(new_sr)
-            # Swap into worker (idle: no stream is running).
-            self.dsp_worker.filter_bank = self.filter_bank
-            self.dsp_worker.smoother = self.smoother
-            self.dsp_worker.auto_scaler = self.auto_scaler
-            # FFT worker rebuild for sr (this also reconfigures the
-            # post-processor's hop_period_s / sr — see FFTWorker.reconfigure).
-            self.fft_worker.reconfigure(sr=new_sr)
-            self.fft_postprocessor.update_bands(self._bands_meta_dict())
-            self.fft_postprocessor.reset()
+            if not (keep_state and new_sr == self._pipeline_sr):
+                # Rebuild filter + autoscaler + smoother + onset alphas for
+                # the new sr (clamps cfg bands to the new Nyquist first).
+                self._build_pipeline_for_sr(new_sr)
+                # Swap into worker (idle: no stream is running).
+                self.dsp_worker.filter_bank = self.filter_bank
+                self.dsp_worker.smoother = self.smoother
+                self.dsp_worker.auto_scaler = self.auto_scaler
+                # FFT worker rebuild for sr (this also reconfigures the
+                # post-processor's hop_period_s / sr — see FFTWorker.reconfigure).
+                self.fft_worker.reconfigure(sr=new_sr)
+                self.fft_postprocessor.update_bands(self._bands_meta_dict())
+                self.fft_postprocessor.reset()
             self.stream = stream
             stream.start()
+            self.active_device_name = self._stream_device_name(stream)
         except Exception:
             self.stream = None
             stream.stop()
             stream.close()
             raise
+
+    def _reopen_input(self) -> None:
+        """Tear the stream down, re-initialise PortAudio (fresh device list)
+        and reopen the device in use — found again by name, since indices
+        shift when devices come and go — else the system default. Caller
+        holds device_switch_lock. Raises if nothing opens (self.stream stays
+        None; the audio watchdog keeps retrying)."""
+        name = self.active_device_name
+        self._teardown_stream(abort=True)  # the device may be gone: don't drain
+        devmod.reinitialize_portaudio()
+        self._reset_stream_state()
+        idx = devmod.find_input_by_name(name)
+        if idx is not None:
+            try:
+                self._install_stream(idx, keep_state=True)
+                return
+            except Exception as e:
+                log.warning("reopening %r failed (%s); trying the system default", name, e)
+                self._reset_stream_state()
+        default = devmod.default_input()
+        if default is None:
+            raise RuntimeError("no audio input device available")
+        self._install_stream(default)
+
+    async def refresh_devices(self, probe: bool) -> list:
+        """Device list for the UI's refresh / probe buttons. PortAudio only
+        sees devices plugged in since startup after a re-init, which closes
+        the stream — so this briefly restarts the input (~150 ms gap)."""
+        async with self._device_switch_lock:
+            try:
+                self._reopen_input()
+            except Exception as e:
+                log.warning("input reopen after device refresh failed (%s); "
+                            "the audio watchdog will keep retrying", e)
+            self._after_stream_change()
+            return await asyncio.to_thread(self.list_devices_with_probe, probe)
 
     async def hot_switch_device(self, new_idx: int) -> None:
         """Tear down stream, rebuild for new device, start fresh.
@@ -918,10 +1046,10 @@ class App:
     async def shutdown(self) -> None:
         # Also used to clean up after a failed start(), so every step
         # tolerates partially-initialised state.
-        if self._osc_meta_task is not None:
-            self._osc_meta_task.cancel()
+        for task in self._bg_tasks:
+            task.cancel()
             try:
-                await self._osc_meta_task
+                await task
             except (asyncio.CancelledError, Exception):
                 pass
         log.info("shutdown: stopping audio stream")

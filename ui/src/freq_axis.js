@@ -5,14 +5,16 @@
 //   - Edge handle drag: moves only that edge.
 //   - Edge labels render the live frequency in Hz / .1f kHz.
 //
-// Bands may overlap; validation is per-band only (matches server: lo>=20,
-// hi>lo+50, hi<=0.45*sr). UI clamps during drag so the server never errors.
+// Bands may overlap; validation is per-band only. UI clamps during drag to
+// what the server keeps (lo>=20, hi>lo+50, hi<=0.45*sr, and lo<=0.9*hi as in
+// server/dsp/filters.py:clamp_band_edges), so an edge never jumps on release.
 
 import { send } from "./ws.js";
 
 const F_AXIS_MIN = 20;
 const F_AXIS_MAX = 22000;
 const MIN_GAP_HZ = 50;
+const LO_MAX_FRAC_OF_HI = 0.9;   // server clamp_band_edges: lo <= 0.9·hi
 
 // SVG user units == CSS px: the viewBox width tracks the element's real width
 // (ResizeObserver), so text is never stretched/squished horizontally the way
@@ -219,6 +221,7 @@ export function makeFreqAxis(container, getSr) {
     if (lo < F_AXIS_MIN) lo = F_AXIS_MIN;
     if (hi > fmaxHard()) hi = fmaxHard();
     if (hi < lo + MIN_GAP_HZ) hi = lo + MIN_GAP_HZ;
+    if (lo > LO_MAX_FRAC_OF_HI * hi) lo = LO_MAX_FRAC_OF_HI * hi;
     return [lo, hi];
   }
 
@@ -269,10 +272,10 @@ export function makeFreqAxis(container, getSr) {
     let hi = drag.startHi;
     if (drag.mode === "lo") {
       lo = snapHz(x2f(x));
-      if (lo > hi - MIN_GAP_HZ) lo = hi - MIN_GAP_HZ;
+      lo = Math.min(lo, hi - MIN_GAP_HZ, LO_MAX_FRAC_OF_HI * hi);
     } else if (drag.mode === "hi") {
       hi = snapHz(x2f(x));
-      if (hi < lo + MIN_GAP_HZ) hi = lo + MIN_GAP_HZ;
+      hi = Math.max(hi, lo + MIN_GAP_HZ, lo / LO_MAX_FRAC_OF_HI);
     } else {
       // Body drag: shift both edges by the same log-space delta (= multiply
       // by ratio = freq-at-cursor / freq-at-press). Preserves log-width.

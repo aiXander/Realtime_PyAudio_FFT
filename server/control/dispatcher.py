@@ -165,12 +165,11 @@ class Dispatcher:
 
     async def _list_devices(self, msg):
         probe = bool(msg.get("probe", False))
-        # Hold the device-switch lock: the probe opens/closes PortAudio
-        # streams on a worker thread, which must not overlap a hot-switch's
-        # open/close on the loop thread (PortAudio isn't safe for concurrent
-        # stream open/close across threads).
-        async with self.app.device_switch_lock:
-            items = await asyncio.to_thread(self.app.list_devices_with_probe, probe)
+        # Re-initialises PortAudio (so newly plugged devices appear) and, for
+        # a probe, opens each device on a worker thread — all under the
+        # device-switch lock, since PortAudio isn't safe for concurrent
+        # stream open/close across threads.
+        items = await self.app.refresh_devices(probe)
         return [{"type": "devices", "items": items}], []
 
     async def _set_device(self, msg):

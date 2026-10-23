@@ -1,16 +1,17 @@
 // Shared pieces for the 3D FFT styles: shader snippets (projection, band
-// colors, hashing), program building, the surface uniforms, screen-space
-// strips for the front edge, and an opt-in bloom post-process.
+// colors, magnitude colormap, AA grid lines, hashing), program building, the
+// surface uniforms and screen-space strips for the front edge.
 //
 // A style module (see cloud.js for the reference) default-exports:
 //
 //   {
 //     name, label, description,
-//     camera: { backScale, ampFront, horizon }, // optional; horizon = sky above the back row, fraction of plot height
+//     camera: { backScale, ampFront },         // optional
 //     background: "#hex" | () => "#hex",       // static-layer fill (+ fog color)
-//     text: { axis, dim, horizonAbove },       // static-layer label colors (+ horizon label above the line)
+//     text: { axis, dim },                     // static-layer label colors
 //     drawStatic(g, geo, W, H, dpr, info),     // optional extra static art
-//     heightTex: true,                         // optional: core uploads meshH as a texture
+//     smoothing: { freqOct, timePasses },      // optional: lighter display smoothing for detail styles
+//                                              //   (defaults 0.08 oct σ across frequency, 2 time passes)
 //     create(gl, core) → { render(f), dispose() }, // compile programs, own GL objects; dispose frees them
 //   }
 //
@@ -37,16 +38,6 @@ export function mixHex(a, b, t) {
 export const pal = (k) => LMH[k].hex;
 /** The palette's background, tinted toward a band color. */
 export const palBg = (k = "low", t = 0.08) => mixHex(theme.bg, LMH[k].hex, t);
-
-/** Seeded PRNG (mulberry32) for reproducible static art. */
-export function rng(seed) {
-  return () => {
-    seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 // ---- shader snippets ----
 
@@ -84,7 +75,8 @@ layout(location = 2) in vec2 aSlope;
 layout(location = 3) in float aKey;
 uniform int uCols;
 ${PROJ_FN}
-out float vU, vH, vZ, vKey, vS;
+uniform float uRow0;   // optional: f.key0 mod a multiple of f.tSub (row-aligned lines; see docs/reference/fft_3d_styles.md)
+out float vU, vH, vZ, vKey, vS, vRow;
 out vec3 vN;
 out vec2 vPx;
 void main() {
@@ -93,6 +85,7 @@ void main() {
   vec2 px = toPx(u, aH, aZ, s);
   gl_Position = clipPos(px, s);
   vU = u; vH = aH; vZ = aZ; vKey = aKey; vS = s; vPx = px;
+  vRow = float(gl_VertexID / uCols) + uRow0;   // mesh row, stable per row as it recedes (wrap-free, unlike vKey)
   vN = vec3(-aSlope.x, 1.0, -aSlope.y);
 }`;
 
@@ -112,6 +105,75 @@ vec3 band(float u) {
   return mix(c, vec3(dot(c, vec3(0.299, 0.587, 0.114))), ${glf(desaturate)});
 }`;
 
+/**
+ * ramp(h): a magnitude colormap built from the palette, ordered by lightness
+ * like a scientific heat scale (viridis / inferno): hue walks low → mid →
+ * high, luminance rises monotonically from near-black to near-white whatever
+ * the palette's own colors are, so equal steps in h read as equal steps in
+ * brightness. Needs PAL_UNIFORMS (or bandFn) declared before it.
+ */
+export const RAMP_FN = `
+vec3 ramp(float h) {
+  h = clamp(h, 0.0, 1.0);
+  vec3 c = h < 0.5 ? mix(uC0, uC1, h * 2.0) : mix(uC1, uC2, h * 2.0 - 1.0);
+  const vec3 Y = vec3(0.2126, 0.7152, 0.0722);
+  float target = mix(0.025, 0.93, pow(h, 0.9));
+  c *= target / max(dot(c, Y), 1e-3);
+  float m = max(c.r, max(c.g, c.b));
+  if (m > 1.0) {
+    // Out of gamut: keep the hue, make up the missing luminance with white.
+    c /= m;
+    float y = dot(c, Y);
+    c = mix(c, vec3(1.0), clamp((target - y) / max(1.0 - y, 1e-3), 0.0, 1.0));
+  }
+  return c;
+}`;
+
+/**
+ * gridLine(q, halfPx): AA coverage of lines at integer q, halfPx wide on
+ * screen (fwidth-based, so constant pixel width at any depth or slope),
+ * faded to nothing where they crowd closer than a few px (no moiré).
+ */
+export const LINE_FN = `
+float gridLine(float q, float halfPx) {
+  float w = max(fwidth(q), 1e-5);
+  float d = abs(fract(q + 0.5) - 0.5) / w;
+  return (1.0 - smoothstep(halfPx - 0.5, halfPx + 0.5, d)) * (1.0 - smoothstep(0.12, 0.3, w));
+}`;
+
+/**
+ * logPaper(u): log graph paper across frequency, as (major, minor) line
+ * coverage: majors at the decades (100 Hz, 1k, 10k), minors at 2…9 × each
+ * decade. Needs LINE_FN before it; set uLog0 / uLogSpan with setLogUniforms.
+ */
+export const LOG_PAPER_FN = `
+uniform float uLog0, uLogSpan;   // log10(fMin), log10(fMax / fMin)
+vec2 logPaper(float u, float halfPx) {
+  float dec = uLog0 + u * uLogSpan;
+  return vec2(gridLine(dec, halfPx), gridLine(pow(10.0, fract(dec)), halfPx));
+}`;
+export function setLogUniforms(gl, u, f) {
+  gl.uniform1f(u.uLog0, Math.log10(f.fMin));
+  gl.uniform1f(u.uLogSpan, Math.log10(f.fMax / f.fMin));
+}
+
+/** Static-layer labels for the 1 s parallels (−1s, −2s …) at the right edge, thinned where they crowd. */
+export function drawSecondLabels(g, geo, dpr, depthS, color) {
+  const K = 1 / geo.backScale - 1;
+  g.font = `${Math.round(9 * dpr)}px ui-monospace, Menlo, monospace`;
+  g.fillStyle = color;
+  g.textAlign = "left";
+  g.textBaseline = "middle";
+  let lastY = Infinity;
+  for (let sec = 1; sec < depthS; sec++) {
+    const s = 1 / (1 + K * (sec / depthS));
+    const y = geo.y0 - ((1 - s) / (1 - geo.backScale)) * (geo.y0 - geo.yBack);
+    if (lastY - y < 14 * dpr) continue;
+    lastY = y;
+    g.fillText(`−${sec}s`, geo.cx + (geo.plotW / 2) * s + 4 * dpr, y);
+  }
+}
+
 // Screen-space strips (curtain / rim): positions are device px from the CPU.
 export const FLAT_VS = `#version 300 es
 layout(location = 0) in vec2 aPos;
@@ -121,18 +183,6 @@ out vec2 vUV;
 void main() {
   vUV = aUV;
   gl_Position = vec4(aPos.x / uRes.x * 2.0 - 1.0, 1.0 - aPos.y / uRes.y * 2.0, 0.0, 1.0);
-}`;
-
-// Fullscreen triangle (no buffers): vUV in [0,1], vPx in device px (y down).
-export const FULL_VS = `#version 300 es
-uniform vec2 uRes;
-out vec2 vUV;
-out vec2 vPx;
-void main() {
-  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
-  vUV = p;
-  vPx = vec2(p.x, 1.0 - p.y) * uRes;
-  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }`;
 
 // ---- program building ----
@@ -161,7 +211,7 @@ export function program(gl, vs, fs) {
   return { prog, u };
 }
 
-/** Delete programs, and anything else with a dispose() (strips, bloom), from a style's instance. */
+/** Delete programs, and anything else with a dispose() (strips), from a style's instance. */
 export function disposeAll(gl, ...things) {
   for (const t of things) {
     if (!t) continue;
@@ -189,7 +239,6 @@ export function setCommonUniforms(gl, u, f) {
   if (u.uC0) gl.uniform3fv(u.uC0, f.stopRgb[0]);
   if (u.uC1) gl.uniform3fv(u.uC1, f.stopRgb[1]);
   if (u.uC2) gl.uniform3fv(u.uC2, f.stopRgb[2]);
-  if (u.uTime) gl.uniform1f(u.uTime, f.t);
 }
 
 // ---- screen-space strips ----
@@ -241,208 +290,4 @@ export function fillRim(f, out, o, halfPx) {
     out[o++] = ex[m] - nx; out[o++] = ey[m] - ny; out[o++] = u; out[o++] = -1;
   }
   return o;
-}
-
-// ---- bloom ----
-
-const BRIGHT_FS = `#version 300 es
-precision highp float;
-in vec2 vUV;
-uniform sampler2D uTex;
-uniform float uThreshold, uKnee;
-out vec4 o;
-void main() {
-  // Soft-knee bright pass.
-  vec3 c = texture(uTex, vUV).rgb;
-  float br = max(c.r, max(c.g, c.b));
-  float soft = clamp(br - uThreshold + uKnee, 0.0, 2.0 * uKnee);
-  soft = soft * soft / (4.0 * uKnee + 1e-4);
-  float w = max(soft, br - uThreshold) / max(br, 1e-4);
-  o = vec4(c * w, 1.0);
-}`;
-
-// 9-tap Gaussian using linear filtering (5 fetches).
-const BLUR_FS = `#version 300 es
-precision highp float;
-in vec2 vUV;
-uniform sampler2D uTex;
-uniform vec2 uDir;
-out vec4 o;
-void main() {
-  vec3 c = texture(uTex, vUV).rgb * 0.2270270270;
-  c += (texture(uTex, vUV + uDir * 1.3846153846).rgb + texture(uTex, vUV - uDir * 1.3846153846).rgb) * 0.3162162162;
-  c += (texture(uTex, vUV + uDir * 3.2307692308).rgb + texture(uTex, vUV - uDir * 3.2307692308).rgb) * 0.0702702703;
-  o = vec4(c, 1.0);
-}`;
-
-const COPY_FS = `#version 300 es
-precision highp float;
-in vec2 vUV;
-uniform sampler2D uTex;
-out vec4 o;
-void main() { o = vec4(texture(uTex, vUV).rgb, 1.0); }`;
-
-// Glow levels, added onto the frame. Alpha rises with the glow's brightest
-// channel so the premultiplied result stays valid (color ≤ alpha) and the
-// glow composites over the static layer as light.
-const COMPOSITE_FS = `#version 300 es
-precision highp float;
-in vec2 vUV;
-uniform sampler2D uB0, uB1, uB2;
-uniform vec3 uWeights;
-uniform float uStrength;
-out vec4 o;
-void main() {
-  vec3 b = (texture(uB0, vUV).rgb * uWeights.x + texture(uB1, vUV).rgb * uWeights.y
-          + texture(uB2, vUV).rgb * uWeights.z) * uStrength;
-  o = vec4(b, max(b.r, max(b.g, b.b)));
-}`;
-
-/**
- * Opt-in bloom. The style draws its scene normally (full resolution, the
- * default framebuffer's MSAA), then redraws it through capture() into a
- * 1/SCALE-resolution buffer that only feeds the glow — 1/16 of the pixels,
- * no multisampling, so the glow costs little even full screen:
- *
- *   drawScene(f);                        // → default framebuffer
- *   bloom.capture(f, drawScene)          // same calls, small target; f.bloomScale = SCALE,
- *                                        //   f.dpr divided by SCALE so point sizes stay put
- *   bloom.apply(opts)                    // bright-pass, blur 3 levels, add onto the frame
- *
- * opts: { threshold, knee, strength, weights: [w0, w1, w2] } (level 0 = 1/SCALE resolution).
- * Screen-space strips drawn in the capture should be at least f.bloomScale px wide.
- */
-export function makeBloom(gl) {
-  const SCALE = 4;
-  const bright = program(gl, FULL_VS, BRIGHT_FS);
-  const blur = program(gl, FULL_VS, BLUR_FS);
-  const copy = program(gl, FULL_VS, COPY_FS);
-  const comp = program(gl, FULL_VS, COMPOSITE_FS);
-  const emptyVao = gl.createVertexArray();
-  let W = 0, H = 0, SW = 0, SH = 0;
-  let sceneFbo = null, sceneTex = null, sceneDepth = null;
-  const lv = [];   // { w, h, texA, fboA, texB, fboB }
-
-  function tex(w, h) {
-    const t = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, t);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    return t;
-  }
-  function fboFor(t) {
-    const fb = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
-    return fb;
-  }
-  function freeTargets() {
-    if (sceneFbo) gl.deleteFramebuffer(sceneFbo);
-    if (sceneTex) gl.deleteTexture(sceneTex);
-    if (sceneDepth) gl.deleteRenderbuffer(sceneDepth);
-    sceneFbo = sceneTex = sceneDepth = null;
-    for (const l of lv) {
-      gl.deleteTexture(l.texA); gl.deleteTexture(l.texB);
-      gl.deleteFramebuffer(l.fboA); gl.deleteFramebuffer(l.fboB);
-    }
-    lv.length = 0;
-    W = H = 0;
-  }
-  function resize(w, h) {
-    freeTargets();
-    W = w; H = h;
-    SW = Math.max(1, Math.round(w / SCALE)); SH = Math.max(1, Math.round(h / SCALE));
-    sceneTex = tex(SW, SH);
-    sceneFbo = fboFor(sceneTex);
-    sceneDepth = gl.createRenderbuffer();
-    gl.bindRenderbuffer(gl.RENDERBUFFER, sceneDepth);
-    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, SW, SH);
-    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, sceneDepth);
-    let lw = SW, lh = SH;
-    for (let i = 0; i < 3; i++) {
-      if (i > 0) { lw = Math.max(1, lw >> 1); lh = Math.max(1, lh >> 1); }
-      const texA = tex(lw, lh), texB = tex(lw, lh);
-      lv.push({ w: lw, h: lh, texA, fboA: fboFor(texA), texB, fboB: fboFor(texB) });
-    }
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  }
-
-  function pass(p, fbo, w, h) {
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.viewport(0, 0, w, h);
-    gl.useProgram(p.prog);
-    if (p.u.uRes) gl.uniform2f(p.u.uRes, w, h);
-  }
-  function bindTex(unit, t, loc) {
-    gl.activeTexture(gl.TEXTURE0 + unit);
-    gl.bindTexture(gl.TEXTURE_2D, t);
-    gl.uniform1i(loc, unit);
-  }
-  function blurLevel(l, radius) {
-    pass(blur, l.fboB, l.w, l.h);
-    bindTex(0, l.texA, blur.u.uTex);
-    gl.uniform2f(blur.u.uDir, radius / l.w, 0);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-    pass(blur, l.fboA, l.w, l.h);
-    bindTex(0, l.texB, blur.u.uTex);
-    gl.uniform2f(blur.u.uDir, 0, radius / l.h);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-  }
-
-  return {
-    capture(f, draw) {
-      if (f.W !== W || f.H !== H) resize(f.W, f.H);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFbo);
-      gl.viewport(0, 0, SW, SH);
-      gl.clearColor(0, 0, 0, 0);
-      gl.clearDepth(1);
-      gl.depthMask(true);
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-      const dpr = f.dpr;
-      f.dpr = dpr / SCALE;
-      f.bloomScale = SCALE;
-      draw(f);
-      f.dpr = dpr;
-      f.bloomScale = 1;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.viewport(0, 0, W, H);
-    },
-    apply(opts) {
-      gl.disable(gl.DEPTH_TEST);
-      gl.disable(gl.BLEND);
-      gl.bindVertexArray(emptyVao);
-      pass(bright, lv[0].fboA, lv[0].w, lv[0].h);
-      bindTex(0, sceneTex, bright.u.uTex);
-      gl.uniform1f(bright.u.uThreshold, opts.threshold);
-      gl.uniform1f(bright.u.uKnee, opts.knee ?? 0.2);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-      blurLevel(lv[0], 1);
-      for (let i = 1; i < 3; i++) {
-        pass(copy, lv[i].fboA, lv[i].w, lv[i].h);
-        bindTex(0, lv[i - 1].texA, copy.u.uTex);
-        gl.drawArrays(gl.TRIANGLES, 0, 3);
-        blurLevel(lv[i], 1.25);
-      }
-      pass(comp, null, W, H);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE);
-      bindTex(0, lv[0].texA, comp.u.uB0);
-      bindTex(1, lv[1].texA, comp.u.uB1);
-      bindTex(2, lv[2].texA, comp.u.uB2);
-      const w = opts.weights;
-      gl.uniform3f(comp.u.uWeights, w[0], w[1], w[2]);
-      gl.uniform1f(comp.u.uStrength, opts.strength);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-      gl.bindVertexArray(null);
-      gl.activeTexture(gl.TEXTURE0);
-    },
-    dispose() {
-      freeTargets();
-      for (const p of [bright, blur, copy, comp]) gl.deleteProgram(p.prog);
-      gl.deleteVertexArray(emptyVao);
-    },
-  };
 }

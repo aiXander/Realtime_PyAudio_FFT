@@ -51,14 +51,17 @@ const RING_ROWS = 160;         // ring capacity (headroom over MAX_ROWS for dept
 const MAX_COLS = 480;          // wider spectra are max-pooled to this many columns
 const SENTINEL_THRESHOLD = -500;
 
-// Smoothing (display only). All tunable by eye.
+// Smoothing (display only). All tunable by eye. A style can lower the two
+// strengths (`smoothing: { freqOct, timePasses }`) to show finer detail; the
+// resolution floor (FREQ_RES_SIGMA) always applies, since below it there is
+// no real detail, only the server's interpolation between rfft bins.
 const T_SUB = 2;               // mesh rows per history row (Catmull-Rom in time)
 const MESH_COLS_MIN = 256;     // mesh columns (Catmull-Rom in frequency) …
 const MESH_COLS_MAX = 384;     // … ≈ 2× the bin count, clamped to this range
 const FREQ_SMOOTH_OCT = 0.08;  // Gaussian σ across frequency, octaves (FWHM ≈ 1/5 octave) …
 const FREQ_RES_SIGMA = 0.6;    // … at least this many rfft-bin spacings where the FFT is coarser …
 const FREQ_SMOOTH_MAX_OCT = 0.35; // … capped here (the far low end)
-const TIME_BLUR_PASSES = 2;    // peak-preserving [¼ ½ ¼] passes across history rows
+const TIME_BLUR_PASSES = 2;    // peak-preserving [¼ ½ ¼] passes across history rows (default)
 
 // Camera defaults (a style's `camera` overrides them).
 const BACK_SCALE = 0.3;        // width/height of the oldest row vs the front one
@@ -83,7 +86,7 @@ const rgb01 = (s) => s.split(",").map((v) => Number(v) / 255);
  * weights w[off[c] ..]. Kernels are truncated at the spectrum edges and
  * renormalized.
  */
-export function buildFreqKernel(cols, fMin, fMax, sr, windowSize) {
+export function buildFreqKernel(cols, fMin, fMax, sr, windowSize, smoothOct = FREQ_SMOOTH_OCT) {
   const octs = Math.max(1e-6, Math.log2(fMax / fMin));
   const colsPerOct = cols / octs;
   const binHz = sr / windowSize;                     // rfft bin spacing
@@ -94,7 +97,7 @@ export function buildFreqKernel(cols, fMin, fMax, sr, windowSize) {
   for (let c = 0; c < cols; c++) {
     const f = fMin * Math.pow(2, ((c + 0.5) / cols) * octs);
     const rfftPerCol = (f * widthFrac) / binHz;      // < 1: the server interpolates between rfft bins here
-    let s = Math.max(FREQ_SMOOTH_OCT * colsPerOct, FREQ_RES_SIGMA / Math.max(1e-6, rfftPerCol));
+    let s = Math.max(smoothOct * colsPerOct, FREQ_RES_SIGMA / Math.max(1e-6, rfftPerCol));
     s = Math.min(s, FREQ_SMOOTH_MAX_OCT * colsPerOct);
     sig[c] = s;
     const r = Math.ceil(3 * s);
@@ -148,7 +151,8 @@ export function makeFft3d(canvas) {
   let meshCols = 0;
   let sRing = null;                                 // Float32Array(RING_ROWS * meshCols)
   let fillBuf = null, blurBuf = null;               // Float32Array(cols) scratch
-  let kernel = null, kernelKey = "";                // frequency smoothing (depends on FFT geometry)
+  let kernel = null, kernelKey = "";                // frequency smoothing (depends on FFT geometry + style)
+  let timePasses = TIME_BLUR_PASSES;                // the active style's time blur
   let upI = null, upT = null;                       // mesh col → source col + fraction
 
   function reset() { head = -1; count = 0; rowStartT = -Infinity; finalMc = 0; }
@@ -213,17 +217,33 @@ export function makeFft3d(canvas) {
     }
   }
 
+  const styleOf = () => STYLES[store.fft3d_style] || STYLES[DEFAULT_STYLE];
+
+  /**
+   * Match the smoothing to the FFT geometry and the active style. A change
+   * re-smooths the stored history (the ring keeps the unsmoothed rows), so a
+   * style switch shows its own detail level at once, all the way back.
+   */
+  function syncSmoothing(meta, style) {
+    if (!ring) return;
+    const sm = style.smoothing || {};
+    const fMin = meta.fft_f_min ?? 30, sr = meta.sr ?? 48000, win = meta.fft_window_size ?? 1024;
+    const oct = sm.freqOct ?? FREQ_SMOOTH_OCT;
+    timePasses = sm.timePasses ?? TIME_BLUR_PASSES;
+    const key = `${fMin}|${sr}|${win}|${oct}|${timePasses}`;
+    if (key === kernelKey) return;
+    kernel = buildFreqKernel(cols, fMin, sr / 2, sr, win, oct);
+    kernelKey = key;
+    for (let k = 0; k < count; k++) smoothRow((head - k + RING_ROWS) % RING_ROWS);
+    finalMc = 0;                                    // carried mesh rows are stale
+  }
+
   /** Record one FFT frame (called on arrival, from ws.js via main.js). */
   function push(bins) {
     const meta = store.meta || {};
     const rawDb = !!meta.fft_send_raw_db;
     if (bins.length !== n || rawDb !== rawDbMode) configure(bins.length, rawDb);
-    const fMin = meta.fft_f_min ?? 30, sr = meta.sr ?? 48000, win = meta.fft_window_size ?? 1024;
-    const key = `${fMin}|${sr}|${win}`;
-    if (key !== kernelKey) {
-      kernel = buildFreqKernel(cols, fMin, sr / 2, sr, win);
-      kernelKey = key;
-    }
+    syncSmoothing(meta, styleOf());
     const floor = meta.fft_db_floor ?? -60;
     const span = Math.max(1, (meta.fft_db_ceiling ?? 0) - floor);
     const t = performance.now();
@@ -263,7 +283,7 @@ export function makeFft3d(canvas) {
   glCanvas.hidden = true;
   canvas.after(glCanvas);
   let gl = null, glOk = false;
-  let surfVao, surfVbo, surfIbo, hTex, rowTex;
+  let surfVao, surfVbo, surfIbo;
   let iboCols = 0;                                  // meshCols the index buffer was built for
   let active = null, activeName = "";               // the current style's instance (one at a time)
   // GPU time per frame (EXT_disjoint_timer_query_webgl2), recorded as viz perf "fft_gpu":
@@ -275,7 +295,7 @@ export function makeFft3d(canvas) {
   const meshH = new Float32Array(MAX_MESH_ROWS * MESH_COLS_MAX);
   const meshZ = new Float64Array(MAX_MESH_ROWS);
   const meshSeq = new Float64Array(MAX_MESH_ROWS);
-  const rowZK = new Float32Array(MAX_MESH_ROWS * 2);   // per mesh row: z, key (heightTex styles)
+  const rowKey = new Float32Array(MAX_MESH_ROWS);   // per mesh row: its key (vertex attribute)
   const dIdx = new Int32Array(RING_ROWS);           // history rows in view, oldest first
   const dZ = new Float64Array(RING_ROWS);
   const dSeq = new Float64Array(RING_ROWS);
@@ -292,16 +312,13 @@ export function makeFft3d(canvas) {
   const f = {
     W: 1, H: 1, dpr: 1, geo: null,
     R: 0, mc: 0, rowDz: 1 / (MAX_ROWS * T_SUB), K: 1, backScale: BACK_SCALE,
-    now: 0, t: 0, dt: 0, depthS: 5, fMin: 30, fMax: 24000,
+    now: 0, t: 0, depthS: 5, fMin: 30, fMax: 24000,
     meshH, meshZ, meshSeq, edgeX, edgeY, frontOff: 0, yBaseF: 0, sF: 1,
-    bloomScale: 1,                                  // > 1 while a bloom capture redraws the scene small
     key0: 0,                                        // row key of mesh row 0 (keys count up by 1 per mesh row)
+    tSub: T_SUB,                                    // mesh rows per history row (history rows: key % tSub == 0)
     stopPos, stopRgb, bgRgb: new Float32Array(3),
-    bandU: new Float32Array(6),                     // [lo, hi] u of low / mid / high
-    audio: { low: 0, mid: 0, high: 0, bpm: 0, onsetAge: new Float64Array(3) },
-    // Surface VAO (with index buffer; draw f.triCount indices, back to front) and,
-    // for heightTex styles, meshH as an R32F texture (mc × R) + per-row (z, key) as RG32F (R × 1).
-    surfVao: null, triCount: 0, hTex: null, rowTex: null,
+    // Surface VAO (with index buffer; draw f.triCount indices, back to front).
+    surfVao: null, triCount: 0,
   };
 
   function initGL() {
@@ -328,21 +345,7 @@ export function makeFft3d(canvas) {
     surfIbo = gl.createBuffer();
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, surfIbo);   // captured by surfVao
     gl.bindVertexArray(null);
-    // Mesh as textures, for styles that read it outside the surface grid (heightTex: true).
-    const floatTex = (w, h, fmt) => {
-      const t = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, t);
-      gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      return t;
-    };
-    hTex = floatTex(MESH_COLS_MAX, MAX_MESH_ROWS, gl.R32F);
-    rowTex = floatTex(MAX_MESH_ROWS, 1, gl.RG32F);
-    gl.bindTexture(gl.TEXTURE_2D, null);
-    f.surfVao = surfVao; f.hTex = hTex; f.rowTex = rowTex;
+    f.surfVao = surfVao;
     glOk = true;
   }
   glCanvas.addEventListener("webglcontextlost", (e) => { e.preventDefault(); glOk = false; });
@@ -352,7 +355,7 @@ export function makeFft3d(canvas) {
   /**
    * The active style's instance. Only one lives at a time: switching styles
    * disposes the old one first, so an unused style never holds GPU memory
-   * (bloom buffers are large at full-screen size). null if its shaders fail.
+   * (its GL buffers can be large at full-screen size). null if its shaders fail.
    */
   function instance(style) {
     if (activeName === style.name) return active;
@@ -415,9 +418,8 @@ export function makeFft3d(canvas) {
     const y0 = H - padB;                            // front baseline
     const plotH = Math.max(1, y0 - padT);
     const ampFront = (style.camera?.ampFront ?? AMP_FRONT) * plotH;
-    // Back baseline sits low enough that a full-scale back row still fits,
-    // plus the style's optional sky above the horizon (fraction of plot height).
-    const yBack = padT + ampFront * backScale + Math.round(6 * dpr) + (style.camera?.horizon ?? 0) * plotH;
+    // Back baseline sits low enough that a full-scale back row still fits.
+    const yBack = padT + ampFront * backScale + Math.round(6 * dpr);
     return { plotX, plotW, cx: plotX + plotW / 2, y0, yBack, ampFront, padT, backScale };
   }
 
@@ -465,9 +467,8 @@ export function makeFft3d(canvas) {
     // Depth label at the horizon, right edge (clear of the narrow back rows).
     g.fillStyle = text.dim || "#5a6068";
     g.textAlign = "right";
-    g.textBaseline = text.horizonAbove ? "bottom" : "middle";
-    g.fillText(`horizon −${depthS < 10 ? depthS.toFixed(1) : Math.round(depthS)} s`, geo.plotX + geo.plotW,
-      text.horizonAbove ? geo.yBack - Math.round(3 * dpr) : geo.yBack);
+    g.textBaseline = "middle";
+    g.fillText(`horizon −${depthS < 10 ? depthS.toFixed(1) : Math.round(depthS)} s`, geo.plotX + geo.plotW, geo.yBack);
   }
 
   /**
@@ -478,11 +479,11 @@ export function makeFft3d(canvas) {
    */
   function blurTime(N, lo, hi) {
     const mc = meshCols;
-    const a = Math.max(0, lo - TIME_BLUR_PASSES), b = Math.min(N - 1, hi + TIME_BLUR_PASSES);
+    const a = Math.max(0, lo - timePasses), b = Math.min(N - 1, hi + timePasses);
     for (let i = a; i <= b; i++) tA.set(sRing.subarray(dIdx[i] * mc, dIdx[i] * mc + mc), i * mc);
     let src = tA, dst = tB;
-    for (let pass = 0; pass < TIME_BLUR_PASSES; pass++) {
-      const grow = TIME_BLUR_PASSES - 1 - pass;           // later passes need a narrower range
+    for (let pass = 0; pass < timePasses; pass++) {
+      const grow = timePasses - 1 - pass;                 // later passes need a narrower range
       const pa = Math.max(0, lo - grow), pb = Math.min(N - 1, hi + grow);
       for (let i = pa; i <= pb; i++) {
         const o = i * mc;
@@ -522,15 +523,14 @@ export function makeFft3d(canvas) {
     }
   }
 
-  /** meshZ / meshSeq for all R mesh rows, and the per-row (z, key) texture data. */
+  /** meshZ / meshSeq / rowKey for all R mesh rows. */
   function buildRowTimes(N, R) {
     for (let r = 0; r < R; r++) {
       const i = Math.min(N - 2, Math.floor(r / T_SUB));
       const t = r / T_SUB - i;
       meshZ[r] = dZ[i] + (dZ[i + 1] - dZ[i]) * t;
       meshSeq[r] = dSeq[i] + (dSeq[i + 1] - dSeq[i]) * t;
-      rowZK[2 * r] = meshZ[r];
-      rowZK[2 * r + 1] = Math.round(meshSeq[r] * T_SUB) % 65536;   // stable per mesh row as it recedes
+      rowKey[r] = Math.round(meshSeq[r] * T_SUB) % 65536;   // stable per mesh row as it recedes
     }
   }
 
@@ -545,7 +545,7 @@ export function makeFft3d(canvas) {
       // Rows run oldest (far) → newest (near), so rp is the farther neighbor.
       const dZw = (meshZ[rp] - meshZ[rn]) * WORLD_DEPTH;
       const invDz = dZw > 1e-6 ? WORLD_HEIGHT / dZw : 0;
-      const key = rowZK[2 * r + 1];
+      const key = rowKey[r];
       const row = r * mc, rowP = rp * mc, rowN = rn * mc;
       for (let m = 0; m < mc; m++) {
         // One-sided difference at the ends (half the span, so twice the scale).
@@ -562,15 +562,14 @@ export function makeFft3d(canvas) {
 
   // Incremental mesh. The history rows in view are a contiguous run of row
   // numbers (rowSeq), so last frame's mesh maps onto this frame's by a shift
-  // of whole rows. A vertex row depends on the history rows from REACH_BACK
-  // before to REACH_FWD after its own (time blur ±PASSES, Catmull-Rom −1..+2,
+  // of whole rows. A vertex row depends on the history rows from reachBack
+  // before to reachFwd after its own (time blur ±passes, Catmull-Rom −1..+2,
   // slopes ±1 mesh row). Once all of those are closed (no longer merging
   // frames) and none is clamped at the back edge, its heights and slopes are
   // final: they are carried over (copyWithin) and only z is rewritten. Per
   // frame that leaves a few rows at the live front edge and at the horizon to
   // recompute instead of the whole ~190 × 384 mesh. Their depth spacing is
   // fixed too: closed rows' z differ by (rowT difference) / depth.
-  const REACH_BACK = TIME_BLUR_PASSES + 2, REACH_FWD = TIME_BLUR_PASSES + 3;
   let finalSeq0 = NaN, finalLo = 0, finalHi = -1;   // last frame: first row number, final history-row range
   let finalMc = 0, finalDepth = NaN;
 
@@ -581,7 +580,7 @@ export function makeFft3d(canvas) {
     buildRowTimes(N, R);
     // History rows final this frame: back neighbors in view, forward neighbors closed.
     const lastClosed = headOpen ? N - 2 : N - 1;
-    const nowLo = REACH_BACK, nowHi = lastClosed - REACH_FWD;
+    const nowLo = timePasses + 2, nowHi = lastClosed - (timePasses + 3);   // reach back / forward
     // Carry over the rows that were final last frame (in this frame's indexing).
     let lo = 1, hi = 0;
     const shift = dSeq[0] - finalSeq0;
@@ -613,14 +612,13 @@ export function makeFft3d(canvas) {
     return R;
   }
 
-  let lastDrawT = performance.now();
-
   function draw() {
     const t0 = performance.now();
     const { w: W, h: H, dpr, version } = surf.fit();
-    const style = STYLES[store.fft3d_style] || STYLES[DEFAULT_STYLE];
+    const style = styleOf();
 
     const meta = store.meta || {};
+    syncSmoothing(meta, style);
     const fMin = meta.fft_f_min ?? 30;
     const sr = meta.sr ?? 48000;
     const fMax = sr / 2;
@@ -678,8 +676,6 @@ export function makeFft3d(canvas) {
     for (let k = 0; k < 3; k++) {
       const b = bands[LMH_ORDER[k]];
       stopPos[k] = toU(b ? Math.sqrt(b.lo_hz * b.hi_hz) : [100, 1000, 8000][k]);
-      f.bandU[2 * k] = toU(b ? b.lo_hz : [30, 250, 4000][k]);
-      f.bandU[2 * k + 1] = toU(b ? b.hi_hz : [250, 4000, 16000][k]);
     }
     if (stopVersion !== theme.version) {
       stopVersion = theme.version;
@@ -714,17 +710,10 @@ export function makeFft3d(canvas) {
     // Fill the frame bundle.
     f.W = W; f.H = H; f.dpr = dpr; f.geo = geo;
     f.R = N >= 2 ? R : 0; f.mc = mc; f.K = K; f.backScale = geo.backScale;
-    f.dt = Math.min(0.1, Math.max(0, (now - lastDrawT) / 1000));
-    lastDrawT = now;
     f.now = now; f.t = now / 1000; f.depthS = depthS; f.fMin = fMin; f.fMax = fMax;
     f.frontOff = front; f.yBaseF = yBaseF; f.sF = sF;
     f.key0 = Math.round(meshSeq[0] * T_SUB) % 65536;
     f.triCount = f.R >= 2 ? (f.R - 1) * (mc - 1) * 6 : 0;
-    const a = f.audio;
-    a.low = store.low; a.mid = store.mid; a.high = store.high; a.bpm = store.bpm;
-    a.onsetAge[0] = (now - store.low_onset_pulse_t) / 1000;
-    a.onsetAge[1] = (now - store.mid_onset_pulse_t) / 1000;
-    a.onsetAge[2] = (now - store.high_onset_pulse_t) / 1000;
 
     if (glCanvas.width !== W) glCanvas.width = W;
     if (glCanvas.height !== H) glCanvas.height = H;
@@ -734,13 +723,6 @@ export function makeFft3d(canvas) {
       gl.bindBuffer(gl.ARRAY_BUFFER, surfVbo);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, vtx, 0, R * mc * VERT_FLOATS);
       gl.bindVertexArray(null);
-      if (style.heightTex) {
-        gl.bindTexture(gl.TEXTURE_2D, hTex);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, mc, R, gl.RED, gl.FLOAT, meshH);
-        gl.bindTexture(gl.TEXTURE_2D, rowTex);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, R, 1, gl.RG, gl.FLOAT, rowZK);
-        gl.bindTexture(gl.TEXTURE_2D, null);
-      }
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);

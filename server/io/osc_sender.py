@@ -166,6 +166,20 @@ class OscSender:
             except Exception as e:
                 log.debug("osc bpm send failed: %s", e)
 
+    def send_silence(self) -> None:
+        """Send `/audio/lmh 0 0 0` + `/audio/bpm 0`. Safe from any thread:
+        the unmutated templates (all-zero floats) are immutable bytes, so
+        this never touches the buffers the DSP worker packs into. Sent when
+        audio input stalls, so downstream consumers settle to silence
+        instead of holding the last level."""
+        sock = self._udp_sock
+        for pkt in (_LMH_TEMPLATE, _BPM_TEMPLATE):
+            for addr in self._addrs:
+                try:
+                    sock.sendto(pkt, addr)
+                except Exception as e:
+                    log.debug("osc silence send failed: %s", e)
+
     def send_fft(self, bins: np.ndarray, db_floor: float) -> None:
         """Send raw-dB FFT frame. Clamps sentinels (-1000) and any sub-floor
         values to `db_floor` in a single fused C pass into a native-endian

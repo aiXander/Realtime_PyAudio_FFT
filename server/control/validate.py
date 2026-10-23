@@ -114,18 +114,21 @@ def osc_fft_packet_bytes(n_bins: int) -> int:
     return 12 + 4 * ((n_bins + 1) // 4 + 1) + 4 * n_bins
 
 
-MAX_N_FFT_BINS = max(n for n in range(1, 4096)
-                     if osc_fft_packet_bytes(n) <= OSC_MAX_UDP_DATAGRAM)  # = 1840
+# Product range is 16..1024 bins; 1024 sits well under the datagram ceiling
+# (1840 bins = exactly 9216 bytes).
+MIN_N_FFT_BINS = 16
+MAX_N_FFT_BINS = 1024
+assert osc_fft_packet_bytes(MAX_N_FFT_BINS) <= OSC_MAX_UDP_DATAGRAM
 
 
 def validate_n_fft_bins(n):
-    """Positive int; values above MAX_N_FFT_BINS are clamped (not rejected)
-    so an old config / preset with a bigger value still loads."""
+    """Positive int, clamped (not rejected) into [MIN_N_FFT_BINS,
+    MAX_N_FFT_BINS] so an old config / preset outside the range still loads."""
     if not isinstance(n, int) or isinstance(n, bool):
         raise ValueError("n_fft_bins must be an int")
     if n < 1:
         raise ValueError("n_fft_bins must be >= 1")
-    return min(n, MAX_N_FFT_BINS)
+    return max(MIN_N_FFT_BINS, min(n, MAX_N_FFT_BINS))
 
 
 # Largest FFT window (samples). The SlotRing is sized at startup to hold at
@@ -222,7 +225,7 @@ def validate_fft_view(v):
 
 # Keep in sync with the style modules in ui/src/viz/fft3d_styles/ and the
 # palettes in ui/src/colors.js (the UI only offers these names).
-FFT3D_STYLES = ("cloud", "aurora", "topo", "synthwave", "engraving", "embers")
+FFT3D_STYLES = ("cloud", "topo", "spectrogram", "partials")
 PALETTES = ("classic", "neon", "ember", "ocean", "sunset", "mono", "okabe")
 
 

@@ -9,6 +9,7 @@
 
 import {
   glf, SURF_VS, PAL_UNIFORMS, palBg, FLAT_VS, program, setCommonUniforms, makeStrips, fillCurtain, fillRim, disposeAll,
+  drawSecondLabels,
 } from "./common.js";
 
 // Look. All tunable by eye.
@@ -98,20 +99,7 @@ export default {
 
   // 1 s parallels, labelled at the right edge (thinned where they crowd).
   drawStatic(g, geo, W, H, dpr, info) {
-    const K = 1 / geo.backScale - 1;
-    g.font = `${Math.round(9 * dpr)}px ui-monospace, Menlo, monospace`;
-    g.fillStyle = "#6f8d99";
-    g.textAlign = "left";
-    g.textBaseline = "middle";
-    let lastY = Infinity;
-    for (let sec = 1; sec < info.depthS; sec++) {
-      const s = 1 / (1 + K * (sec / info.depthS));
-      const y = geo.y0 - ((1 - s) / (1 - geo.backScale)) * (geo.y0 - geo.yBack);
-      if (lastY - y < 14 * dpr) continue;
-      lastY = y;
-      const x = geo.cx + geo.plotW / 2 * s + 4 * dpr;
-      g.fillText(`−${sec}s`, x, y);
-    }
+    drawSecondLabels(g, geo, dpr, info.depthS, "#6f8d99");
   },
 
   create(gl) {

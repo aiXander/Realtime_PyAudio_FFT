@@ -29,6 +29,29 @@ def list_input_devices() -> list[dict[str, Any]]:
     return out
 
 
+def reinitialize_portaudio() -> None:
+    """Re-run Pa_Terminate + Pa_Initialize so PortAudio re-enumerates devices.
+
+    PortAudio snapshots the device list at initialisation: without this a
+    device plugged in after startup never shows up, and indices can go stale
+    after an unplug. Pa_Terminate closes every open stream, so the caller
+    must have torn its own stream down first (hold App.device_switch_lock).
+    ~2 ms on macOS.
+    """
+    sd._terminate()
+    sd._initialize()
+
+
+def find_input_by_name(name: str | None) -> int | None:
+    """Current index of the input device called `name`, or None."""
+    if not name:
+        return None
+    for d in list_input_devices():
+        if d["name"] == name:
+            return d["index"]
+    return None
+
+
 def default_input() -> int | None:
     # sd.default.device may be a list, tuple, plain int, or sounddevice's
     # _InputOutputPair (subscriptable but not a list/tuple). Duck-type the
@@ -74,14 +97,13 @@ def resolve_initial_device(cfg_device, cli_device) -> int | None:
     """CLI > config.name > config.index > system default."""
     if cli_device is not None:
         return cli_device
-    devs = list_input_devices()
     if cfg_device.name:
-        for d in devs:
-            if d["name"] == cfg_device.name:
-                return d["index"]
+        idx = find_input_by_name(cfg_device.name)
+        if idx is not None:
+            return idx
         log.warning("configured device %r not found; falling back", cfg_device.name)
     if cfg_device.index is not None:
-        for d in devs:
+        for d in list_input_devices():
             if d["index"] == cfg_device.index:
                 return cfg_device.index
         log.warning("configured device index %d not found; falling back", cfg_device.index)

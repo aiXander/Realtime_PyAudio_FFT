@@ -58,6 +58,7 @@ const X_TICK_CANDIDATES = [30, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000
 // Band-edit constants — match server validators / freq_axis.js.
 const F_AXIS_MIN = 20;
 const MIN_GAP_HZ = 50;
+const LO_MAX_FRAC_OF_HI = 0.9;   // server clamp_band_edges: lo <= 0.9·hi
 const HANDLE_W_PX = 10;        // CSS-px hit-width for edge handles (mouse)
 const HANDLE_W_TOUCH_PX = 24;  // wider for fingers
 const ORDER = ["low", "mid", "high"];
@@ -391,6 +392,7 @@ export function makeFft(canvas) {
     if (lo < F_AXIS_MIN) lo = F_AXIS_MIN;
     if (hi > fmaxHard) hi = fmaxHard;
     if (hi < lo + MIN_GAP_HZ) hi = lo + MIN_GAP_HZ;
+    if (lo > LO_MAX_FRAC_OF_HI * hi) lo = LO_MAX_FRAC_OF_HI * hi;
     return [lo, hi];
   }
 
@@ -452,10 +454,10 @@ export function makeFft(canvas) {
       let hi = drag.startHi;
       if (drag.mode === "lo") {
         lo = snapHz(cssXToFreq(x));
-        if (lo > hi - MIN_GAP_HZ) lo = hi - MIN_GAP_HZ;
+        lo = Math.min(lo, hi - MIN_GAP_HZ, LO_MAX_FRAC_OF_HI * hi);
       } else if (drag.mode === "hi") {
         hi = snapHz(cssXToFreq(x));
-        if (hi < lo + MIN_GAP_HZ) hi = lo + MIN_GAP_HZ;
+        hi = Math.max(hi, lo + MIN_GAP_HZ, lo / LO_MAX_FRAC_OF_HI);
       } else {
         // Body drag preserves log-width.
         const ratio = cssXToFreq(x) / cssXToFreq(drag.startX);

@@ -45,6 +45,14 @@ class StaticHTTPServer:
             def __init__(self, *a, **kw):
                 super().__init__(*a, directory=root_str, **kw)
 
+            def end_headers(self):
+                # Revalidate on every load (a cheap 304 when unchanged).
+                # Without it browsers heuristically cache the ES modules from
+                # Last-Modified, so a refresh after editing ui/ can keep
+                # running stale code.
+                self.send_header("Cache-Control", "no-cache")
+                super().end_headers()
+
             def log_message(self, fmt, *args):
                 # silence access logs; errors still surface via log_error
                 pass

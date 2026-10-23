@@ -37,8 +37,12 @@ class _Client:
          status is worthless, so it's overwritten rather than queued).
       3. `stream`  — deque(maxlen=STREAM_QUEUE_MAX): appending to a full
          deque drops the oldest frame (drop-oldest, never block).
+
+    `streaming` is False while the client's tab is hidden (`set_stream`):
+    it then gets control messages only — no snapshots, FFT or status.
     """
-    __slots__ = ("ws", "control", "status", "stream", "wake", "sender_task", "closing")
+    __slots__ = ("ws", "control", "status", "stream", "wake", "sender_task", "closing",
+                 "streaming")
 
     def __init__(self, ws):
         self.ws = ws
@@ -48,6 +52,7 @@ class _Client:
         self.wake = asyncio.Event()
         self.sender_task = None
         self.closing = False
+        self.streaming = True
 
     def put_control(self, msg) -> None:
         if self.closing:
@@ -118,6 +123,9 @@ class WSServer:
         # instead of broadcasting the full (~1.5 KB) meta per slider-drag
         # message; the broadcast loop emits at most one meta per tick.
         self._meta_dirty = False
+        # Wakes the broadcast / status loops, which sleep while no client is
+        # streaming (UI closed or its tab hidden) instead of ticking idle.
+        self._wake = asyncio.Event()
         self._last_err_log: dict[str, float] = {}
 
     @property
@@ -130,6 +138,10 @@ class WSServer:
     def mark_meta_dirty(self) -> None:
         """Request a meta broadcast to all clients on the next broadcast tick."""
         self._meta_dirty = True
+        self._wake.set()
+
+    def _has_streamers(self) -> bool:
+        return any(c.streaming for c in self.clients)
 
     def _log_loop_error(self, where: str) -> None:
         now = time.monotonic()
@@ -172,6 +184,7 @@ class WSServer:
     async def _handle_client(self, ws):
         client = _Client(ws)
         self.clients.add(client)
+        self._wake.set()
         log.info("ws client connected (n=%d)", len(self.clients))
         client.sender_task = asyncio.create_task(self._client_sender(client))
         try:
@@ -221,6 +234,19 @@ class WSServer:
         if not isinstance(msg, dict) or "type" not in msg:
             await self._reply(client, {"type": "error", "reason": "missing 'type'"})
             return
+        if msg["type"] == "set_stream":
+            # Per-connection, not App state: the UI pauses its stream while
+            # its tab is hidden. Resuming re-sends meta, which may have
+            # changed while paused (paused clients still get control
+            # messages, but the coalesced meta only goes out on ticks).
+            client.streaming = bool(msg.get("enabled", True))
+            if client.streaming:
+                client.put_control(encode_meta(self.get_meta()))
+                self._wake.set()
+            else:
+                client.stream.clear()
+                client.status = None
+            return
         try:
             replies = await self.dispatcher_handle(msg)
         except Exception as e:
@@ -257,6 +283,16 @@ class WSServer:
         next_t = loop.time()
         state = {"feat_seq": 0, "fft_seq": 0, "onset_counts": (0, 0, 0)}
         while not self._stop.is_set():
+            if not self._meta_dirty and not self._has_streamers():
+                # Nobody is watching (UI closed / tab hidden): sleep until a
+                # client streams again or meta changes, rather than ticking.
+                self._wake.clear()
+                await self._wake.wait()
+                if self._stop.is_set():
+                    return
+                next_t = loop.time()
+                # Onsets that fired while idle must not flash on resume.
+                state["onset_counts"] = self.features_store.read()[5]
             period = 1.0 / max(self._snapshot_hz, 1)
             next_t += period
             delay = next_t - loop.time()
@@ -282,7 +318,8 @@ class WSServer:
                 text = encode_meta(self.get_meta())
                 for c in clients:
                     c.put_control(text)
-        if not clients:
+        streamers = [c for c in clients if c.streaming]
+        if not streamers:
             return
         # L/M/H snapshot
         seq, raw, scaled, _t, _onsets_block, onset_counts, bpm = self.features_store.read()
@@ -315,7 +352,7 @@ class WSServer:
                 "t": self._server_ms(),
             }
             text = json.dumps(msg)
-            for c in clients:
+            for c in streamers:
                 c.put_stream(text)
         # FFT — pick raw vs processed stream based on the user-facing flag
         # so what the UI renders is byte-identical to what OSC sends.
@@ -330,7 +367,7 @@ class WSServer:
                 # Encoded synchronously (tobytes copies) so the
                 # double-buffered frame ref is dropped before any await.
                 payload = self._encode_fft_binary(frame, gain)
-                for c in clients:
+                for c in streamers:
                     c.put_stream(payload)
         if self.perf_ring is not None:
             self._record_perf(time.perf_counter_ns() - t_start)
@@ -381,11 +418,12 @@ class WSServer:
                 return
             if self._stop.is_set():
                 return
-            if not self.clients:
+            streamers = [c for c in self.clients if c.streaming]
+            if not streamers:
                 continue
             try:
                 text = json.dumps(self._make_server_status())
-                for c in self.clients:
+                for c in streamers:
                     c.put_status(text)
             except Exception:
                 self._log_loop_error("ws status loop")

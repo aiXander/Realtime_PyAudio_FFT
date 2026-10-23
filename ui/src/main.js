@@ -1,6 +1,6 @@
 // Entry point. Wires WS handlers -> store, sets up controls, runs RAF loop.
 
-import { connect, onMessage, onError, onStatus, onFftFrame, retryNow, snapshotRate, resetSnapshotRate } from "./ws.js";
+import { connect, send, onMessage, onError, onStatus, onFftFrame, retryNow, snapshotRate, resetSnapshotRate } from "./ws.js";
 import { store, avgRing, p95Ring, clearLive } from "./store.js";
 import { setupControls } from "./controls.js";
 import { makeLines } from "./viz/lmh_lines.js";
@@ -38,6 +38,7 @@ const uiFpsEl = document.getElementById("ui-fps");
 const srvFpsEl = document.getElementById("server-fps");
 const overlay = document.getElementById("conn-overlay");
 const overlayMsg = document.getElementById("conn-overlay-msg");
+const audioBadge = document.getElementById("audio-status");
 
 let bpmText = "";
 function setBpm(bpm) {
@@ -64,6 +65,7 @@ onStatus((state) => {
   store.conn = state;
   if (retryBtn) retryBtn.hidden = state !== "reconnecting";
   if (state === "connected") {
+    if (document.hidden) send({ type: "set_stream", enabled: false });
     // Wait for the greeting meta before enabling controls. Safety net: if
     // it never arrives, enable anyway after 3 s rather than lock the UI.
     if (overlayMsg) overlayMsg.textContent = "Syncing with server…";
@@ -72,6 +74,7 @@ onStatus((state) => {
     return;
   }
   clearTimeout(syncFallback);
+  setAudioStalled(false, false);
   const wasSynced = store.synced;
   store.synced = false;
   clearLive();
@@ -93,6 +96,35 @@ onStatus((state) => {
 const retryBtn = document.getElementById("conn-overlay-retry");
 retryBtn?.addEventListener("click", retryNow);
 setLive(false); // until the first meta arrives
+
+// Hidden tab (another tab, minimized window): ask the server to pause our
+// stream so neither side spends CPU on frames nobody sees. Resuming gets a
+// fresh meta; the FFT views restart instead of showing a time gap.
+document.addEventListener("visibilitychange", () => {
+  send({ type: "set_stream", enabled: !document.hidden });
+  if (!document.hidden) { fft.reset(); fft3d.reset(); }
+});
+
+// Server's audio watchdog: no input blocks (mic unplugged / driver hung).
+// Clear the viz rather than show the last frozen levels.
+let audioStalled = false;
+function setAudioStalled(stalled, notify = true) {
+  if (stalled === audioStalled) return;
+  audioStalled = stalled;
+  if (audioBadge) audioBadge.hidden = !stalled;
+  if (stalled) {
+    clearLive();
+    lines.reset();
+    bars.reset();
+    fft.reset();
+    fft3d.reset();
+    setBpm(0);
+  }
+  if (notify) {
+    toast(stalled ? "No audio from the input device — trying to reopen it…"
+                  : "Audio input is back", stalled ? "err" : "ok");
+  }
+}
 
 // ----- WS handlers -----
 onMessage("snapshot", (m) => {
@@ -167,6 +199,7 @@ const dspDropsEl = document.getElementById("dsp_drops");
 const fftDropsEl = document.getElementById("fft_drops");
 onMessage("server_status", (m) => {
   store.status = m;
+  setAudioStalled(!!m.audio_stalled);
   setCounter(cbOverrunsEl, m.cb_overruns);
   setCounter(dspDropsEl, m.dsp_drops);
   setCounter(fftDropsEl, m.fft_drops);
@@ -193,7 +226,7 @@ const PERF_ROWS = [
   { key: "lmh_e2e", label: "lmh e2e", tooltip: [
       "**End-to-end L/M/H latency.** Wall-clock time between the audio callback receiving an audio block and the corresponding `/audio/lmh` packet being dispatched over OSC.",
       "",
-      "Includes: ring write, DSP worker wakeup + filter/RMS/smoother/auto-scaler, asyncio sender hop, and the OSC UDP send call.",
+      "Includes: ring write, DSP worker wakeup + filter/RMS/smoother/auto-scaler/onset detector, and the OSC UDP send (dispatched directly from the DSP worker thread).",
       "",
       "*Excludes* the PortAudio input buffer fill itself (~one block) and any kernel/driver delay before the callback fires.",
       "",
@@ -202,7 +235,7 @@ const PERF_ROWS = [
   { key: "fft_e2e", label: "fft e2e", tooltip: [
       "**End-to-end FFT latency.** Wall-clock time between the audio block that *completes* an FFT hop landing in the ring and the corresponding `/audio/fft` packet being dispatched over OSC.",
       "",
-      "Includes: FFT worker wakeup, windowed rfft + log-binning + post-processing, asyncio sender hop, and the OSC UDP send call.",
+      "Includes: FFT worker wakeup, windowed rfft + log-binning + post-processing, and the OSC UDP send (dispatched directly from the FFT worker thread).",
       "",
       "Only sampled when an `/audio/fft` packet actually goes out. The ENABLE toggle drives both FFT computation and OSC transmission, so this row is greyed out exactly when FFT is off.",
       "",

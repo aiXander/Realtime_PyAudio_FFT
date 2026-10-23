@@ -43,6 +43,9 @@ Drives both:
 
 Snaps to standard frame rates: `15 / 24 / 30 / 40 / 60 fps`, capped at 60.">UI refresh rate <input type="range" id="ws-hz" min="0" max="4" step="1" /> <span id="ws-hz-val"></span></label>
         <div class="badges">
+          <span class="badge badge-audio" id="audio-status" role="status" hidden title="**No audio from the input device.** The server received no audio blocks for over a second — usually the mic was unplugged or its driver stopped.
+
+The server keeps trying to reopen it every few seconds (same device by name, else the system default) and sends `/audio/lmh 0 0 0` + `/audio/bpm 0` over OSC so downstream visuals settle to silence instead of freezing. A silent-but-working mic does *not* trigger this.">no audio input</span>
           <button type="button" class="badge badge-conn connecting" id="ws-status" title="**Connection to the audio server** (WebSocket).
 
 - **live** — connected; controls and visualizers are in sync with the server.
@@ -75,7 +78,7 @@ Each onset is sent over OSC as `/audio/onset/{low,mid,high}` (only on onsets, no
 
 # WebSocket
 
-Same values are also published in the JSON `snapshot` frames on `ws://127.0.0.1:8765` (field `scaled.{low,mid,high}`).">Band energies</span> <span class="viz-tools"><label class="inline" title="**Peak-hold decay rate** (units / sec).
+Same values are also published in the JSON `snapshot` frames on `ws://127.0.0.1:8765` (fields `low` / `mid` / `high`, master gain applied; unscaled smoothed RMS in `low_raw` / `mid_raw` / `high_raw`).">Band energies</span> <span class="viz-tools"><label class="inline" title="**Peak-hold decay rate** (units / sec).
 
 Affects the white peak ticks on this graph **and** on the FFT graph.
 
@@ -107,7 +110,7 @@ Rolling history of the same three signals as the bar graph. The colored polyline
 
 # WebSocket
 
-Also available in the JSON `snapshot` frames on `ws://127.0.0.1:8765` (field `scaled.{low,mid,high}`).">L/M/H rolling lines</span></div>
+Also available in the JSON `snapshot` frames on `ws://127.0.0.1:8765` (fields `low` / `mid` / `high`, master gain applied).">L/M/H rolling lines</span></div>
           <canvas id="viz-lines" width="640" height="200" role="img" aria-label="Rolling history of low, mid and high band energy"></canvas>
         </div>
         <div class="viz-card" data-card="scene">
@@ -146,7 +149,7 @@ Disabling saves CPU when you only need L/M/H."><input type="checkbox" id="fft-to
 
 The server is authoritative — toggling sends `set_fft_send_raw_db`; the OSC payload switches in lockstep with the visualization."><input type="checkbox" id="fft-raw-db" /> raw dB</label> <label class="inline" title="**FFT bins** — how many log-spaced frequency bins the spectrum has (`n_fft_bins`, from `f_min` up to Nyquist).
 
-- **More bins** → finer frequency detail, bigger `/audio/fft` OSC packets (4 bytes per bin). Max `1840` (the macOS UDP datagram limit).
+- **More bins** → finer frequency detail, bigger `/audio/fft` OSC packets (4 bytes per bin). Range `16`–`1024`.
 - **Fewer bins** → coarser, cheaper, smaller packets.
 
 The low end can't get finer than the FFT window allows (~47 Hz per linear bin at 1024 samples / 48 kHz); log bins narrower than that are filled by interpolation.
@@ -187,7 +190,7 @@ The low end can't get finer than the FFT window allows (~47 Hz per linear bin at
           <select id="device-select" aria-label="Input device"></select>
           <button id="device-refresh" title="**Re-enumerate input devices** via PortAudio.
 
-Cheap and instant. Use after plugging / unplugging a device.">refresh</button>
+Use after plugging / unplugging a device. PortAudio only sees new devices after a re-init, which briefly restarts the audio input (~150 ms gap; levels keep their auto-scaler state).">refresh</button>
           <button id="device-probe" title="**Re-enumerate AND probe** every input briefly (~200 ms each) to detect which ones are currently producing signal.
 
 Devices that saw audio during the probe get a ★.
@@ -273,7 +276,7 @@ Smearing the peak across nearby bins fixes this: the tone now competes against i
           <legend>Bandpass filter</legend>
           <label title="**Butterworth bandpass order** for all three L/M/H bands.
 
-Each step adds biquads per band (3 biquads total at order 2, 6 at order 4). CPU scales linearly. The output is RMS-integrated, so steeper skirts buy very little visible — order 2 (~12 dB/oct) is plenty for envelope/beat work and is the recommended default on slower hardware (e.g. Raspberry Pi). Order 4 (~24 dB/oct) is for tighter band isolation when you can spare the CPU.">order <input type="range" id="filter-order" min="2" max="4" step="2" /> <span id="filter-order-val"></span></label>
+Each step adds biquads per band (one biquad per order step per band: 6 total at order 2, 12 at order 4). CPU scales linearly. The output is RMS-integrated, so steeper skirts buy very little visible — order 2 (~12 dB/oct) is plenty for envelope/beat work and is the recommended default on slower hardware (e.g. Raspberry Pi). Order 4 (~24 dB/oct) is for tighter band isolation when you can spare the CPU.">order <input type="range" id="filter-order" min="2" max="4" step="2" /> <span id="filter-order-val"></span></label>
         </fieldset>
 
         <fieldset>

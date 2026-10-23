@@ -226,6 +226,13 @@ button.badge:active { transform: none; }
 .badge-conn.reconnecting:hover { border-color: var(--warn); background: rgba(245, 166, 35, 0.14); }
 .badge-conn.reconnecting::before { background: var(--warn); animation: pulse-dot 0.9s ease-in-out infinite; }
 
+.badge-audio {
+  color: var(--err-hi);
+  border-color: rgba(230, 74, 74, 0.4);
+  background: rgba(230, 74, 74, 0.08);
+}
+.badge-audio::before { background: var(--err-hi); animation: pulse-dot 0.9s ease-in-out infinite; }
+
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.45; }

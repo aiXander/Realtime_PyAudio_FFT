@@ -342,12 +342,12 @@ export function setupControls() {
   writeSlider(historyEl, Math.max(2, Math.min(30, store.history_s ?? 5)));
   updateHistory();
 
-  // FFT bin count: discrete ~√2 steps up to the server's 1840 cap. Sent only
+  // FFT bin count: discrete ~√2 steps over the server's 16..1024 range. Sent only
   // on release — every change reconfigures the FFT worker and resets the
   // per-bin auto-scaler state, so streaming drag values would just flicker.
   // A config value off the ladder shows its true count; the thumb snaps to
   // the nearest step.
-  const BIN_STEPS = [32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 1840];
+  const BIN_STEPS = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024];
   const nearestBinStep = (n) => {
     let best = 0;
     for (let i = 1; i < BIN_STEPS.length; i++) {

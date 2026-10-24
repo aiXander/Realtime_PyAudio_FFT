@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "The audio-server binary: audio input, workers, OSC, WS + HTTP, config, control plane."
 
 [[bin]]
 name = "audio-server"
@@ -11,3 +12,22 @@ path = "src/main.rs"
 
 [dependencies]
 dsp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+cpal = "0.18"
+tokio = { version = "1.54", features = ["rt", "net", "time", "sync", "macros", "signal", "fs"] }
+axum = { version = "0.8", default-features = false, features = ["ws", "http1", "tokio"] }
+tower-http = { version = "0.7", features = ["fs", "set-header"] }
+serde-saphyr = "2.0"
+triple_buffer = "9"
+rtrb = "0.4"
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+webbrowser = "1"
+assert_no_alloc = { workspace = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+[dev-dependencies]
+tempfile = "3"

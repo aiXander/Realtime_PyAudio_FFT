@@ -11,9 +11,37 @@
   <img alt="Latency" src="https://img.shields.io/badge/latency-8%E2%80%9315%20ms-2ea44f">
   <img alt="Runs on Raspberry Pi" src="https://img.shields.io/badge/runs%20on-Raspberry%20Pi-C51A4A?logo=raspberrypi&logoColor=white">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <a href="https://github.com/aiXander/Realtime_PyAudio_FFT/tree/rust-engine"><img alt="Rust engine on the rust-engine branch" src="https://img.shields.io/badge/new-Rust%20engine-DEA584?logo=rust&logoColor=white"></a>
 </p>
 
 https://github.com/user-attachments/assets/83547924-0b8d-4667-ba55-5cb813fdc09d
+
+## 🦀 New: a Rust engine on the [`rust-engine`](https://github.com/aiXander/Realtime_PyAudio_FFT/tree/rust-engine) branch
+
+The server has been ported to Rust, and that's where active development now happens. It's a **drop-in replacement**: the same browser UI, config files, CLI flags, and OSC / WebSocket messages, so anything listening to this server keeps working unchanged. Its DSP is tested against recorded outputs of the Python engine (the FFT matches bit for bit).
+
+Measured on an M2 MacBook (48 kHz, 256-sample blocks, default settings, UI open):
+
+| | Python (this branch) | Rust |
+|---|---|---|
+| CPU | 12.1% of one core | **3.0%** |
+| Memory | 111 MB | **20 MB** |
+| Audio block → OSC packet | 622 µs avg | **79 µs avg** |
+| Dropped blocks, 10-minute run | 45 | **0** |
+| `/audio/lmh` delivery | bursts of 2 blocks every ~10.7 ms | **one block every 5.3 ms** |
+| Kick drum → `/audio/onset/low` | 18.3 ms | **15.4 ms** |
+
+There is no Python GIL, so the workers truly run in parallel and get real-time thread priority. That removes the occasional 50–75 ms stalls the Python server can hit under load.
+
+```bash
+git checkout rust-engine
+make start-rust      # builds the release binary, then runs it with --open
+```
+
+You need [rustup](https://rustup.rs/), which installs the pinned toolchain on first build. Python, uv and PortAudio aren't needed (on Linux you do need the ALSA headers: `sudo apt install libasound2-dev`).
+
+> [!NOTE]
+> Not yet validated on a Raspberry Pi. Until it is, this `master` branch stays the stable Python version, which only gets bug fixes from now on.
 
 ## Features
 

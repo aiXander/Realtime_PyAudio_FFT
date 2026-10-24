@@ -1,6 +1,8 @@
 # Parity goldens
 
-What the Rust engine is tested against. Generated from the Python reference engine; **kept after the Python engine is deleted** so the Rust tests keep running. Don't hand-edit anything here.
+What the Rust engine is tested against. Generated from the Python reference engine. Don't hand-edit anything here.
+
+**Only this README and `wire/` are in git.** The DSP goldens (`manifest.json`, `signals/`, `cases/`, `filter_design_sos.npy`, ~20 MB) are gitignored. On a fresh clone, generate them with `uv run python tools/parity/make_goldens.py`. Rust parity tests skip when `manifest.json` is missing. Archive the generated set before the Python engine is deleted, because it can't be regenerated after that.
 
 - `manifest.json`, `signals/`, `cases/`, `filter_design_sos.npy`: DSP goldens, written by `uv run python tools/parity/make_goldens.py`. `--check` regenerates into a temp dir and asserts the result is byte-identical. It is, run to run, on numpy 2.4 / scipy 1.17. Regenerating is only legitimate while the Python engine is still the reference, and only after a deliberate change that lands in both engines.
 - `wire/`: one captured instance of every WS message, both binary FFT flavours, every OSC packet, and the YAML the persister and the preset writer produce. Written by `uv run tools/parity/record_wire.py` from a live server fed the BlackHole drum loop. The values are run-specific. The **shape** is the contract: JSON key sets and value types, the OSC address / type-tag / payload layout, the binary header. To check another engine, run `uv run tools/parity/record_wire.py --out <dir> --server-cmd <engine>` and then `--compare testdata/golden/wire <dir>`.

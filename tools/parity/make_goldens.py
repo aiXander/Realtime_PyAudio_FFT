@@ -2,7 +2,7 @@
 
     uv run python tools/parity/make_goldens.py            # (re)write testdata/golden/
     uv run python tools/parity/make_goldens.py --check    # regenerate into a temp dir,
-                                                          # assert byte-identical to the committed set
+                                                          # assert byte-identical to the set on disk
 
 Drives the real Python engine offline (tools/parity/offline.py: production
 App wiring, DSPWorker.process_block, FFTWorker.process_hop, the real

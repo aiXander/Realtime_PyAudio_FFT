@@ -181,21 +181,101 @@ impl FilterBank {
                 o.resize(x.len(), 0.0); // off the steady-state path
             }
         }
-        for band in 0..3 {
-            let sos = self.design.sos[band].rows();
-            let zi = &mut self.zi[band][..sos.len()];
-            let out = &mut self.out[band];
-            for (o, &xs) in out.iter_mut().zip(x) {
-                let mut x_cur = xs as f64;
-                for (s, z) in sos.iter().zip(zi.iter_mut()) {
-                    let x_new = s[0] * x_cur + z[0];
-                    z[0] = s[1] * x_cur - s[4] * x_new + z[1];
-                    z[1] = s[2] * x_cur - s[5] * x_new;
-                    x_cur = x_new;
-                }
-                *o = x_cur;
-            }
+        // All three bands share the order, so one section count.
+        match self.design.sos[0].n {
+            1 => self.run::<1>(x),
+            2 => self.run::<2>(x),
+            3 => self.run::<3>(x),
+            4 => self.run::<4>(x),
+            5 => self.run::<5>(x),
+            6 => self.run::<6>(x),
+            7 => self.run::<7>(x),
+            _ => self.run::<MAX_SECTIONS>(x),
         }
         [&self.out[0], &self.out[1], &self.out[2]]
+    }
+
+    /// The DF2T kernel for `N` sections, the three bands interleaved per
+    /// sample. A compile-time `N` keeps coefficients and state in registers
+    /// and the three independent recurrences overlap in the pipeline (~4×
+    /// faster than band-by-band at order 2). Each band's arithmetic is
+    /// unchanged, so the output is bit-identical.
+    #[inline]
+    fn run<const N: usize>(&mut self, x: &[f32]) {
+        let mut s = [[[0.0f64; 6]; N]; 3];
+        let mut z = [[[0.0f64; 2]; N]; 3];
+        for b in 0..3 {
+            s[b].copy_from_slice(&self.design.sos[b].sections[..N]);
+            z[b].copy_from_slice(&self.zi[b][..N]);
+        }
+        let [o0, o1, o2] = &mut self.out;
+        for (i, &xs) in x.iter().enumerate() {
+            let x_in = xs as f64;
+            let mut y = [0.0f64; 3];
+            for b in 0..3 {
+                let mut x_cur = x_in;
+                for k in 0..N {
+                    let (sk, zk) = (&s[b][k], &mut z[b][k]);
+                    let x_new = sk[0] * x_cur + zk[0];
+                    zk[0] = sk[1] * x_cur - sk[4] * x_new + zk[1];
+                    zk[1] = sk[2] * x_cur - sk[5] * x_new;
+                    x_cur = x_new;
+                }
+                y[b] = x_cur;
+            }
+            o0[i] = y[0];
+            o1[i] = y[1];
+            o2[i] = y[2];
+        }
+        for b in 0..3 {
+            self.zi[b][..N].copy_from_slice(&z[b]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The interleaved const-N kernel must stay bit-identical to scipy's
+    /// band-by-band `_sosfilt` loop (the L/M/H goldens only check 1e-9).
+    #[test]
+    fn interleaved_kernel_matches_reference_loop_bit_for_bit() {
+        let (sr, bs) = (48_000.0, 256);
+        let bands = [(40.0, 250.0), (250.0, 2000.0), (2000.0, 16000.0)];
+        let mut state = 12345u64;
+        let sig: Vec<f32> = (0..bs * 200)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((state >> 33) as f32 / (1u64 << 31) as f32 - 0.5) * 0.5
+            })
+            .collect();
+        for order in 1..=MAX_ORDER {
+            let design = FilterDesign::new(sr, bands, order);
+            let mut fb = FilterBank::from_design(design, bs);
+            let mut zi = [[[0.0f64; 2]; MAX_SECTIONS]; 3];
+            for block in sig.chunks_exact(bs) {
+                let got = fb.process(block);
+                for band in 0..3 {
+                    let sos = design.sos[band].rows();
+                    for (i, &xs) in block.iter().enumerate() {
+                        let mut x_cur = xs as f64;
+                        for (s, z) in sos.iter().zip(zi[band].iter_mut()) {
+                            let x_new = s[0] * x_cur + z[0];
+                            z[0] = s[1] * x_cur - s[4] * x_new + z[1];
+                            z[1] = s[2] * x_cur - s[5] * x_new;
+                            x_cur = x_new;
+                        }
+                        assert_eq!(
+                            got[band][i].to_bits(),
+                            x_cur.to_bits(),
+                            "order {order} band {band}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

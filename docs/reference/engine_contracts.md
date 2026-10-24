@@ -62,6 +62,7 @@ This is a map. **Exact message shapes** are the captured instances in `testdata/
 
 - **Ports:** `ws://<ws.host>:<ws.port>`, default 8765. HTTP is a **separate** port, `ws.http_port` (default 8766).
 - **Greeting** on connect, in order: `meta`, `devices`, `presets` on the control lane, then `server_status`.
+- **Admission (Rust engine only; the reference accepts everything up to its 1 MiB `max_size`):** inbound messages and frames are capped at 1 MiB (over it the connection is dropped), and a browser upgrade whose `Origin` host is neither loopback nor the `Host` it connected to is refused with 403. Clients without an `Origin` (scripts, OSC bridges) are unaffected. Details: [`rust_server.md`](rust_server.md) → Robustness.
 - **Per-client outbound lanes**, drained in this priority:
   1. **control** — an unbounded FIFO. More than 1024 queued closes the client with code 1008.
   2. **status** — latest-only.

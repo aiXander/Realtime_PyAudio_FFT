@@ -427,10 +427,13 @@ fn build_config(d: &Value) -> Result<Config, BuildErr> {
 
 /// YAML → JSON value with the reference's scalar resolution. Non-finite
 /// floats come through as strings, so `.inf` is "must be numeric" (invalid),
-/// not a parse error.
+/// not a parse error. A repeated key keeps its last value, like PyYAML's
+/// `safe_load` (serde-saphyr's default rejects it, which would turn a
+/// hand-edited main.yaml into "corrupt": backed up and reseeded).
 pub fn parse_yaml(text: &str) -> Result<Value, String> {
     let mut opts = serde_saphyr::Options::default();
     opts.non_finite_float_policy = serde_saphyr::NonFiniteFloatPolicy::AsString;
+    opts.duplicate_keys = serde_saphyr::DuplicateKeyPolicy::LastWins;
     serde_saphyr::from_str_with_options::<Value>(text, opts).map_err(|e| e.to_string())
 }
 
@@ -583,6 +586,13 @@ pub fn deep_merge(base: &Value, overlay: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_yaml_key_keeps_last_value() {
+        let v = parse_yaml("dsp:\n  filter_order: 2\n  tau: 1\n  filter_order: 4\n").unwrap();
+        assert_eq!(v, serde_json::json!({"dsp": {"filter_order": 4, "tau": 1}}));
+        assert_eq!(v["dsp"].as_object().unwrap().keys().collect::<Vec<_>>(), ["filter_order", "tau"]);
+    }
 
     fn repo() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")

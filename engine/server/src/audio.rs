@@ -8,6 +8,7 @@
 
 use crate::shared::{Shared, now_ns};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{FromSample, SizedSample};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -156,27 +157,29 @@ impl StreamHandle {
     }
 }
 
-/// Sample conversion for non-f32 hosts (ALSA may only offer integers).
-trait ToF32: Copy {
-    fn to_f32(self) -> f32;
-}
-impl ToF32 for f32 {
-    #[inline(always)]
-    fn to_f32(self) -> f32 {
-        self
-    }
-}
-impl ToF32 for i16 {
-    #[inline(always)]
-    fn to_f32(self) -> f32 {
-        self as f32 / 32768.0
-    }
-}
-impl ToF32 for i32 {
-    #[inline(always)]
-    fn to_f32(self) -> f32 {
-        self as f32 / 2_147_483_648.0
-    }
+/// `$f::<T>(args…)` with `T` the Rust type of cpal sample format `$fmt`;
+/// `None` for formats with no f32 conversion (DSD). Every host format is
+/// converted to f32 with cpal's conversions (`i16 / 32768`, `i32 / 2³¹`, …):
+/// raw ALSA devices may offer only integer formats, 24-bit or unsigned ones
+/// included.
+macro_rules! with_sample_type {
+    ($fmt:expr, $f:ident($($arg:expr),*)) => {
+        match $fmt {
+            cpal::SampleFormat::F32 => Some($f::<f32>($($arg),*)),
+            cpal::SampleFormat::F64 => Some($f::<f64>($($arg),*)),
+            cpal::SampleFormat::I8 => Some($f::<i8>($($arg),*)),
+            cpal::SampleFormat::I16 => Some($f::<i16>($($arg),*)),
+            cpal::SampleFormat::I24 => Some($f::<cpal::I24>($($arg),*)),
+            cpal::SampleFormat::I32 => Some($f::<i32>($($arg),*)),
+            cpal::SampleFormat::I64 => Some($f::<i64>($($arg),*)),
+            cpal::SampleFormat::U8 => Some($f::<u8>($($arg),*)),
+            cpal::SampleFormat::U16 => Some($f::<u16>($($arg),*)),
+            cpal::SampleFormat::U24 => Some($f::<cpal::U24>($($arg),*)),
+            cpal::SampleFormat::U32 => Some($f::<u32>($($arg),*)),
+            cpal::SampleFormat::U64 => Some($f::<u64>($($arg),*)),
+            _ => None,
+        }
+    };
 }
 
 /// The realtime callback (`AudioCallback.__call__`): mono-mix → re-block
@@ -222,21 +225,26 @@ impl Callback {
     }
 
     #[inline]
-    fn on_data<T: ToF32>(&mut self, data: &[T], info: &cpal::InputCallbackInfo) {
+    fn on_data<T: SizedSample>(&mut self, data: &[T], info: &cpal::InputCallbackInfo)
+    where
+        f32: FromSample<T>,
+    {
         assert_no_alloc::assert_no_alloc(|| {
             let t0 = now_ns();
             self.check_gap(info, data.len() / self.stride);
             let bs = self.acc.len();
             for frame in data.chunks_exact(self.stride) {
-                let x0 = frame[0].to_f32();
-                self.acc[self.fill] = if self.mix2 { (x0 + frame[1].to_f32()) * 0.5 } else { x0 };
+                let x0 = frame[0].to_sample::<f32>();
+                self.acc[self.fill] = if self.mix2 { (x0 + frame[1].to_sample::<f32>()) * 0.5 } else { x0 };
                 self.fill += 1;
                 if self.fill == bs {
                     // Stamp the block the moment it becomes available.
-                    self.shared.ring.write_block(&self.acc, now_ns());
+                    let wi = self.shared.ring.write_block(&self.acc, now_ns());
                     if let Some(w) = self.workers.get() {
                         w[0].unpark();
-                        w[1].unpark();
+                        if wi >= self.shared.fft_wake_at.load(Ordering::Relaxed) {
+                            w[1].unpark();
+                        }
                     }
                     self.fill = 0;
                 }
@@ -246,12 +254,15 @@ impl Callback {
     }
 }
 
-fn build<T: ToF32 + cpal::SizedSample>(
+fn build<T: SizedSample>(
     dev: &cpal::Device,
     cfg: cpal::StreamConfig,
     mut cb: Callback,
     shared: Arc<Shared>,
-) -> Result<cpal::Stream, cpal::Error> {
+) -> Result<cpal::Stream, cpal::Error>
+where
+    f32: FromSample<T>,
+{
     dev.build_input_stream::<T, _, _>(
         cfg,
         move |data: &[T], info: &cpal::InputCallbackInfo| cb.on_data(data, info),
@@ -317,14 +328,9 @@ pub fn open_input_stream(
                 last_ts: None,
                 last_frames: 0,
             };
-            let res = match fmt {
-                cpal::SampleFormat::F32 => build::<f32>(&dev, cfg, cb, shared.clone()),
-                cpal::SampleFormat::I16 => build::<i16>(&dev, cfg, cb, shared.clone()),
-                cpal::SampleFormat::I32 => build::<i32>(&dev, cfg, cb, shared.clone()),
-                other => {
-                    last_err = format!("unsupported sample format {other}");
-                    continue;
-                }
+            let Some(res) = with_sample_type!(fmt, build(&dev, cfg, cb, shared.clone())) else {
+                last_err = format!("unsupported sample format {fmt}");
+                continue;
             };
             match res {
                 Ok(stream) => {
@@ -346,19 +352,22 @@ pub fn signal_active_probe(devices: &[DeviceInfo], duration: f64) -> Vec<(usize,
     devices.iter().map(|d| (d.index, probe_one(d, duration).unwrap_or(false))).collect()
 }
 
-fn probe_stream<T: ToF32 + cpal::SizedSample>(
+fn probe_stream<T: SizedSample>(
     dev: &cpal::Device,
     cfg: cpal::StreamConfig,
     buf: &Arc<std::sync::Mutex<Vec<f32>>>,
     n: usize,
-) -> Option<cpal::Stream> {
+) -> Option<cpal::Stream>
+where
+    f32: FromSample<T>,
+{
     let b2 = buf.clone();
     dev.build_input_stream::<T, _, _>(
         cfg,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
             if let Ok(mut v) = b2.lock() {
                 let room = n - v.len().min(n);
-                v.extend(data[..data.len().min(room)].iter().map(|x| x.to_f32()));
+                v.extend(data[..data.len().min(room)].iter().map(|x| x.to_sample::<f32>()));
             }
         },
         |_e| {},
@@ -377,12 +386,9 @@ fn probe_one(d: &DeviceInfo, duration: f64) -> Option<bool> {
     let cfg = cpal::StreamConfig { channels: ch, sample_rate: sr, buffer_size: cpal::BufferSize::Default };
     // f32 first, then the device's own format (integer-only ALSA devices),
     // like the main stream; samples are converted to f32 either way.
-    let stream = [cpal::SampleFormat::F32, def.sample_format()].iter().find_map(|&fmt| match fmt {
-        cpal::SampleFormat::F32 => probe_stream::<f32>(&dev, cfg, &buf, n),
-        cpal::SampleFormat::I16 => probe_stream::<i16>(&dev, cfg, &buf, n),
-        cpal::SampleFormat::I32 => probe_stream::<i32>(&dev, cfg, &buf, n),
-        _ => None,
-    })?;
+    let stream = [cpal::SampleFormat::F32, def.sample_format()]
+        .iter()
+        .find_map(|&fmt| with_sample_type!(fmt, probe_stream(&dev, cfg, &buf, n)).flatten())?;
     stream.play().ok()?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(duration + 2.0);
     loop {

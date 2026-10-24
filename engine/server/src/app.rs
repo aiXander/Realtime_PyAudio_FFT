@@ -500,8 +500,11 @@ impl App {
             }
             Event::Message(id, text) => {
                 let Some(client) = self.ws.as_ref().and_then(|w| w.client(id)) else { return };
-                self.on_message(&client, &text);
-                client.message_done();
+                // A message deferred behind a probe keeps its inbound slot
+                // until it's replayed, so the per-client bound still holds.
+                if !self.on_message(&client, &text) {
+                    client.message_done();
+                }
             }
             Event::ProbeDone(id, items) => {
                 self.switch_busy = false;
@@ -514,6 +517,7 @@ impl App {
                     let Some((id, text)) = self.deferred.pop_front() else { break };
                     if let Some(c) = self.ws.as_ref().and_then(|w| w.client(id)) {
                         self.on_message(&c, &text);
+                        c.message_done();
                     }
                 }
             }
@@ -529,23 +533,24 @@ impl App {
     }
 
     /// `WSServer._on_message`: parse, per-connection `set_stream`, dispatch.
-    fn on_message(&mut self, client: &Arc<Client>, raw: &str) {
+    /// Returns true when the message was deferred behind a running probe.
+    fn on_message(&mut self, client: &Arc<Client>, raw: &str) -> bool {
         let msg: Value = match serde_json::from_str(raw) {
             Ok(v) => v,
             Err(_) => {
                 client.put_control_text(&to_text(&json!({"type": "error", "reason": "invalid JSON"})));
-                return;
+                return false;
             }
         };
         if !msg.is_object() || msg.get("type").is_none() {
             client.put_control_text(&to_text(&json!({"type": "error", "reason": "missing 'type'"})));
-            return;
+            return false;
         }
         if self.switch_busy
             && matches!(msg.get("type").and_then(|t| t.as_str()), Some("set_device" | "list_devices"))
         {
             self.deferred.push_back((client.id, raw.to_string()));
-            return;
+            return true;
         }
         if msg.get("type") == Some(&Value::from("set_stream")) {
             let on = crate::py::get_bool(&msg, "enabled", true);
@@ -554,7 +559,7 @@ impl App {
                 client.put_control_text(&to_text(&self.meta_message()));
                 self.ws_wake();
             }
-            return;
+            return false;
         }
         // A handler panic must not take the server down: the reference's
         // dispatcher turns any exception into `internal: …` + meta.
@@ -572,6 +577,7 @@ impl App {
                 ws.broadcast_control(&to_text(&b));
             }
         }
+        false
     }
 
     // ------------------------------------------------------------- WS hub

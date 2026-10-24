@@ -189,7 +189,6 @@ impl Workers {
         let mut f = FftWorker {
             shared: shared.clone(),
             chain: Box::new(fft),
-            fresh: true,
             cmds: fft_crx,
             garbage: fft_gtx,
             store: fft_in,
@@ -395,9 +394,6 @@ fn record_latency(ring: &crate::shared::PerfRing, t_recv: u64) {
 struct FftWorker {
     shared: Arc<Shared>,
     chain: Box<FftChain>,
-    /// The chain hasn't processed a hop yet: its first hop builds the
-    /// sentinel LUT (the one accepted allocation, parity trap 6).
-    fresh: bool,
     cmds: rtrb::Consumer<FftCmd>,
     garbage: rtrb::Producer<Garbage>,
     store: triple_buffer::Input<FftFrame>,
@@ -444,7 +440,6 @@ impl FftWorker {
             match cmd {
                 FftCmd::ReplaceChain(mut c) => {
                     std::mem::swap(&mut self.chain, &mut c);
-                    self.fresh = true;
                     self.read_idx = 0;
                     self.rewound = true;
                     moved = true;
@@ -481,6 +476,19 @@ impl FftWorker {
     }
 
     fn wake(&mut self) {
+        self.process_pending();
+        // Tell the callback when the next hop is complete. Any block written
+        // before this store still saw the previous (already reached) target
+        // and unparked us, so the park token covers that race.
+        let at = if self.shared.fft_enabled.load(Ordering::Acquire) {
+            self.read_idx + self.geometry().0
+        } else {
+            u64::MAX
+        };
+        self.shared.fft_wake_at.store(at, Ordering::Relaxed);
+    }
+
+    fn process_pending(&mut self) {
         self.drain_cmds();
         if !self.shared.fft_enabled.load(Ordering::Acquire) {
             return;
@@ -516,12 +524,7 @@ impl FftWorker {
                 self.read_idx = (read_idx + hb).max(wi - nbw);
                 continue;
             };
-            if self.fresh {
-                self.fresh = false;
-                assert_no_alloc::permit_alloc(|| self.hop(t_recv));
-            } else {
-                self.hop(t_recv);
-            }
+            self.hop(t_recv);
             self.shared.perf.fft.record(now_ns() - t0);
             self.read_idx += hb;
         }

@@ -54,7 +54,8 @@ pub struct PostReconfigure {
 }
 
 /// Sentinel-fill LUT (parity trap 6): built from the first frame after
-/// (re)allocation, survives `reset()`.
+/// (re)allocation (or primed with the same layout, `prime_lut`), survives
+/// `reset()`.
 struct SentinelLut {
     empty_idx: Vec<usize>,
     left_idx: Vec<usize>,
@@ -76,7 +77,7 @@ pub struct Smear {
 
 impl Smear {
     /// `_recompute_smear`: σ = `peak_smear_oct × bins_per_octave` (bin
-    /// units), radius `max(1, int(4σ + 0.5))`, normalised Gaussian. `None`
+    /// units, capped at `n_bins`), radius `max(1, int(4σ + 0.5))`, normalised Gaussian. `None`
     /// when the smear is off (`peak_smear_oct ≤ 0`, `f_max ≤ f_min`, σ ≤ 0).
     /// Returns `(smear, sigma_bins)`; σ is reported even when it is ≤ 0.
     pub fn build(
@@ -94,7 +95,10 @@ impl Smear {
             return (None, 0.0);
         }
         let bins_per_octave = n_bins as f64 / (f_max / f_min).log2().max(1e-6);
-        let sigma = peak_smear_oct * bins_per_octave;
+        // Capped at n_bins: an f_min just below Nyquist would otherwise give a
+        // kernel of 1e8+ taps (GBs, then minutes per hop). Every geometry with
+        // a ≥ 4-octave span is below the cap even at the max smear (4 oct).
+        let sigma = (peak_smear_oct * bins_per_octave).min(n_bins as f64);
         if sigma <= 0.0 {
             return (None, sigma);
         }
@@ -252,6 +256,17 @@ impl FftPostProcessor {
             let f_center = log_bin_center(k, n, self.f_min, self.sr / 2.0);
             *t = tilt_db(f_center, self.tilt_db_per_oct);
         }
+    }
+
+    /// Build the sentinel LUT now from a frame with the same empty-bin
+    /// layout as the frames to come, so the first `process` doesn't allocate.
+    /// `FftChain` primes it with the analyzer's initial wire frame (sentinels
+    /// exactly where real frames have them: valid bins are floored at
+    /// −120 dB, far above the −500 threshold), which gives the LUT the first
+    /// real frame would. Allocates (control thread).
+    pub fn prime_lut(&mut self, layout: &[f32]) {
+        assert_eq!(layout.len(), self.n_bins, "frame length != n_bins");
+        self.lut = Some(self.build_sentinel_interp_lut(layout));
     }
 
     fn build_sentinel_interp_lut(&self, db_in: &[f32]) -> SentinelLut {
@@ -493,7 +508,8 @@ impl FftPostProcessor {
 
     /// Run the pipeline on one wire frame (raw dB, -1000 sentinels). Returns
     /// the `[0, 1]` processed frame, valid until the next call. No
-    /// allocation after the first frame of a layout (which builds the LUT).
+    /// allocation, except on the first frame of a layout when the LUT wasn't
+    /// primed (`prime_lut`).
     pub fn process(&mut self, db_in: &[f32]) -> &[f32] {
         assert_eq!(db_in.len(), self.n_bins, "frame length != n_bins");
         let n = self.n_bins;

@@ -102,7 +102,14 @@ impl DspChain {
     #[inline]
     pub fn process_block(&mut self, x: &[f32]) -> BlockOut {
         let [lo, md, hi] = self.filter_bank.process(x);
-        let rms = [block_rms(lo), block_rms(md), block_rms(hi)];
+        let mut rms = [block_rms(lo), block_rms(md), block_rms(hi)];
+        if !rms.iter().all(|r| r.is_finite()) {
+            // A NaN/inf input sample would stick in the IIR state forever
+            // (L/M/H NaN until the next device switch): drop the state and
+            // treat the block as silence. Same in the Python reference.
+            self.filter_bank.reset_state();
+            rms = [0.0; 3];
+        }
         let raw = self.smoother.update(rms);
         let scaled = self.auto_scaler.update(raw);
         let (onsets, bpm) = self.onset_tracker.update(scaled);
@@ -132,26 +139,26 @@ impl FftChain {
             n_bins: p.fft_n_bins,
             f_min: p.fft_f_min,
         };
-        Ok(FftChain {
-            analyzer: FftAnalyzer::new(geom)?,
-            post: FftPostProcessor::new(FftPostParams {
-                n_bins: p.fft_n_bins,
-                f_min: p.fft_f_min,
-                sr: p.sr,
-                bands: p.bands,
-                tau: p.tau,
-                tau_attack: p.tau_attack,
-                tau_release_s: p.autoscale_tau_release_s,
-                noise_floor: p.noise_floor,
-                strength: p.strength,
-                db_floor: p.fft_db_floor,
-                db_ceiling: p.fft_db_ceiling,
-                hop_period_s: p.fft_hop as f64 / p.sr,
-                tau_attack_s: p.autoscale_tau_attack_s,
-                peak_smear_oct: p.fft_peak_smear_oct,
-                tilt_db_per_oct: p.fft_tilt_db_per_oct,
-            }),
-        })
+        let analyzer = FftAnalyzer::new(geom)?;
+        let mut post = FftPostProcessor::new(FftPostParams {
+            n_bins: p.fft_n_bins,
+            f_min: p.fft_f_min,
+            sr: p.sr,
+            bands: p.bands,
+            tau: p.tau,
+            tau_attack: p.tau_attack,
+            tau_release_s: p.autoscale_tau_release_s,
+            noise_floor: p.noise_floor,
+            strength: p.strength,
+            db_floor: p.fft_db_floor,
+            db_ceiling: p.fft_db_ceiling,
+            hop_period_s: p.fft_hop as f64 / p.sr,
+            tau_attack_s: p.autoscale_tau_attack_s,
+            peak_smear_oct: p.fft_peak_smear_oct,
+            tilt_db_per_oct: p.fft_tilt_db_per_oct,
+        });
+        post.prime_lut(analyzer.wire());
+        Ok(FftChain { analyzer, post })
     }
 
     /// Python `FFTWorker.reconfigure(...)`: rebuild the analyzer for the new
@@ -189,6 +196,7 @@ impl FftChain {
             hop_period_s: Some(g.hop_period_s()),
             ..Default::default()
         });
+        self.post.prime_lut(self.analyzer.wire());
         Ok(())
     }
 
@@ -198,7 +206,7 @@ impl FftChain {
     }
 
     /// One hop: returns `(raw_db_wire, processed)`, both valid until the
-    /// next call. Allocation-free (after a layout's first frame).
+    /// next call. Allocation-free.
     pub fn process_hop(&mut self) -> (&[f32], &[f32]) {
         let wire = self.analyzer.process_hop();
         let processed = self.post.process(wire);

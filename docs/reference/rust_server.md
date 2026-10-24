@@ -16,7 +16,7 @@ The binary finds the repo (for `configs/` and `ui/`) by walking up from its own 
 
 | Thread | Owns | Talks to others via |
 |---|---|---|
-| cpal callback (CoreAudio/ALSA RT thread) | a re-blocking accumulator per stream | `SlotRing::write_block`, `unpark()` both workers (through a `OnceLock<[Thread; 2]>`, set after the workers spawn) |
+| cpal callback (CoreAudio/ALSA RT thread) | a re-blocking accumulator per stream | `SlotRing::write_block`, `unpark()` the DSP worker every block and the FFT worker only once `write_idx` reaches `Shared.fft_wake_at` (through a `OnceLock<[Thread; 2]>`, set after the workers spawn) |
 | `dsp-worker` | `DspChain` (filter bank, smoother, auto-scaler, onset tracker), `LmhPacker` | command queue in, return queue out, `triple_buffer` → FeatureSnap, OSC sends |
 | `fft-worker` | `Box<FftChain>`, `FftPacker` | command queue in, return queue out, `triple_buffer` → FftFrame, OSC sends |
 | main (tokio current-thread) | `App`: cfg, stream handle, WS clients, every timer, persister | the only mutator; axum WS/HTTP connection tasks run here too |
@@ -38,7 +38,7 @@ The binary finds the repo (for `configs/` and `ui/`) by walking up from its own 
 | `validate.rs`, `py.rs` | `control/validate.py`, Python builtins | error strings word for word; `py.rs` = `bool()`/`int()`/`float()`/`str()`/`repr()` semantics over `serde_json::Value` |
 | `persist.rs` | `config.Persister` | deadline state machine (1 s drag / 50 ms commit / 250 ms cap) |
 | `ring.rs` | `audio/ringbuffer.py` | slot ring, atomics + a correct seqlock (below); stress test |
-| `audio.rs` | `audio/{devices,stream,callback}.py` | device list / lookup / probe, stream open (F32, Fixed blocksize when in range, I16/I32 fallback), the realtime callback |
+| `audio.rs` | `audio/{devices,stream,callback}.py` | device list / lookup / probe, stream open (F32, Fixed blocksize when in range, else the device's own format: every cpal integer/float format via `with_sample_type!`), the realtime callback |
 | `workers.rs` | `dsp/worker.py`, `FFTWorker.run` | worker loops, backlog policies, commands, stores |
 | `osc.rs` | `io/osc_sender.py`, `osc_publisher.py` | byte-identical templates; header tests against `testdata/golden/wire/osc_*.bin` |
 | `ws.rs` | `io/ws_server.py` (`_Client`, connection handling) | the three lanes, axum upgrade handler, binary FFT encoder |
@@ -52,7 +52,8 @@ The binary finds the repo (for `configs/` and `ui/`) by walking up from its own 
 - **Device index = position in cpal's full device list** (inputs and outputs). On CoreAudio that is PortAudio's numbering (BlackHole 0, MacBook mic 1 on this Mac), so `--device`, `cfg.audio.device.index`, the `devices` list and `set_device` agree with Python-era configs. Names are what's matched on reopen. `hostapi` is reported PortAudio-style ("Core Audio", "ALSA").
 - **No PortAudio re-init.** cpal enumerates live, so `reopen` just drops and reopens; the watchdog stays (no device-changed event).
 - **Delivery is per block, not bursts.** CoreAudio honours `BufferSize::Fixed(256)`, so `/audio/lmh` arrives every 5.33 ms instead of Python's 2-block bursts every 10.7 ms; kick→onset latency drops ~3 ms. Note the fixed buffer is device-wide on CoreAudio.
-- **First hop of a fresh `FftChain` runs under `permit_alloc`**: the sentinel-interp LUT is built from that frame (parity trap 6 in the plan). Every other callback / block / hop runs inside `assert_no_alloc` (aborts in debug builds).
+- **Every callback / block / hop runs inside `assert_no_alloc`** (aborts in debug builds), the first hop of a fresh `FftChain` included: the chain primes its sentinel LUT at construction ([`rust_dsp.md`](rust_dsp.md) → Decisions). Run the debug binary (e.g. under `record_wire.py`) after touching a realtime path.
+- **FFT wakes are gated, DSP wakes aren't.** After each wake the FFT worker stores `read_idx + n_blocks_per_window` (the `write_idx` of its next full hop; `u64::MAX` while the FFT is off) in `Shared.fft_wake_at`, and the callback unparks it only from there on: half the wakes at the default hop of 2 blocks, none with the FFT off. No lost wakeup: until the new target is stored, the old one (already reached) makes every block unpark, and the park token survives. Commands and `set_fft_enabled` unpark the worker directly; the 100 ms park timeout is the backstop.
 - **Worker panics** are caught per wake (`catch_unwind`), logged at most once a second, and the read pointer advances like Python's `except` branch.
 - **YAML** via serde-saphyr with non-finite floats parsed as strings, so `.inf` is "must be numeric" (invalid, fatal) rather than a parse error (corrupt). Output differs cosmetically from PyYAML (`0.00003213…` vs `3.21…e-05`, quoted `"127.0.0.1"`) and round-trips with identical values/types both ways.
 
@@ -74,12 +75,21 @@ Outward behaviour is unchanged; these close gaps the Python server covered throu
 - **Inbound backpressure:** ≤ 64 messages per client waiting for the control loop, then that connection stops reading (Python awaits each handler before reading the next frame).
 - **Handler panics** are caught around `dispatch` and answered `internal: …` + meta, like the reference's catch-all; the server keeps running.
 - **`peak_smear_oct` is clamped to ≤ 4 octaves** (`validate.rs`, Rust only; the UI slider stops at 2). The reference only required a finite value, so `1e300` overflowed the kernel radius (panic) and `~1e9` tried to allocate ~800 GB (abort).
-- **Device probe serialised:** while a probe runs, `set_device` / `list_devices` wait in a queue and are replayed in order when it finishes (the reference's `device_switch_lock`); a probe that panics still answers, so `switch_busy` can't stick. The probe also falls back to the device's integer format (I16/I32) like the main stream.
+- **Device probe serialised:** while a probe runs, `set_device` / `list_devices` wait in a queue and are replayed in order when it finishes (the reference's `device_switch_lock`); a probe that panics still answers, so `switch_busy` can't stick. A queued message keeps its client's inbound slot until it's replayed, so the 64-message bound holds (before, a client could queue unlimited `list_devices`, each replayed as a ~150 ms input reopen). The probe also falls back to the device's own format like the main stream.
 - **`cb_overruns` on macOS:** cpal's CoreAudio backend never reports `Xrun`, so an overrun is counted when a buffer's host timestamp is > 1.5× the previous buffer's duration after it (dropped input). ALSA keeps cpal's `Xrun`.
 - **Phantom `fft_drops` fixed (both engines):** the catch-up skip right after an FFT read-pointer rewind (reconfigure / stream reset) isn't counted; `workers::tests::fft_reconfigure_counts_no_phantom_drops` (998 phantom drops without the fix).
 - **Presets list only loadable names**, so `main.example` (whose dot `load_preset` rejects) no longer shows in the UI.
 - **The "could not open input" hint lists the inputs** (`0 = BlackHole 2ch, 1 = MacBook Pro Microphone`) instead of pointing at `python -m sounddevice`.
 - Shutdown waits 200 ms so the queued WS Close frames go out.
+
+Second review (2026-10-24, later):
+
+- **WS message / frame size ≤ 1 MiB** (`ws.rs`), the reference's `websockets` `max_size`. axum's defaults (64 MiB messages, 64 queued per client) let one page push the process toward an OOM kill. Over the limit, Rust drops the connection without the reference's 1009 Close frame (no client depends on it).
+- **WS Origin check (deliberate change; the reference accepts any origin):** a browser upgrade is refused (403) unless the page's host is loopback or the host the server was reached at (`Host` header, so the UI from a Pi at `http://pi.local:8766` still works). Stops any website from saving presets, switching devices or starting a probe. Non-browser clients send no `Origin`. `ws::tests::origin_check`.
+- **Duplicate YAML keys keep the last value** like PyYAML (`config::parse_yaml`); serde-saphyr's default rejected them, so a hand-edited main.yaml with a repeated key was backed up as corrupt and reseeded.
+- **The config path is resolved like `Path.resolve()`** (`main.rs`), so a symlinked main.yaml is written through instead of replaced by the atomic rename.
+- **Every cpal sample format** (8/16/24/32/64-bit, signed/unsigned, f64) converts to f32 with cpal's own conversions (identical to the old i16/i32 code); before, a raw ALSA device offering only e.g. 24-bit failed to open.
+- DSP-side fixes from the same review (NaN input, smear cap, faster filter kernel): [`rust_dsp.md`](rust_dsp.md) → Decisions.
 
 ## Reference quirks ported on purpose (pure port)
 

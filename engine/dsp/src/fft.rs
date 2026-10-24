@@ -7,9 +7,8 @@ use std::sync::Arc;
 use realfft::num_complex::Complex;
 use realfft::{RealFftPlanner, RealToComplex};
 
-use crate::math::{linspace, logspace, pairwise_sum, reduce_segment};
+use crate::math::{EPS, linspace, logspace, pairwise_sum, reduce_segment};
 
-pub const EPS: f64 = 1e-12;
 /// Wire value for log bins with no rfft bin mapped (low end).
 pub const EMPTY_BIN_SENTINEL: f32 = -1000.0;
 
@@ -105,8 +104,8 @@ pub struct FftAnalyzer {
     /// `(start, end, target)`; `start`/`end` index `power`.
     runs: Vec<(usize, usize, usize)>,
     bin_count_inv: Vec<f64>,
-    empty_bin_idx: Vec<usize>,
-    bins: Vec<f64>,
+    /// Empty log bins hold the sentinel from construction on; `process_hop`
+    /// only writes the bins that have rfft bins.
     wire: Vec<f32>,
 }
 
@@ -149,7 +148,11 @@ impl FftAnalyzer {
             .iter()
             .map(|&c| if c > 0.0 { 1.0 / c.max(1.0) } else { 0.0 })
             .collect();
-        let empty_bin_idx = (0..geom.n_bins).filter(|&j| map.counts[j] == 0.0).collect();
+        let wire = map
+            .counts
+            .iter()
+            .map(|&c| if c == 0.0 { EMPTY_BIN_SENTINEL } else { 0.0 })
+            .collect();
 
         Ok(FftAnalyzer {
             geom,
@@ -165,9 +168,7 @@ impl FftAnalyzer {
             valid_start,
             runs,
             bin_count_inv,
-            empty_bin_idx,
-            bins: vec![0.0; geom.n_bins],
-            wire: vec![0.0; geom.n_bins],
+            wire,
         })
     }
 
@@ -207,21 +208,11 @@ impl FftAnalyzer {
         for (p, c) in self.power.iter_mut().zip(&self.spectrum) {
             *p = (c.re * c.re + c.im * c.im) * corr;
         }
+        // Each log bin's rfft bins are one run, so this visits every
+        // non-empty log bin exactly once (and skips the log10 of empty ones).
         for &(start, end, target) in &self.runs {
-            self.bins[target] = reduce_segment(&self.power[start..end]);
-        }
-        for ((b, &inv), w) in self
-            .bins
-            .iter_mut()
-            .zip(&self.bin_count_inv)
-            .zip(&mut self.wire)
-        {
-            let v = (*b * inv).max(EPS);
-            *b = v;
-            *w = (v.log10() * 10.0) as f32;
-        }
-        for &j in &self.empty_bin_idx {
-            self.wire[j] = EMPTY_BIN_SENTINEL;
+            let v = (reduce_segment(&self.power[start..end]) * self.bin_count_inv[target]).max(EPS);
+            self.wire[target] = (v.log10() * 10.0) as f32;
         }
         &self.wire
     }

@@ -54,8 +54,9 @@ impl SlotRing {
     }
 
     /// Producer only (one thread at a time). Allocation- and lock-free.
+    /// Returns the new `write_idx`.
     #[inline]
-    pub fn write_block(&self, src: &[f32], t_ns: u64) {
+    pub fn write_block(&self, src: &[f32], t_ns: u64) -> u64 {
         let wi = self.write_idx.load(Ordering::Relaxed);
         let slot = (wi as usize) & self.mask;
         self.seq[slot].store(0, Ordering::Relaxed);
@@ -67,6 +68,7 @@ impl SlotRing {
         self.t_ns[slot].store(t_ns, Ordering::Relaxed);
         self.seq[slot].store(wi + 1, Ordering::Release);
         self.write_idx.store(wi + 1, Ordering::Release);
+        wi + 1
     }
 
     /// Copy block `read_idx` into `out`; false if it isn't there (yet / any

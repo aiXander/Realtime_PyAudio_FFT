@@ -2,38 +2,18 @@
 //! Uses `assert_no_alloc`'s allocator, which aborts the test binary on any
 //! allocation inside `assert_no_alloc(..)` in debug builds. No goldens needed.
 
+// The checking allocator only exists in debug builds; `cargo test --release`
+// skips this file.
+#![cfg(debug_assertions)]
+
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
-use dsp::onset::OnsetParams;
+mod common;
+
+use common::example_params;
 use dsp::{DspChain, EngineParams, FftChain};
 
-#[cfg(debug_assertions)]
 #[global_allocator]
 static A: AllocDisabler = AllocDisabler;
-
-/// `configs/main.example.yaml` values at 48 kHz.
-fn example_params() -> EngineParams {
-    EngineParams {
-        sr: 48000.0,
-        blocksize: 256,
-        bands: [(88.0, 184.0), (304.0, 1760.0), (2944.0, 13952.0)],
-        filter_order: 2,
-        tau: [0.12, 0.09, 0.05],
-        tau_attack: [0.015, 0.005, 0.003],
-        autoscale_tau_attack_s: 0.255,
-        autoscale_tau_release_s: 30.0,
-        noise_floor: 3.2e-5,
-        strength: 0.7,
-        fft_n_bins: 128,
-        fft_window_size: 1024,
-        fft_hop: 512,
-        fft_f_min: 30.0,
-        fft_db_floor: -90.0,
-        fft_db_ceiling: -10.0,
-        fft_peak_smear_oct: 0.3,
-        fft_tilt_db_per_oct: 3.5,
-        onset: [OnsetParams::default(); 3],
-    }
-}
 
 /// Deterministic test signal: a decaying 60 Hz "kick" every 0.5 s + LCG noise.
 fn signal(n: usize, sr: f64) -> Vec<f32> {
@@ -60,14 +40,9 @@ fn hot_paths_do_not_allocate() {
         let ws = p.fft_window_size;
         let sig = signal(48000 * 3, p.sr);
         let mut dsp = DspChain::new(&p);
+        // `FftChain::new` primes the sentinel LUT, so even the first hop of a
+        // fresh chain is alloc-free.
         let mut fft = FftChain::new(&p).unwrap();
-
-        // First hop of a layout builds the sentinel LUT (allocates, by design).
-        fft.window_mut()
-            .iter_mut()
-            .zip(&sig)
-            .for_each(|(w, &x)| *w = x as f64);
-        fft.process_hop();
 
         let mut onsets = 0;
         assert_no_alloc(|| {

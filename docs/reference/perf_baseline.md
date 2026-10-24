@@ -80,7 +80,9 @@ Re-run on 2026-10-24 for the comparison (`compare_2026-10-24/stages_{python,rust
 | block128 | 4.65 | 4.25 | 0.058 | 0.017 | 7.77 | 2.76 | 1.99 | 3.01 |
 
 - **vs Python, default config:** DSP block 29 → 9.4 µs (3×) and FFT hop 53 → 8.4 µs (6×). Glue overhead is gone: the autoscaler and onset stages drop from ~5 µs to < 0.1 µs.
-- **What's left:** the filter bank (DF2T biquads, latency-bound per sample) is ~90% of the DSP block. The peak smear dominates the post-proc at high bin counts (1024 bins: σ ≈ 32 bins, 257 taps).
+- **Superseded for the filter bank (later on 2026-10-24):** the kernel now runs the three bands interleaved with a compile-time section count, bit-identical: filter bank 8.8 → **2.1 µs**, DSP block 9.4 → **3.1 µs** (default; order 8 unchanged at 11.1 µs). The FFT hop skips the `log10` of empty bins: default 8.4 → 7.4 µs. Other cells above still stand.
+- **What's left:** the peak smear dominates the post-proc at high bin counts (1024 bins: σ ≈ 32 bins, 257 taps); no parity-safe speedup found (register blocking gave 15%). In the live process the stage work is now a small fraction of CPU; the rest is thread wakeups and OSC syscalls.
+- **Live A/B of those changes** (plus FFT-worker wakes gated to hop boundaries), 3 interleaved 20 s rounds, old vs new binary, default config, load average 3–17: CPU median 2.05 → **1.57%** with the UI open (1.66 → 1.52% idle), live DSP stage 37 → 27 µs, block→OSC 49 → 35 µs avg (p95 78 → 52 µs), kick→onset 16.0 → 15.3 ms, zero drops in every run. Raw JSON was not committed (scratch run).
 
 ## What this means for the port
 

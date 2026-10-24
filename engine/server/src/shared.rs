@@ -121,6 +121,11 @@ pub struct Shared {
     pub master_gain: AtomicF64,
     pub db_floor: AtomicF64,
     pub stop: AtomicBool,
+    /// The ring `write_idx` at which the FFT worker next has a full hop to
+    /// process (`u64::MAX` while the FFT is off). The callback wakes the FFT
+    /// worker only from there on: with the default hop of 2 blocks that
+    /// halves its wakes, and a disabled FFT costs none.
+    pub fft_wake_at: AtomicU64,
     // Monotonic counters (status reports them minus per-session baselines).
     pub cb_overruns: AtomicU64,
     pub dsp_drops: AtomicU64,
@@ -139,6 +144,7 @@ impl Shared {
             master_gain: AtomicF64::new(cfg.autoscale.master_gain),
             db_floor: AtomicF64::new(cfg.fft.db_floor),
             stop: AtomicBool::new(false),
+            fft_wake_at: AtomicU64::new(0),
             cb_overruns: AtomicU64::new(0),
             dsp_drops: AtomicU64::new(0),
             fft_drops: AtomicU64::new(0),

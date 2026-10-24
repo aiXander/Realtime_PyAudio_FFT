@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 
@@ -67,6 +68,12 @@ class DSPWorker(threading.Thread):
         rms_lo = block_rms(lo)
         rms_md = block_rms(md)
         rms_hi = block_rms(hi)
+        if not (math.isfinite(rms_lo) and math.isfinite(rms_md) and math.isfinite(rms_hi)):
+            # A NaN/inf input sample would stick in the IIR state forever
+            # (L/M/H NaN until the next device switch): drop the state and
+            # treat the block as silence. Mirrored in engine/dsp.
+            self.filter_bank.reset_state()
+            rms_lo = rms_md = rms_hi = 0.0
         self.smoother.update(rms_lo, rms_md, rms_hi)
         self.auto_scaler.update(self.smoother.values, self.scaled_buf)
         # Onset detection runs on the FULLY post-processed L/M/H

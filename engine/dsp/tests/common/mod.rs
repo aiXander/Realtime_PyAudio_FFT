@@ -176,3 +176,28 @@ pub fn max_rel(got: &[f64], want: &[f64]) -> (f64, usize) {
     }
     worst
 }
+
+/// `configs/main.example.yaml` values at 48 kHz.
+pub fn example_params() -> EngineParams {
+    EngineParams {
+        sr: 48000.0,
+        blocksize: 256,
+        bands: [(88.0, 184.0), (304.0, 1760.0), (2944.0, 13952.0)],
+        filter_order: 2,
+        tau: [0.12, 0.09, 0.05],
+        tau_attack: [0.015, 0.005, 0.003],
+        autoscale_tau_attack_s: 0.255,
+        autoscale_tau_release_s: 30.0,
+        noise_floor: 3.2e-5,
+        strength: 0.7,
+        fft_n_bins: 128,
+        fft_window_size: 1024,
+        fft_hop: 512,
+        fft_f_min: 30.0,
+        fft_db_floor: -90.0,
+        fft_db_ceiling: -10.0,
+        fft_peak_smear_oct: 0.3,
+        fft_tilt_db_per_oct: 3.5,
+        onset: [OnsetParams::default(); 3],
+    }
+}

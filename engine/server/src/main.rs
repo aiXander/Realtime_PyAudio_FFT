@@ -76,23 +76,38 @@ fn absolute(p: &Path) -> PathBuf {
 }
 
 /// `_resolve_config_path`: default `<repo>/configs/main.yaml`; absolute as
-/// given; relative → cwd first, then the repo root.
+/// given; relative → cwd first, then the repo root. Resolved like Python's
+/// `Path.resolve()`, so a symlinked main.yaml is written through (the atomic
+/// rename would otherwise replace the link with a plain file) and presets
+/// land next to the real file.
 fn resolve_config_path(arg: Option<&str>, repo: &Path) -> PathBuf {
     let canonical = repo.join("configs").join("main.yaml");
-    let Some(a) = arg else { return canonical };
+    let Some(a) = arg else { return resolve(&canonical) };
     let p = Path::new(a);
     if p.is_absolute() {
-        return p.to_path_buf();
+        return resolve(p);
     }
-    let cwd_c = absolute(p);
+    let cwd_c = resolve(&absolute(p));
     if cwd_c.exists() {
         return cwd_c;
     }
-    let repo_c = repo.join(p);
+    let repo_c = resolve(&repo.join(p));
     if repo_c.exists() {
         return repo_c;
     }
     cwd_c
+}
+
+/// `Path.resolve()` (non-strict): symlinks followed; a missing file resolves
+/// through its parent directory.
+fn resolve(p: &Path) -> PathBuf {
+    if let Ok(c) = p.canonicalize() {
+        return c;
+    }
+    match (p.parent().and_then(|d| d.canonicalize().ok()), p.file_name()) {
+        (Some(dir), Some(name)) => dir.join(name),
+        _ => p.to_path_buf(),
+    }
 }
 
 fn fatal(message: &str, hint: &str) -> i32 {
@@ -202,5 +217,19 @@ mod tests {
         // Relative: cwd miss → repo hit.
         let got = resolve_config_path(Some("configs/main.example.yaml"), &repo);
         assert!(got.exists());
+    }
+
+    /// A symlinked main.yaml resolves to its target, so the atomic persist
+    /// writes through instead of replacing the link.
+    #[cfg(unix)]
+    #[test]
+    fn config_path_follows_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.yaml");
+        std::fs::write(&real, "x: 1\n").unwrap();
+        let link = dir.path().join("main.yaml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let got = resolve_config_path(Some(link.to_str().unwrap()), Path::new("/nonexistent"));
+        assert_eq!(got, real.canonicalize().unwrap());
     }
 }

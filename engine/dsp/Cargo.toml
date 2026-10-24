@@ -1,0 +1,23 @@
+[package]
+name = "dsp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure DSP for the realtime audio server: no IO, no threads, no allocation after construction."
+
+[dependencies]
+realfft.workspace = true
+sci-rs.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+npyz.workspace = true
+assert_no_alloc.workspace = true
+criterion.workspace = true
+hound.workspace = true
+
+[[bench]]
+name = "stages"
+harness = false

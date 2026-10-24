@@ -1,6 +1,6 @@
 # Rust port of the audio server
 
-**Status:** phase 0 Python-side prep is done (reference refactor, parity goldens, wire goldens, benchmarks, crate picks verified; see phase 0 below). **Next: scaffold `engine/` and start phase 1.** **Scope:** replace the whole Python server (`server/`) with a Rust binary that behaves the same. The browser UI (`ui/`), the config files (`configs/*.yaml`), the WS protocol and the OSC protocol stay unchanged.
+**Status:** phases 0–1 done: the `engine/` workspace exists and the `dsp` crate matches every golden (FFT bit-exact). **Next: phase 2 (realtime spine).** **Scope:** replace the whole Python server (`server/`) with a Rust binary that behaves the same. The browser UI (`ui/`), the config files (`configs/*.yaml`), the WS protocol and the OSC protocol stay unchanged.
 
 ## Why
 
@@ -26,7 +26,7 @@ The Pi has no baseline yet; measure it in phase 4 (below).
 - **Pure port first, improvements after.** No behaviour changes, no new knobs, no DSP "fixes" during the port, even obvious ones. Every deviation from Python breaks parity testing. Log improvement ideas under "After cutover" below.
 - **The UI must work unmodified.** That is the acceptance test for the control plane. If the UI needs a change, the Rust server is wrong.
 - **Legacy config migrations are dropped (decided by Xander).** The Rust server does not port the `beat:` → `onset:` schema migration (`server/config.py:_build_config` and the preset loader) or the old `./config.yaml` + `presets/` → `configs/` layout move (`server/main.py:_migrate_legacy_config_layout`). It reads only the current schema. Phase 4 converts the existing files first (see below). *Correction (phase 0 audit):* the Python loader is **not** per-field-fallback. A missing required key or an unparseable file counts as corrupt (back up + reseed from the example); an invalid value is a fatal startup error; a short list of optional keys (including the whole `onset:` block) take defaults. Port exactly that. The list is in [`reference/engine_contracts.md`](../reference/engine_contracts.md) → Config. Without the migration, a file that lacks `onset:` simply gets the onset defaults, as Python does today when there's no `beat:` either.
-- **This plan introduces test infra** (a parity harness plus committed golden fixtures). CLAUDE.md says to ask before scaffolding tests. Approving this plan is that approval, but only for the harness described here.
+- **This plan introduces test infra** (a parity harness plus golden fixtures). CLAUDE.md says to ask before scaffolding tests. Approving this plan is that approval, but only for the harness described here.
 
 ## Layout
 
@@ -44,11 +44,11 @@ tools/parity/      make_goldens.py + offline.py (import `server`; deleted at cut
                    record_wire.py (engine-agnostic wire capture/compare; kept)
 tools/bench/       live_bench.py (engine-agnostic; kept), stage_bench.py (Python-only; deleted),
                    results/ (committed baseline JSON)
-testdata/golden/   committed goldens: DSP (.npy + manifest.json) + wire/; kept after cutover
+testdata/golden/   goldens: DSP .npy + manifest.json (gitignored, ~20 MB, regenerate) + wire/ + README (tracked)
 ui/  configs/      shared, unchanged
 ```
 
-## Crate choices (verified in phase 0 on rustc 1.95 — don't relitigate)
+## Crate choices (verified in phase 0 on rustc 1.95, built on the pinned 1.99.1 — don't relitigate)
 
 Checked 2026-10-24 with throwaway test projects. The versions are the ones that resolved; pin the major.
 
@@ -65,7 +65,7 @@ Checked 2026-10-24 with throwaway test projects. The versions are the ones that 
 | Thread priority | `libc` 0.2 (`pthread_set_qos_class_self_np` on macOS, absolute nice −5 on Linux) | Same policy as `server/priority.py`. Avoid the `libc` 1.0 alpha. |
 | CLI / logging / open browser | `clap` 4, `tracing` 0.1 + `tracing-subscriber` 0.3, `webbrowser` 1 | Same flags: `--open --device --no-ws --config --log-level`. |
 | Parity tests / benches | `npyz` 0.9 (reads the goldens), `criterion` 0.8, `loom` 0.7 (slot-ring), `hound` 3.5 (replay bin WAV) | |
-| Pi builds | `cross` or `cargo-zigbuild` → `aarch64-unknown-linux-gnu` | ALSA dev libs in the sysroot. **This Mac has Homebrew rust (no rustup)**, so install rustup before phase 4 to add the target. |
+| Pi builds | `cross` or `cargo-zigbuild` → `aarch64-unknown-linux-gnu` | ALSA dev libs in the sysroot. The toolchain is rustup, pinned in `engine/rust-toolchain.toml` (1.99.1 + clippy/rustfmt); in phase 4 add `targets = ["aarch64-unknown-linux-gnu"]` there. |
 | Packaging | `maturin` 1.15 (`bindings = "bin"`), `maturin-action`, `rust-embed` 8, `directories` 6 | Phase 5: the pip wheel carries the binary; `ui/` + the example config are embedded. |
 
 ## Threading model in Rust
@@ -154,34 +154,25 @@ The parity harness is how "same behaviour" gets proven. Everything below exists 
     | Scripted run | 10 s, 19 real WS messages (incl. a partial `load_preset`, FFT off/on, `n_bins` changes) |
 
   - **Event calls:** each scripted event records the DSP-level setter calls it caused. The Rust dsp-crate replay therefore needs no dispatcher, and the server crate's dispatcher test can check message → calls separately.
-- **Deviation from the original plan:** the input signals **are committed** (as f32 `.npy`). numpy's RNG (PCG64 + ziggurat normals) can't be reproduced in Rust, and committing them also pins the goldens against numpy changes. Generator: `tools/signals.py`.
+- **Deviation from the original plan:** the input signals are stored next to the goldens as f32 `.npy` rather than regenerated in Rust, because numpy's RNG (PCG64 + ziggurat normals) can't be reproduced there.
+- **The DSP goldens are gitignored** (decided by Xander: ~20 MB of binary data stays out of the repo). They live only on disk; regenerate them with `make_goldens.py` while the Python engine exists. Only `testdata/golden/README.md` and `wire/` are tracked. The Rust parity tests must **skip with a clear message** (not fail obscurely) when `manifest.json` is missing, e.g. on a fresh clone. **Before cutover deletes `server/`, archive the generated set** (e.g. a tarball attached to a GitHub Release), because it can't be regenerated afterwards. Generator: `tools/signals.py`.
 - **Tolerances** (in the manifest): L/M/H raw + scaled + BPM ≤ 1e-9 abs; onsets identical (the only allowed exception is a documented threshold-edge case); FFT raw dB ≤ 1e-4 dB with identical sentinel positions; FFT processed ≤ 1e-6; SOS ≤ 1e-12.
 - **Wire goldens:** `uv run tools/parity/record_wire.py` captures from a live server into `testdata/golden/wire/`: every WS message type (4 error flavours), both binary FFT modes, all 8 OSC packets, the persisted main.yaml and a saved preset. For the Rust engine: `--out <dir> --server-cmd <rust binary>`, then `--compare testdata/golden/wire <dir>` diffs JSON key sets/types, OSC layout, FFT headers and YAML shape.
 - **Live bench:** `uv run tools/bench/live_bench.py` is engine-agnostic and runs a Rust binary via `--server-cmd`. See [`reference/perf_baseline.md`](../reference/perf_baseline.md).
-- Goldens stay after cutover. `tools/parity/make_goldens.py`, `offline.py` and `tools/bench/stage_bench.py` import `server` and go with it. `record_wire.py`, `live_bench.py` and `tools/signals.py` are engine-agnostic PEP 723 scripts and stay.
+- The generated goldens must be archived before cutover (above). `tools/parity/make_goldens.py`, `offline.py` and `tools/bench/stage_bench.py` import `server` and go with it. `record_wire.py`, `live_bench.py` and `tools/signals.py` are engine-agnostic PEP 723 scripts and stay.
 
 ## Phases
 
 Order matters; each phase's acceptance gates the next.
 
-### Phase 0: scaffold + reference prep (Python side done)
+### Phases 0–1: harness + `dsp` crate at parity (done)
 
-- **Done:**
-  - **Reference refactor:** `DSPWorker.process_block`, `FFTWorker.process_hop` and `App._build_fft_pipeline` were extracted. This is pure code motion; checked bit-identical against the pre-refactor HEAD on 5 cases, and the live perf is unchanged.
-  - **Crate picks** are confirmed (table above).
-  - **Goldens + wire goldens + benches** are committed (harness section above).
-  - **Configs:** `grep -l "^beat:" configs/*.yaml` is already empty.
-- **Remaining (first task of the implementer):**
-  - **Workspace:** create the Cargo workspace `engine/` (`dsp` lib + `server` bin crates; add `engine/target/` to `.gitignore`).
-  - **Golden loader:** write a `dsp` integration test that loads `testdata/golden/manifest.json` + one case through `npyz` and asserts shapes/dtypes (the "empty parity test").
-  - **Lint:** run `cargo test` and `cargo clippy` clean.
-- **Done when:** that test passes. Then phase 1.
+- Python-side prep: the `process_block` / `process_hop` / `_build_fft_pipeline` extraction, DSP + wire goldens, benches and crate picks. The DSP goldens are gitignored; run `make_goldens.py` on a fresh clone.
+- `engine/` is a Cargo workspace (`dsp` lib + `server` bin `audio-server`, a stub until phase 2). The toolchain is pinned in `engine/rust-toolchain.toml`.
+- `dsp` passes the whole 27-case matrix: FFT raw dB / processed bit-identical, L/M/H ≤ 6.4e-13, onsets + BPM identical. `assert_no_alloc` is clean on `process_block`, `process_hop` and every realtime setter. Stage benches sit next to Python in `reference/perf_baseline.md`, and the `replay` example reproduces a golden from a WAV.
+- **Constraint for phase 2:** allocating work is built on the control thread: `FilterDesign::new`, `Smear::build`, and a whole new `FftChain` for any FFT reconfigure (n_bins / window / hop / f_min / sr). All the other setters are alloc-free and may run on the worker.
 
-### Phase 1: `dsp` crate at parity (offline, no audio device)
-- Port in pipeline order and turn each golden green before the next: filter design + biquads → RMS → ExpSmoother → AutoScaler → OnsetTracker/BPM → log-bin map + FFT power → FFTPostProcessor. Then add the setters and the parameter script.
-- `replay` bin: WAV in → the same dump format out (useful for debugging divergence against the Python script).
-- Benchmark per stage with `criterion` on the M2, using the stage names of `tools/bench/stage_bench.py` (`dsp.filter_bank`, `dsp.dsp_block_total`, `fft.postprocess`, `fft.fft_hop_total` …) so the two tables line up.
-- **Done when:** the whole golden matrix passes within tolerance, `assert_no_alloc` is clean on `process_block` / `process_hop`, and the Rust stage numbers sit next to the Python ones in [`reference/perf_baseline.md`](../reference/perf_baseline.md).
+Done — see [reference/rust_dsp.md](../reference/rust_dsp.md).
 
 ### Phase 2: realtime spine, headless
 - cpal input + re-blocking, slot ring, DSP + FFT worker threads, command queues, stores, OSC publisher, perf rings and drop counters, priority boost, the backlog policies (DSP max backlog 4 blocks; FFT 2 hops), and the audio watchdog (1 s stall → `send_silence` → reopen by name every 3 s, falling back to the default device).
@@ -196,7 +187,7 @@ Order matters; each phase's acceptance gates the next.
 - Cross-compile for `aarch64-unknown-linux-gnu`. Run Python and Rust on a Pi 4 (and a Pi 5 if one is available) with the same config, and record `server_status.perf` plus `top` CPU for both in this doc.
 - **Targets** (Pi 4, default config, UI open): total CPU < 10% of one core, DSP p95 < 0.5 ms, zero drops in a 10-minute soak.
 - Pre-cutover: load and re-save `configs/main.yaml` and every preset once with the Python server, so all files are in the current schema before the Rust server (which has no migrations) becomes the only reader. Then `grep -l "^beat:" configs/*.yaml` must return nothing.
-- Cutover: `make start` → `cargo run --release -p server -- --open` (or a built binary). Rewrite the README quick start for building from source (Rust toolchain instead of uv); phase 5 later puts `pip install` back on top. Rewrite the CLAUDE.md architecture section for the Rust layout. Promote the threading model + parity traps into `docs/reference/engine.md`. Delete `server/`, `tools/parity/`, `uv.lock`, `realtime_audio_server.egg-info`. Keep `pyproject.toml`; phase 5 rewrites it for maturin. Move this plan to `docs/finished/` once phase 5 is done too.
+- Cutover: `make start` → `cargo run --release -p server -- --open` (or a built binary). Rewrite the README quick start for building from source (Rust toolchain instead of uv); phase 5 later puts `pip install` back on top. Rewrite the CLAUDE.md architecture section for the Rust layout. Promote the threading model + parity traps into `docs/reference/engine.md`. Archive the generated goldens (see the harness section), then delete `server/`, `tools/parity/make_goldens.py` + `offline.py`, `uv.lock`, `realtime_audio_server.egg-info`. Keep `pyproject.toml`; phase 5 rewrites it for maturin. Move this plan to `docs/finished/` once phase 5 is done too.
 
 ### Phase 5: distribution (pip + standalone binaries)
 Decided by Xander: offer **both**. `pip install` / `uvx` stays the friendly "just Python" path, and standalone binaries go to people without Python. **One build serves both.** maturin with `bindings = "bin"` packages the compiled Rust `audio-server` binary *inside* a platform wheel. `pip install realtime-audio-server` then installs a ready-to-run `audio-server` command with no Rust toolchain and no Python engine. The same binaries are attached to a GitHub Release. Python users therefore keep the exact install story they have today (`pip install`, `uvx realtime-audio-server --open`) while running the Rust engine.

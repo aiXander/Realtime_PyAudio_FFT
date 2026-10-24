@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["dsp", "server"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+
+[workspace.dependencies]
+dsp = { path = "dsp" }
+realfft = "3.5"
+sci-rs = { version = "0.4.1", default-features = false, features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+npyz = "0.9"
+assert_no_alloc = "1.1"
+criterion = "0.8"
+hound = "3.5"
+
+[profile.release]
+debug = 1
+
+[profile.bench]
+debug = 1
+
+# Parity tests replay ~20 MB of goldens; keep debug assertions (assert_no_alloc
+# needs them) but optimise.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

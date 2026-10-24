@@ -12,6 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `docs/reference/perf_baseline.md` | measuring load/latency, comparing engines, or judging a perf change |
 | `docs/reference/fft_3d_styles.md` | touching the 3D FFT view or the palette |
 | `testdata/golden/README.md` | writing/reading parity tests or regenerating goldens |
+| `docs/reference/rust_dsp.md` | working in `engine/` (the Rust engine): crate map, parity/no-alloc tests, benches, toolchain |
 
 The design is documented in detail in `realtime_audio_server_plan.md`; if behavior in code seems surprising, the plan is the authoritative source for *why*. **Note:** the plan predates the FFT post-processor — for FFT processing semantics, the code (`server/dsp/fft_postprocess.py`) is the source of truth.
 
@@ -26,6 +27,8 @@ server/      # Python audio-server package (entry point: server.main:main)
              # FeatureStore/FFTStore, static HTTP
   config.py  # Dataclass schema, YAML load, debounced atomic Persister
   main.py    # App orchestrator: builds and wires everything together
+engine/      # Rust port: Cargo workspace, dsp lib (at parity) + server bin
+             # (audio-server; in progress). Map: docs/reference/rust_dsp.md
 ui/          # Vanilla-JS browser UI (ES modules, no build step). Pure viz —
              # no DSP. What you see in the FFT graph is byte-identical to the
              # OSC payload.
@@ -34,8 +37,9 @@ configs/     # main.yaml = persisted runtime state (auto-written when UI changes
 tools/       # signals.py (deterministic test signals); parity/ (golden generator +
              # offline App driver, wire recorder/compare); bench/ (engine-agnostic
              # live bench, Python stage bench, results/ = committed baseline JSON)
-testdata/golden/  # committed parity goldens (DSP .npy + manifest, wire/ captures);
-             # the Rust engine is tested against these. Never hand-edit.
+testdata/golden/  # parity goldens the Rust engine is tested against. DSP .npy +
+             # manifest are gitignored (~20 MB; regenerate with make_goldens.py);
+             # README.md + wire/ captures are tracked. Never hand-edit.
 ```
 
 ## Commands
@@ -67,6 +71,7 @@ uv run python tools/parity/make_goldens.py [--check]   # DSP goldens; --check = 
 uv run tools/parity/record_wire.py [--server-cmd CMD --out DIR] [--compare A B]  # wire goldens
 uv run tools/bench/live_bench.py [--server-cmd CMD] [--set k=v]  # live load/latency (BlackHole input)
 uv run python tools/bench/stage_bench.py [--quick]     # Python per-stage µs
+cd engine && cargo test && cargo clippy --all-targets  # Rust engine (rustup 1.99.1, pinned)
 ```
 
 > Note: the console script lives in `.venv/bin/audio-server`, so bare `audio-server` only works if that venv is activated (`source .venv/bin/activate`). Prefer `uv run audio-server …`, which doesn't need activation.

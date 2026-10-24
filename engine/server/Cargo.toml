@@ -1,0 +1,13 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "audio-server"
+path = "src/main.rs"
+
+[dependencies]
+dsp.workspace = true

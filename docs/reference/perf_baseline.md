@@ -42,6 +42,24 @@ How to read the table:
 - **"Math floor":** the bare SOS kernel loop over the 3 bands plus RMS takes 17 µs (order 2) and 37 µs (order 8). The bare window+rfft takes 9.6 µs (1024) and 28.7 µs (4096).
 - **WS encodes:** snapshot JSON 5 µs, meta JSON 19 µs, binary FFT 0.7 µs.
 
+## Offline per stage, Rust `dsp` crate (µs, criterion mean)
+
+`cd engine && cargo bench -p dsp --bench stages`: same stage names and configs as the Python table above. The configs and the drum signal come from the golden cases. Measured 2026-10-24 on the M2 under load from other agents (load average 5–20). Each cell is the best mean over 2–3 runs, so treat ±30% as noise; the strength1 post-proc number is one such outlier. `power→log-bin→dB` is derived as hop total − window+rfft − post-proc, as in Python.
+
+| Config | DSP block total | filter bank | autoscaler | onset | FFT hop total | window+rfft | power→log-bin→dB | post-proc |
+|---|---|---|---|---|---|---|---|---|
+| default | 9.44 | 8.81 | 0.058 | 0.018 | 8.41 | 2.77 | 2.44 | 3.20 |
+| bins256 | 9.45 | 8.54 | 0.057 | 0.018 | 13.35 | 2.76 | 3.62 | 6.97 |
+| bins1024 | 9.45 | 8.53 | 0.057 | 0.018 | 78.82 | 2.76 | 19.19 | 56.87 |
+| order8 | 12.31 | 11.37 | 0.057 | 0.018 | 7.97 | 2.76 | 1.99 | 3.22 |
+| win4096 | 9.44 | 8.55 | 0.057 | 0.018 | 21.14 | 13.78 | 4.05 | 3.31 |
+| strength1 | 9.39 | 8.54 | 0.036 | 0.018 | 9.16 | 2.76 | 1.21 | 5.20 |
+| block128 | 4.65 | 4.25 | 0.058 | 0.017 | 7.77 | 2.76 | 1.99 | 3.01 |
+
+- **vs Python, default config:** DSP block 29 → 9.4 µs (3×) and FFT hop 53 → 8.4 µs (6×). Glue overhead is gone: the autoscaler and onset stages drop from ~5 µs to < 0.1 µs.
+- **What's left:** the filter bank (DF2T biquads, latency-bound per sample) is ~90% of the DSP block. The peak smear dominates the post-proc at high bin counts (1024 bins: σ ≈ 32 bins, 257 taps).
+- **Not yet measured:** OSC publish and store publish; those stages belong to the server crate (phase 2).
+
 ## What this means for the port
 
 - **The work is cheap.** Single-threaded, a full Python DSP block is ~29 µs and a full FFT hop ~53 µs, about 0.5% of a core each. The per-stage numerics are already close to their floor.

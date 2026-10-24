@@ -139,6 +139,7 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
 
 ## Devices (`server/audio/devices.py`, `App.*` in `server/main.py`)
 
+- **Indices** are positions in the host's full device list (inputs and outputs): PortAudio's numbering in Python, cpal's in Rust, identical on CoreAudio. They shift as devices come and go; names don't.
 - **Initial device:** `--device` → `cfg.audio.device.name` (looked up **by name**) → `cfg.audio.device.index` → the system default.
 - **Stream:** opened with the device's default sr. `channels` is clamped to the device's maximum. Stereo is mixed to mono as `(L+R)/2`. A host latency over 80 ms logs a warning.
 - **Hot-switch** (`hot_switch_device`):
@@ -169,6 +170,7 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
   - drains every complete hop;
   - if more than `window + 2 hops` behind, it skips whole hops to stay aligned;
   - `resync()` after a re-enable skips the idle gap without counting drops.
+  - any reconfigure (n_bins / window / hop / f_min / sr, preset load) resets the read pointer to 0, so the next wake counts every hop since stream start as `fft_drops`. A reference quirk both engines keep; see the plan's "After cutover".
 - **Worker loops never die:** each iteration is wrapped and errors are logged at most once a second.
 - **Priority:** macOS `QOS_CLASS_USER_INITIATED` for the workers and the main thread; Linux absolute nice −5 (best effort). The Python-only `sys.setswitchinterval(5e-4)` has no Rust equivalent and is not needed.
 - **Filter retunes** from `set_band` are debounced 50 ms server-side.

@@ -1,6 +1,6 @@
 # Rust port of the audio server
 
-**Status:** phases 0–1 done: the `engine/` workspace exists and the `dsp` crate matches every golden (FFT bit-exact). **Next: phase 2 (realtime spine).** **Scope:** replace the whole Python server (`server/`) with a Rust binary that behaves the same. The browser UI (`ui/`), the config files (`configs/*.yaml`), the WS protocol and the OSC protocol stay unchanged.
+**Status:** phases 0–3 done: the `dsp` crate matches every golden (FFT bit-exact) and the Rust `audio-server` binary runs the unmodified UI with the same wire contracts. **Next: phase 4 (Pi validation + cutover).** **Scope:** replace the whole Python server (`server/`) with a Rust binary that behaves the same. The browser UI (`ui/`), the config files (`configs/*.yaml`), the WS protocol and the OSC protocol stay unchanged.
 
 ## Why
 
@@ -68,39 +68,9 @@ Checked 2026-10-24 with throwaway test projects. The versions are the ones that 
 | Pi builds | `cross` or `cargo-zigbuild` → `aarch64-unknown-linux-gnu` | ALSA dev libs in the sysroot. The toolchain is rustup, pinned in `engine/rust-toolchain.toml` (1.99.1 + clippy/rustfmt); in phase 4 add `targets = ["aarch64-unknown-linux-gnu"]` there. |
 | Packaging | `maturin` 1.15 (`bindings = "bin"`), `maturin-action`, `rust-embed` 8, `directories` 6 | Phase 5: the pip wheel carries the binary; `ui/` + the example config are embedded. |
 
-## Threading model in Rust
+## Threading model and module map
 
-Keep the shape of the Python design (`CLAUDE.md` → "Architecture: the threading contract is the design"), with Rust-native plumbing:
-
-- **Callback** (cpal thread): re-block into fixed `blocksize` blocks in a preallocated accumulator → mono mix → write into the slot ring → `unpark()` both workers. No locks, no alloc, no logging.
-- **Slot ring:** port `SlotRing` (one producer, two consumers, seqlock). Keep slots rather than an SPSC FIFO, because the FFT reads *overlapping* windows (hop < window). **Trap:** a seqlock read of plain non-atomic data is UB in Rust. Store samples as `AtomicU32` (f32 bits) with `Relaxed` loads and Acquire/Release on the per-slot seq, or use `seqlock`-style volatile copies. Write a loom or stress test.
-- **Workers own their DSP state outright.** The DSP worker owns FilterBank, ExpSmoother, AutoScaler and OnsetTracker. The FFT worker owns its FFT plan and FFTPostProcessor. Nothing is shared mutably. The control loop sends commands (`SetNoiseFloor`, `SetBands(prebuilt SOS)` …) over an SPSC queue that the worker drains at the top of each block or hop. Anything that allocates (filter redesign, `n_bins` reconfigure, smear kernel) is **built on the control thread** and sent as a boxed object. The worker sends the old one back to be dropped off-thread. This replaces the Python `_lock`s and "atomic attribute swap" setters. Command application order must reproduce the Python semantics: see the setter side effects in the traps list.
-- **Control loop:** one current-thread tokio runtime owns config, dispatcher, WS, HTTP, persister, watchdog and the OSC meta loop. This is the same invariant as today: mutations only happen here.
-- **OSC** is sent directly from the worker threads with pre-encoded packet templates, as in `server/io/osc_sender.py`.
-
-## Python → Rust inventory
-
-The outward behaviour each row must keep (CLI, config load semantics, every WS message and handler, OSC packets, HTTP, device handling, timing and backlog constants) is mapped in [`reference/engine_contracts.md`](../reference/engine_contracts.md). Use it as the phase 2/3 checklist.
-
-| Python | Rust home | Notes |
-|---|---|---|
-| `audio/callback.py`, `audio/ringbuffer.py` | `server/audio/` | Re-blocking is new (PortAudio gave fixed blocks). |
-| `audio/stream.py`, `audio/devices.py` | `server/audio/` | Device probe (open each input briefly, check for signal), reopen by **name**. |
-| `dsp/filters.py` | `dsp/filters.rs` | `clamp_band_edges` is pure; port it verbatim. |
-| `dsp/features.py`, `dsp/_math.py` | `dsp/features.rs`, `dsp/math.rs` | Scalar n=3 code maps 1:1. |
-| `dsp/onset.py` | `dsp/onset.rs` | Bounded BPM ring as a fixed array, no alloc. |
-| `dsp/fft.py` (bin map + hop math) | `dsp/fft.rs` | Worker loop and backlog policy go in `server/`. |
-| `dsp/fft_postprocess.py` | `dsp/fft_post.rs` | |
-| `dsp/worker.py` | `server/workers.rs` | Backlog skip / drain-all / `advance()` on drops, as is. |
-| `io/osc_sender.py`, `io/osc_publisher.py` | `server/osc.rs` | Byte-identical packets, including `send_silence`. |
-| `io/stores.py` | `server/stores.rs` | Monotonic onset counters as `AtomicU64`. |
-| `io/ws_server.py` | `server/ws.rs` | Three lanes (control FIFO / latest-only status / drop-oldest stream of 4), coalesced meta, `set_stream`, idle when there are no streamers. |
-| `io/http_server.py` | `server/http.rs` | |
-| `control/validate.py` | `server/validate.rs` | Single source of truth for ranges, as today. Includes the 9216-byte OSC FFT packet ceiling assert and `MAX_FFT_WINDOW`. |
-| `control/dispatcher.py` | `server/dispatcher.rs` | All 22 handlers + `load_preset` section-by-section apply. |
-| `config.py` | `server/config.rs` | Load → validate → fall back per field; debounced atomic persister (1 s drag / 250 ms cap / 50 ms commit). |
-| `main.py` (App) | `server/app.rs` | Hot-switch with rollback, watchdog, `server_status` perf schema (the UI Performance panel reads it). |
-| `priority.py` | `server/priority.rs` | |
+As built: [`reference/rust_server.md`](../reference/rust_server.md) (threads, command queues, module ↔ Python source table). The outward contract is [`reference/engine_contracts.md`](../reference/engine_contracts.md).
 
 ## Parity traps (read before porting a stage)
 
@@ -174,14 +144,14 @@ Order matters; each phase's acceptance gates the next.
 
 Done — see [reference/rust_dsp.md](../reference/rust_dsp.md).
 
-### Phase 2: realtime spine, headless
-- cpal input + re-blocking, slot ring, DSP + FFT worker threads, command queues, stores, OSC publisher, perf rings and drop counters, priority boost, the backlog policies (DSP max backlog 4 blocks; FFT 2 hops), and the audio watchdog (1 s stall → `send_silence` → reopen by name every 3 s, falling back to the default device).
-- `audio-server --no-ws` runs end-to-end.
-- **Done when:** the OSC output is byte-layout-identical to Python (`tools/parity/record_wire.py --compare` on the `osc_*` files; WS files will be missing until phase 3). `uv run tools/bench/live_bench.py --phases idle --server-cmd <rust>` shows zero drops. Live comparison: feed both servers the same loopback input (BlackHole) and diff `/audio/lmh` statistically; exactness is covered by phase 1. Unplugging and replugging a USB mic recovers. Zero drops in a 10-minute soak on the M2.
+### Phases 2–3: realtime spine + control plane (done)
 
-### Phase 3: control plane, UI works unmodified
-- Config load/validate/fallback, the persister, presets (save/list/load with partial-section apply), the dispatcher (all handlers + `set_stream`), coalesced meta, the WS three-lane client queues + binary FFT, `server_status` (same perf schema), static HTTP, idle-when-nobody-watches, device list/probe/hot-switch with rollback, the 50 ms filter-retune debounce, band clamping, and the OSC meta loop (≤ 50 ms after a change, plus a 1 Hz resend).
-- **Done when:** `record_wire.py --compare testdata/golden/wire <rust capture>` is all `ok`, the full `live_bench.py` run is recorded in `reference/perf_baseline.md` next to Python, and a manual pass through the **unmodified** UI works: every slider, preset save/load, device switch, 2D/3D FFT, palette, raw-dB toggle, tab hide/show idling. `configs/main.yaml` written by Rust loads in Python and vice versa.
+- `engine/server` = the `audio-server` binary: cpal input with a re-blocking callback, a correct-seqlock slot ring, DSP/FFT worker threads that own their chains and take commands over rtrb queues (allocating objects built on the control thread, returned for dropping), triple-buffer stores, byte-identical OSC, strict config load + atomic persister, the dispatcher with all handlers and section-by-section `load_preset`, three-lane WS clients, static HTTP, hot-switch with rollback, watchdog. One tokio current-thread control loop owns all mutable state and every timer.
+- Verified: `record_wire.py --compare` 27/27 ok; Python and Rust statistically identical on the same live input; YAML loads both ways; full live bench with zero drops and CPU ~1/4 of Python's (numbers in `reference/perf_baseline.md`). **The 10-minute zero-drop soak gate is not met by the pure port** (a few drop events per run; workers occasionally unscheduled for 30–70 ms under QoS USER_INITIATED); an experimental macOS time-constraint policy made it 0 drops — see open question 1; manual pass through the unmodified UI in Chrome.
+- Constraints for phase 4: device indices are positions in cpal's device list (= PortAudio's on CoreAudio; unverified on ALSA, see open question 4); `BufferSize::Fixed(blocksize)` is requested only when the device's range allows it, and ALSA re-blocking is untested on hardware.
+- Still to do by hand (Xander): unplug/replug a USB mic while running (watchdog → reopen by name → recovery).
+
+Done — see [reference/rust_server.md](../reference/rust_server.md).
 
 ### Phase 4: Pi validation + cutover
 - Cross-compile for `aarch64-unknown-linux-gnu`. Run Python and Rust on a Pi 4 (and a Pi 5 if one is available) with the same config, and record `server_status.perf` plus `top` CPU for both in this doc.
@@ -201,13 +171,20 @@ Decided by Xander: offer **both**. `pip install` / `uvx` stays the friendly "jus
 
 ## Open questions (for Xander)
 
-1. **Python library API?** The pip package above gives Python users the *server*: OSC/WS out, same as today. Should it *also* let people `import` the DSP from their own Python scripts, e.g. feed numpy blocks in and get L/M/H, onsets and FFT bins back? That would mean PyO3 bindings on the `dsp` crate, shipped in the same wheel. *Recommendation:* not in this sprint. Add it after cutover if someone asks; the `dsp` crate is designed pure and IO-free, so wrapping it later is cheap.
+1. **Real-time worker scheduling (blocks the soak gate).** With the reference's policy (QoS USER_INITIATED, `priority.py`) the Rust workers still occasionally go unscheduled for 30–70 ms on this shared M2 (3 soaks: 16/6, 6/2, 48/21 dsp/fft drops in 10 min; the callback itself stayed perfectly regular). Giving the two workers macOS's time-constraint policy (`thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)`, period = block / hop period, computation 1 ms, preemptible) gave 0 drops and a 0.09 ms worst lag in a 10-minute soak. It's a scheduling deviation from the reference, so it's held back. The patch is small (one function in `priority.rs`, two calls in `workers.rs`); the Linux counterpart would be SCHED_FIFO when permitted (already listed under "After cutover"). Adopt for the Rust engine now?
 
-2. **Device identity on Linux.** Saved configs reopen the input **by name**. cpal's ALSA device names will likely differ from PortAudio's (PortAudio embeds `(hw:2,0)`; unverified), so on the Pi a Python-era `audio.device.name` may not match after cutover, and the server falls back to the system default once. cpal also offers a stable `id()` (CoreAudio UID / ALSA id). *Recommendation:* pure port: keep name matching; on a miss, fall back to default as today; the user re-picks once. Storing the `id` too would be a schema change, so do it after cutover if it bites. Not blocking before phase 4.
+2. **`--no-ws` persistence.** The reference sets `cfg.ws.enabled = False` for the run, so anything persisted during a `--no-ws` run (e.g. a band clamp on a 16 kHz device) writes `ws.enabled: false` and the next normal start has no WS/UI. The Rust server copies this (pure port). Keep it, or make the flag runtime-only in both engines?
+
+3. **Python library API?** The pip package above gives Python users the *server*: OSC/WS out, same as today. Should it *also* let people `import` the DSP from their own Python scripts, e.g. feed numpy blocks in and get L/M/H, onsets and FFT bins back? That would mean PyO3 bindings on the `dsp` crate, shipped in the same wheel. *Recommendation:* not in this sprint. Add it after cutover if someone asks; the `dsp` crate is designed pure and IO-free, so wrapping it later is cheap.
+
+4. **Device identity on Linux.** Saved configs reopen the input **by name**. cpal's ALSA device names will likely differ from PortAudio's (PortAudio embeds `(hw:2,0)`; unverified), so on the Pi a Python-era `audio.device.name` may not match after cutover, and the server falls back to the system default once. cpal also offers a stable `id()` (CoreAudio UID / ALSA id). *Recommendation:* pure port: keep name matching; on a miss, fall back to default as today; the user re-picks once. Storing the `id` too would be a schema change, so do it after cutover if it bites. Not blocking before phase 4.
 
 ## After cutover (not this sprint)
 
-Ideas the port unlocks. Do not implement them during the port:
+Ideas the port unlocks, and reference quirks the port reproduced on purpose. Do not implement them during the port:
+- **Phantom `fft_drops` after any FFT reconfigure** (n_bins / window / hop / f_min, preset load). Both engines reset the FFT read pointer to 0 and the next wake counts every hop since stream start as skipped (Python: 293 after one `set_n_fft_bins` at ~5 s uptime; grows with uptime). Fix in both: resync (`max(0, wi − window)`) instead of 0 on reconfigure, or don't count that skip.
+- The startup "could not open input" hint points at `uv run python -m sounddevice`; meaningless once Python is gone.
+- `main.example` shows up in the UI's preset list (every `*.yaml` but `main` is a preset).
 - Smaller `blocksize` (128/64) for lower latency, now that per-block overhead is ~µs.
 - Multi-channel input / more bands.
 - SCHED_FIFO workers on Linux when permitted.

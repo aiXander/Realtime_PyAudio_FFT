@@ -634,6 +634,19 @@ mod tests {
         }
     }
 
+    /// Python-written files (PyYAML `safe_dump`) load here with every value
+    /// intact, and what we write back parses to the same values and types.
+    #[test]
+    fn loads_python_written_yaml() {
+        for f in ["persisted_main.yaml", "preset_saved.yaml"] {
+            let p = repo().join("testdata/golden/wire").join(f);
+            let cfg = load_config(&p).unwrap();
+            let py: Value = parse_yaml(&std::fs::read_to_string(&p).unwrap()).unwrap();
+            let mine = parse_yaml(&to_yaml(&cfg).unwrap()).unwrap();
+            assert_eq!(py, mine, "{f}");
+        }
+    }
+
     #[test]
     fn corrupt_vs_invalid() {
         assert!(matches!(load_str(""), Err(LoadError::Corrupt(_))));

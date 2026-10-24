@@ -170,7 +170,7 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
   - drains every complete hop;
   - if more than `window + 2 hops` behind, it skips whole hops to stay aligned;
   - `resync()` after a re-enable skips the idle gap without counting drops.
-  - any reconfigure (n_bins / window / hop / f_min / sr, preset load) resets the read pointer to 0, so the next wake counts every hop since stream start as `fft_drops`. A reference quirk both engines keep; see the plan's "After cutover".
+  - any reconfigure (n_bins / window / hop / f_min / sr, preset load) or stream reset rewinds the read pointer to 0; the next wake's backlog skip jumps over the ring's history and is **not** counted as `fft_drops` (only that one skip; real backlogs after it still count). Hop alignment is unchanged (whole hops from block 0), so the goldens' hop table is unaffected. Fixed in both engines 2026-10-24; before that, one `set_n_fft_bins` showed hundreds to tens of thousands of phantom drops, growing with uptime.
 - **Worker loops never die:** each iteration is wrapped and errors are logged at most once a second.
-- **Priority:** macOS `QOS_CLASS_USER_INITIATED` for the workers and the main thread; Linux absolute nice −5 (best effort). The Python-only `sys.setswitchinterval(5e-4)` has no Rust equivalent and is not needed.
+- **Priority:** the reference: macOS `QOS_CLASS_USER_INITIATED` for the workers and the main thread; Linux absolute nice −5 (best effort). The Rust engine puts its two workers in a real-time class instead (macOS time-constraint policy; Linux `SCHED_FIFO` when permitted, else nice −5): not an outward contract, but the reason it meets the 10-minute zero-drop soak ([`rust_server.md`](rust_server.md) → Worker scheduling). The Python-only `sys.setswitchinterval(5e-4)` has no Rust equivalent and is not needed.
 - **Filter retunes** from `set_band` are debounced 50 ms server-side.

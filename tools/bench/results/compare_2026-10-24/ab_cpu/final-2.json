@@ -1,0 +1,285 @@
+{
+  "label": "ab-final-2",
+  "cmd": [
+    "/private/tmp/claude-501/-Users-xandersteenbrugge-Documents-GitHub-Realtime-PyAudio-FFT-rust-engine/35cb1533-8f6c-4d4d-9dd6-88792d246431/scratchpad/bins/audio-server-final",
+    "--config",
+    "/var/folders/gx/6k0w47s56vjbct0gh34cc9s00000gn/T/live_bench_myov2_p5/main.yaml"
+  ],
+  "config_overrides": [],
+  "input": "blackhole",
+  "signal": "drums",
+  "host": {
+    "machine": "arm64",
+    "cpu_count": 8
+  },
+  "phases": [
+    {
+      "phase": "idle",
+      "wall_s": 20.018034624983557,
+      "cpu_pct_one_core": 2.3956748251472963,
+      "rss_mb": 20.28125,
+      "num_threads": 10,
+      "loadavg_1m_start_end": [
+        2.05,
+        2.1
+      ],
+      "threads_cpu_pct": {
+        "6:97R": 1.4,
+        "7:97R": 0.75,
+        "8:97R": 0.2
+      },
+      "osc": {
+        "/audio/bpm": {
+          "rate_hz": 187.4809425754544,
+          "bytes": 20,
+          "interarrival_ms": {
+            "n": 3752,
+            "mean": 5.33331738648264,
+            "p50": 5.3319784929044545,
+            "p95": 5.416979652363807,
+            "p99": 5.503902214113621,
+            "max": 18.649875069968402
+          }
+        },
+        "/audio/fft": {
+          "rate_hz": 93.76544876475563,
+          "bytes": 656,
+          "interarrival_ms": {
+            "n": 1876,
+            "mean": 10.666631352365401,
+            "p50": 10.665354551747441,
+            "p95": 10.75062548625283,
+            "p99": 10.897437750827521,
+            "max": 26.78783400915563
+          }
+        },
+        "/audio/lmh": {
+          "rate_hz": 187.4809425754544,
+          "bytes": 32,
+          "interarrival_ms": {
+            "n": 3752,
+            "mean": 5.333327825139237,
+            "p50": 5.33181254286319,
+            "p95": 5.404264706885442,
+            "p99": 5.47051427536644,
+            "max": 18.636166001670063
+          }
+        },
+        "/audio/meta": {
+          "rate_hz": 0.9990990811375134,
+          "bytes": 60
+        },
+        "/audio/onset/high": {
+          "rate_hz": 0.9990990811375134,
+          "bytes": 28
+        },
+        "/audio/onset/low": {
+          "rate_hz": 1.998198162275027,
+          "bytes": 28
+        },
+        "/audio/onset/mid": {
+          "rate_hz": 1.998198162275027,
+          "bytes": 28
+        }
+      },
+      "kick_to_onset_low_ms": {
+        "n": 40,
+        "mean": 15.310808317735791,
+        "p50": 15.353437571320683,
+        "p95": 17.243698163656518,
+        "p99": 17.26542624644935,
+        "max": 17.266790848225355,
+        "kicks": 41
+      },
+      "server_status": {
+        "n": 1,
+        "cb": {
+          "avg_ms_median": 0.0046640625,
+          "p95_ms_median": 0.009,
+          "p95_ms_max": 0.009,
+          "load_pct_median": 0.087451171875
+        },
+        "dsp": {
+          "avg_ms_median": 0.046265625,
+          "p95_ms_median": 0.114,
+          "p95_ms_max": 0.114,
+          "load_pct_median": 0.8674804687500001
+        },
+        "fft": {
+          "avg_ms_median": 0.052203125,
+          "p95_ms_median": 0.112,
+          "p95_ms_max": 0.112,
+          "load_pct_median": 0.4894042968750001
+        },
+        "ws": {
+          "avg_ms_median": 0.03509677419354839,
+          "p95_ms_median": 0.053,
+          "p95_ms_max": 0.053,
+          "load_pct_median": 0.21058064516129033
+        },
+        "lmh_e2e": {
+          "avg_ms_median": 0.0594765625,
+          "p95_ms_median": 0.137,
+          "p95_ms_max": 0.137,
+          "load_pct_median": 1.115185546875
+        },
+        "fft_e2e": {
+          "avg_ms_median": 0.06609375,
+          "p95_ms_median": 0.138,
+          "p95_ms_max": 0.138,
+          "load_pct_median": 0.6196289062500001
+        },
+        "cb_overruns": 0,
+        "dsp_drops": 0,
+        "fft_drops": 0,
+        "drop_events": 0,
+        "audio_stalled_any": false,
+        "block_period_ms": 5.333333333333333,
+        "hop_period_ms": 10.666666666666666
+      }
+    },
+    {
+      "phase": "ui",
+      "wall_s": 20.01318058394827,
+      "cpu_pct_one_core": 3.114020249734088,
+      "rss_mb": 20.3125,
+      "num_threads": 10,
+      "loadavg_1m_start_end": [
+        2.97,
+        2.6
+      ],
+      "threads_cpu_pct": {
+        "6:97R": 1.35,
+        "7:97R": 0.8,
+        "0:31T": 0.75,
+        "8:97R": 0.25
+      },
+      "osc": {
+        "/audio/bpm": {
+          "rate_hz": 187.5264146174808,
+          "bytes": 20,
+          "interarrival_ms": {
+            "n": 3752,
+            "mean": 5.332756285450912,
+            "p50": 5.3323329775594175,
+            "p95": 5.428635596763343,
+            "p99": 5.686539201997219,
+            "max": 18.97512504365295
+          }
+        },
+        "/audio/fft": {
+          "rate_hz": 93.78819084386132,
+          "bytes": 656,
+          "interarrival_ms": {
+            "n": 1876,
+            "mean": 10.665506996246162,
+            "p50": 10.665228997822851,
+            "p95": 10.765093698864803,
+            "p99": 11.023572733392939,
+            "max": 18.982209032401443
+          }
+        },
+        "/audio/lmh": {
+          "rate_hz": 187.5264146174808,
+          "bytes": 32,
+          "interarrival_ms": {
+            "n": 3752,
+            "mean": 5.332765458432187,
+            "p50": 5.332687986083329,
+            "p95": 5.409953818889335,
+            "p99": 5.576032191747798,
+            "max": 18.95324990618974
+          }
+        },
+        "/audio/meta": {
+          "rate_hz": 0.9993414048360288,
+          "bytes": 60
+        },
+        "/audio/onset/high": {
+          "rate_hz": 0.9993414048360288,
+          "bytes": 28
+        },
+        "/audio/onset/low": {
+          "rate_hz": 1.9986828096720577,
+          "bytes": 28
+        },
+        "/audio/onset/mid": {
+          "rate_hz": 1.9986828096720577,
+          "bytes": 28
+        }
+      },
+      "kick_to_onset_low_ms": {
+        "n": 40,
+        "mean": 15.255177952349186,
+        "p50": 15.33452101284638,
+        "p95": 17.27396582136862,
+        "p99": 17.33121404191479,
+        "max": 17.367207910865545,
+        "kicks": 42
+      },
+      "ws_rates_hz": {
+        "meta": 0.0,
+        "devices": 0.0,
+        "presets": 0.0,
+        "server_status": 4.996707024180144,
+        "snapshot": 60.010451360403536,
+        "fft_binary": 60.010451360403536
+      },
+      "server_status": {
+        "n": 100,
+        "cb": {
+          "avg_ms_median": 0.005625,
+          "p95_ms_median": 0.01,
+          "p95_ms_max": 0.013,
+          "load_pct_median": 0.10546875
+        },
+        "dsp": {
+          "avg_ms_median": 0.06343359375,
+          "p95_ms_median": 0.129,
+          "p95_ms_max": 0.175,
+          "load_pct_median": 1.1893798828125002
+        },
+        "fft": {
+          "avg_ms_median": 0.06903125,
+          "p95_ms_median": 0.125,
+          "p95_ms_max": 0.163,
+          "load_pct_median": 0.64716796875
+        },
+        "ws": {
+          "avg_ms_median": 0.024125,
+          "p95_ms_median": 0.0455,
+          "p95_ms_max": 0.062,
+          "load_pct_median": 0.14475
+        },
+        "lmh_e2e": {
+          "avg_ms_median": 0.07958984375,
+          "p95_ms_median": 0.152,
+          "p95_ms_max": 0.198,
+          "load_pct_median": 1.4923095703125
+        },
+        "fft_e2e": {
+          "avg_ms_median": 0.08545312499999999,
+          "p95_ms_median": 0.149,
+          "p95_ms_max": 0.177,
+          "load_pct_median": 0.8011230468749999
+        },
+        "cb_overruns": 0,
+        "dsp_drops": 0,
+        "fft_drops": 0,
+        "drop_events": 0,
+        "audio_stalled_any": false,
+        "block_period_ms": 5.333333333333333,
+        "hop_period_ms": 10.666666666666666
+      }
+    }
+  ],
+  "meta": {
+    "sr": 48000,
+    "blocksize": 256,
+    "n_fft_bins": 128,
+    "fft_window_size": 1024,
+    "filter_order": 2,
+    "ws_snapshot_hz": 60,
+    "hop": 512
+  }
+}

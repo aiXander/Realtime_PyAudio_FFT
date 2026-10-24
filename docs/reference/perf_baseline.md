@@ -11,43 +11,42 @@ These are the measured load and latency of the Python engine on the M2. The same
 
 The stage names are the shared vocabulary: the Rust `criterion` benches should use the same ones.
 
-## Live, M2 (8 cores), 48 kHz / 256-sample blocks, BlackHole drum loop, 30 s per phase (2026-10-24)
+## Live: Python vs Rust, M2, 48 kHz / 256-sample blocks, BlackHole drum loop (2026-10-24)
 
-| Config | Phase | CPU (% 1 core) | Busiest threads (%) | DSP avg / p95 (µs) | FFT avg / p95 (µs) | lmh e2e avg / p95 (µs) | `/audio/lmh` gap p99 / max (ms) | kick→onset p50 / p95 (ms) | drops dsp / fft |
+Median of 3 interleaved 30 s runs per cell (`compare_queue`-style: python default → rust default → python heavy → rust heavy, ×3). Rust = the shipped build (real-time workers). Heavy = `--set fft.n_bins=1024 --set dsp.filter_order=8 --set fft.window_size=4096 --set fft.hop=512 --set ws.snapshot_hz=120`. Machine load average 1.3–3.4 (other agents). Raw JSON: `tools/bench/results/compare_2026-10-24/`.
+
+| Config | Phase | Engine | CPU (% 1 core) | RSS (MB) | DSP avg / p95 (µs) | FFT avg / p95 (µs) | lmh e2e avg / p95 (µs) | `/audio/lmh` gap p50 / p99 (ms) | kick→onset p50 / p95 (ms) |
 |---|---|---|---|---|---|---|---|---|---|
-| default (example config: 128 bins, 1024/512, order 2) | idle | **8.5** | workers 3.5 + 3.3, CoreAudio IO 1.6 | 264 / 662 | 403 / 893 | 588 / 1094 | 11.0 / 44 | 18.3 / 22.8 | 0 / 0 |
-| default | ui | **11.8** | workers 3.7 + 3.4, main (asyncio) 3.0, IO 1.7 | 313 / 719 | 480 / 847 | 717 / 1316 | 12.0 / **74** | 18.0 / 23.0 | **26 / 10** |
-| heavy (1024 bins, 4096/512, order 8, WS 120 Hz) | idle | 12.8 | workers 6.8 + 4.2, IO 1.6 | 219 / 432 | 721 / 1476 | 455 / 796 | 10.9 / 72 | 33.2 / 37.8 | 0 / 0 |
-| heavy | ui | 17.6 | workers 6.1 + 3.9, main 6.0, IO 1.6 | 252 / 469 | 759 / 1357 | 535 / 1023 | 11.0 / 55 | 33.2 / 37.7 | 9 / 4 |
+| default | idle | Python | 8.7 | 111 | 218 / 604 | 339 / 753 | 498 / 1006 | 1.20 / 10.96 | 18.5 / 23.0 |
+| default | idle | Rust | 2.4 | 20 | 65 / 123 | 72 / 128 | 82 / 145 | 5.33 / 5.49 | 15.3 / 17.5 |
+| default | ui | Python | **12.1** | 111 | 291 / 688 | 418 / 756 | 622 / 1129 | 1.49 / 10.95 | 18.3 / 23.2 |
+| default | ui | Rust | **3.0** | 20 | 62 / 126 | 69 / 118 | 79 / 153 | 5.33 / 5.59 | 15.4 / 17.5 |
+| heavy | idle | Python | 13.3 | 112 | 242 / 550 | 792 / 1662 | 506 / 1063 | 2.77 / 10.84 | 33.5 / 37.7 |
+| heavy | idle | Rust | 4.3 | 21 | 54 / 116 | 185 / 421 | 68 / 136 | 5.33 / 5.48 | 29.0 / 31.3 |
+| heavy | ui | Python | 20.3 | 112 | 289 / 619 | 920 / 1766 | 617 / 1222 | 1.86 / 10.95 | 32.8 / 37.3 |
+| heavy | ui | Rust | 5.3 | 21 | 70 / 130 | 238 / 446 | 86 / 158 | 5.33 / 5.58 | 29.0 / 31.3 |
 
-**Rust engine** (`engine/target/release/audio-server`, same bench, same machine, same day; JSON `tools/bench/results/live_rust_{default,heavy}.json`). Thread keys are `ps -M` ordinal:priority; the two busiest `31T` are the DSP / FFT workers, `0:31T` the main (tokio) thread, `97R` the CoreAudio IO thread.
+- **Rust vs Python, default + UI open:** CPU 3.0 vs 12.1% (4×), RSS 20 vs 111 MB, block→OSC 79 vs 622 µs avg (8×), DSP/FFT stage 4–6× lower live. Heavy: 5.3 vs 20.3% CPU.
+- **The previous single-run Rust numbers (1.8 / 2.4% idle / UI) were a quieter moment, not a regression:** an interleaved A/B of the pre-review QoS build, the real-time build and the final build gave the same 2.1–2.5% idle / 2.6–3.1% UI for all three (`compare_2026-10-24/ab_cpu/`).
+- **No drops in any 30 s run, either engine, this time.** Python's tails show in the soak below (and in 26/10 drops in an earlier 30 s UI run).
+- **Delivery:** Rust gets one block per 5.33 ms from CoreAudio (fixed 256-frame buffer); Python gets bursts of 2 blocks every ~10.7 ms (gap p50 ~1.5 ms, p99 ~11 ms). That is also why kick→onset is ~3 ms lower in Rust; the heavy config's extra ~14 ms is the order-8 filters' group delay, identical in both.
+- Thread keys (`ps -M` ordinal:priority): Rust workers show `97R` (real-time, same class as the CoreAudio IO thread), main `0:31T`.
 
-| Config | Phase | CPU (% 1 core) | Busiest threads (%) | DSP avg / p95 (µs) | FFT avg / p95 (µs) | lmh e2e avg / p95 (µs) | `/audio/lmh` gap p99 / max (ms) | kick→onset p50 / p95 (ms) | drops dsp / fft |
-|---|---|---|---|---|---|---|---|---|---|
-| default | idle | **1.8** | workers 1.0 + 0.6, IO 0.2 | 26 / 43 | 28 / 39 | 38 / 66 | 6.3 / 11.3 | 15.4 / 17.5 | 0 / 0 |
-| default | ui | **2.4** | workers 1.1 + 0.6, main 0.6, IO 0.2 | 46 / 104 | 51 / 100 | 74 / 144 | 6.2 / 13.1 | 15.3 / 17.5 | 0 / 0 |
-| heavy | idle | 3.0 | workers 1.7 + 1.2, IO 0.2 | 72 / 140 | 201 / 329 | 118 / 179 | 6.5 / 19.4 | 28.7 / 30.8 | 0 / 0 |
-| heavy | ui | 4.3 | workers 1.8 + 1.3, main 1.0, IO 0.1 | 60 / 124 | 171 / 326 | 108 / 178 | 6.9 / 15.1 | 29.2 / 30.9 | 0 / 0 |
+**10-minute soaks (default config, UI streaming, 600 s).** JSON: `compare_2026-10-24/soak_*.json` (+ the earlier `live_rust_soak_qos.json`, `live_rust_soak_rt_experiment.json`).
 
-- **vs Python:** ~1/4 of the CPU (2.4% vs 11.8% with a UI client), stage times ~6–10× lower live, no tail stalls and no drops. The live DSP/FFT numbers include the OSC `sendto`s, which is why they sit above the offline criterion numbers below.
-- **Delivery and latency:** CoreAudio honours the fixed 256-frame buffer for the Rust stream, so blocks arrive one per 5.33 ms (`/audio/lmh` p50 5.33 ms) instead of Python's 2-block bursts, and kick→onset is ~3 ms lower. The heavy config's extra ~14 ms is still the order-8 group delay.
-
-**10-minute soaks (Rust, default config, ui phase, 600 s).** JSON: `live_rust_soak_qos.json`, `live_rust_soak_rt_experiment.json`.
-
-| Worker scheduling | Runs | drops dsp / fft | worst block→processing lag | Notes |
+| Engine / worker scheduling | Runs | drops dsp / fft per run | worst p95 block→OSC | CPU |
 |---|---|---|---|---|
-| QoS USER_INITIATED (the reference's `priority.py` policy, what ships) | 3 | 16 / 6, 6 / 2, 48 / 21 | 27 ms | load avg 2–4 from other processes; each run had 1–5 drop events |
-| time-constraint (macOS real-time), experiment only, not shipped | 1 | **0 / 0** | **0.09 ms** | same machine and load |
+| Python (reference) | 1 | 31 / 14 (3 events) | 14.2 ms | 11.2% |
+| Rust, QoS USER_INITIATED (the reference's policy) | 5 | 16 / 6, 6 / 2, 48 / 21, 35 / 14, 5 / 0 | up to 27 ms | 2.6–3.2% |
+| **Rust, real-time (what ships)** | 4 | **0 / 0 every run** | 0.09–0.24 ms | 2.4–3.1% |
+
+- The QoS and real-time A/B runs were interleaved (QoS, RT, Python, QoS, RT) at load average 1.5–3; the fourth real-time run is the shipped binary, the earlier one the first experiment.
 
 - **Cause, instrumented:** the CoreAudio callback was perfectly regular (max inter-callback gap 5.46 ms, no bursts) while both workers occasionally went unscheduled for ~30–70 ms; the ported backlog policy then skips blocks and counts them. A scheduling-class problem, not DSP cost. Whether to adopt real-time worker scheduling is an open question in the port plan.
 - **The bench's `/audio/lmh` "max gap"** includes stalls of its own Python receiver thread: the real-time run still printed a 67 ms max gap while every block was processed within 90 µs. Use the drop counters and `lmh_e2e` for server-side tails.
 
-How to read the table:
-
-- **Normal delivery.** CoreAudio delivers BlackHole input as bursts of 2 blocks every ~10.7 ms. So an `/audio/lmh` inter-arrival p50 of ~2 ms and a p95 of ~10.7 ms is normal. The expected rate is 187.5 Hz (lmh) and 93.75 Hz (fft).
-- **Tail failures.** The **max gaps (44–74 ms) and the drops in the ui phase are real Python tail failures**, reproduced on a quiet machine. The pre-refactor run, `python_prerefactor_default.json`, shows them too. They are rare stalls: a 74 ms gap means ~14 blocks late, and the backlog policy then skips blocks, which shows up as drops.
-- **Kick → onset latency.** This includes the BlackHole/CoreAudio input buffering, the DSP and the onset detector's own rise time. The heavy config's +15 ms comes from the **group delay of the order-8 bandpass**. That's algorithmic and will be identical in Rust, so compare engines at the same config.
-- **Pre/post refactor.** Before vs after the `process_block` / `process_hop` extraction: 8.6 → 8.5% idle and 10.8 → 11.8% ui, which is within run-to-run noise. The outputs are bit-identical.
+- **Python's tails** (max `/audio/lmh` gaps of 44–74 ms and ~25 / 10 drops in an earlier 30 s UI run, reproduced on a quiet machine and in `python_prerefactor_default.json`) are GIL/thread hand-off stalls; the backlog policy then skips blocks.
+- **Pre/post refactor (Python).** Before vs after the `process_block` / `process_hop` extraction: 8.6 → 8.5% idle and 10.8 → 11.8% ui, within run-to-run noise; outputs bit-identical.
 
 ## Offline per stage, Python (µs, mean / p99), quiet machine
 
@@ -65,6 +64,8 @@ How to read the table:
 - **WS encodes:** snapshot JSON 5 µs, meta JSON 19 µs, binary FFT 0.7 µs.
 
 ## Offline per stage, Rust `dsp` crate (µs, criterion mean)
+
+Re-run on 2026-10-24 for the comparison (`compare_2026-10-24/stages_{python,rust}.json`, the same configs): every Rust cell within noise of the table below; Python's stage bench likewise (default DSP block 28.5 µs, FFT hop 52.5 µs).
 
 `cd engine && cargo bench -p dsp --bench stages`: same stage names and configs as the Python table above. The configs and the drum signal come from the golden cases. Measured 2026-10-24 on the M2 under load from other agents (load average 5–20). Each cell is the best mean over 2–3 runs, so treat ±30% as noise; the strength1 post-proc number is one such outlier. `power→log-bin→dB` is derived as hop total − window+rfft − post-proc, as in Python.
 
@@ -86,5 +87,5 @@ How to read the table:
 - **The work is cheap.** Single-threaded, a full Python DSP block is ~29 µs and a full FFT hop ~53 µs, about 0.5% of a core each. The per-stage numerics are already close to their floor.
 - **Contention is the expensive part.** The live server spends ~10× that per stage (264 / 403 µs average) and 8.5–12% of a core in total. The extra goes to GIL hand-offs between the CoreAudio callback thread, the two workers and the asyncio thread; to the 0.5 ms switch interval; and to thread wake-ups. It also produces the rare 50–75 ms stalls that cause drops.
 - **What Rust should fix.** The Rust engine's main win is real parallelism and no GIL, which should remove both the contention and those stalls. The per-stage speedup is secondary.
-- **Targets (M2, default config, UI phase):** CPU 2.4% vs Python's 11.8% and `/audio/lmh` max gap 13 ms in the 30 s runs: met. DSP p95 live is ~100 µs rather than single-digit because it includes the OSC sends and the thread wake-up; the pure DSP is 9.4 µs (criterion, below). **Zero drops over a 10-minute soak: not met by the pure port** (below).
+- **Targets (M2, default config, UI phase):** CPU 3.0% vs Python's 12.1% (interleaved medians): met. DSP p95 live is ~100 µs rather than single-digit because it includes the OSC sends and the thread wake-up; the pure DSP is 9.4 µs (criterion, above). **Zero drops over a 10-minute soak: met with real-time worker scheduling** (4 soaks, 0 drops; the pure port's QoS policy dropped in every soak, above).
 - **Pi.** The Pi 4 has no baseline yet. It's measured in phase 4 of the plan.

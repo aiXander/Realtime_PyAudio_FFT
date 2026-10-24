@@ -44,7 +44,7 @@ The binary finds the repo (for `configs/` and `ui/`) by walking up from its own 
 | `ws.rs` | `io/ws_server.py` (`_Client`, connection handling) | the three lanes, axum upgrade handler, binary FFT encoder |
 | `http.rs` | `io/http_server.py` | `ServeDir` + `Cache-Control: no-cache` + forced MIME types |
 | `shared.rs` | perf arrays, `_errlog.py` | `now_ns` (CLOCK_MONOTONIC, the e2e clock), `PerfRing` + stats, rate-limited worker error log |
-| `priority.rs` | `priority.py` | QoS USER_INITIATED (macOS) / nice −5 (Linux) |
+| `priority.rs` | `priority.py` | main thread: QoS USER_INITIATED (macOS) / nice −5 (Linux), as the reference; workers: real-time class (below) |
 
 ## Decisions and why
 
@@ -56,12 +56,34 @@ The binary finds the repo (for `configs/` and `ui/`) by walking up from its own 
 - **Worker panics** are caught per wake (`catch_unwind`), logged at most once a second, and the read pointer advances like Python's `except` branch.
 - **YAML** via serde-saphyr with non-finite floats parsed as strings, so `.inf` is "must be numeric" (invalid, fatal) rather than a parse error (corrupt). Output differs cosmetically from PyYAML (`0.00003213…` vs `3.21…e-05`, quoted `"127.0.0.1"`) and round-trips with identical values/types both ways.
 
+## Worker scheduling: real-time class (deviation from the reference)
+
+`priority::realtime_current_thread`, called once at worker start. The main thread keeps the reference policy (`boost_current_thread`).
+
+- **Why.** Under the reference's QoS `USER_INITIATED` the workers were occasionally left unscheduled for 30–70 ms on this shared M2 while the CoreAudio callback stayed perfectly regular (instrumented: max inter-callback gap 5.46 ms), so the ported backlog policy skipped blocks. Five 10-minute QoS soaks all dropped (16/6, 6/2, 48/21, 35/14, 5/0 dsp/fft); three real-time soaks (two A/B runs interleaved with the QoS ones, plus the shipped binary) dropped nothing, worst p95 block→OSC 0.20–0.24 ms vs up to 9 ms. No CPU cost (interleaved A/B: same 2.1–3.1%). Numbers: [`perf_baseline.md`](perf_baseline.md).
+- **macOS:** Mach `THREAD_TIME_CONSTRAINT_POLICY`, no privileges. `period` = the worker's cadence at spawn (block period for DSP, hop period for FFT; clamped 1–100 ms), `computation` = period/4, `constraint` = period, `preemptible` = 1 so CoreAudio's IO thread always wins. A wake that runs past `computation` (a catch-up over several blocks, the heavy config) isn't an error: the thread just becomes preemptible by other real-time threads for the rest of that period. The period is a hint and is not re-applied when a hot-switch / FFT reconfigure changes the cadence. `ps -M` shows the workers at priority `97R` (the IO thread's class).
+- **Refused** (any kern_return ≠ success): one warning, the thread stays at QoS `USER_INITIATED`. `priority::tests` checks the kernel accepts the periods we use.
+- **Linux:** `SCHED_FIFO` priority 10 (above normal threads, below kernel / audio-server RT threads) when `RLIMIT_RTPRIO` / `CAP_SYS_NICE` allow, else the reference's nice −5. Type-checked for `aarch64-unknown-linux-gnu`, **not run on hardware** (phase 4).
+- **Not done: joining CoreAudio's IO workgroup (`os_workgroup`).** Apple's recommended mechanism for auxiliary audio threads, but cpal doesn't expose the device's workgroup (it would need raw CoreAudio FFI from the device UID), a thread must already be real-time to join, and our workers are decoupled from the IO cycle by the ring (the FFT runs at hop rate). Revisit only if real-time scheduling alone stops being enough.
+
+## Robustness beyond the reference (2026-10-24 review)
+
+Outward behaviour is unchanged; these close gaps the Python server covered through its libraries or never had.
+
+- **WS liveness** (`ws.rs`; Python gets it from `websockets`): a ping every 20 s, a client that sends nothing back (pong or message) within 20 s of a ping is dropped; one send stuck > 20 s drops the client; the control-lane overflow close interrupts a stuck send (before, a peer that stopped reading stayed connected and kept the broadcast loop from idling).
+- **Inbound backpressure:** ≤ 64 messages per client waiting for the control loop, then that connection stops reading (Python awaits each handler before reading the next frame).
+- **Handler panics** are caught around `dispatch` and answered `internal: …` + meta, like the reference's catch-all; the server keeps running.
+- **`peak_smear_oct` is clamped to ≤ 4 octaves** (`validate.rs`, Rust only; the UI slider stops at 2). The reference only required a finite value, so `1e300` overflowed the kernel radius (panic) and `~1e9` tried to allocate ~800 GB (abort).
+- **Device probe serialised:** while a probe runs, `set_device` / `list_devices` wait in a queue and are replayed in order when it finishes (the reference's `device_switch_lock`); a probe that panics still answers, so `switch_busy` can't stick. The probe also falls back to the device's integer format (I16/I32) like the main stream.
+- **`cb_overruns` on macOS:** cpal's CoreAudio backend never reports `Xrun`, so an overrun is counted when a buffer's host timestamp is > 1.5× the previous buffer's duration after it (dropped input). ALSA keeps cpal's `Xrun`.
+- **Phantom `fft_drops` fixed (both engines):** the catch-up skip right after an FFT read-pointer rewind (reconfigure / stream reset) isn't counted; `workers::tests::fft_reconfigure_counts_no_phantom_drops` (998 phantom drops without the fix).
+- **Presets list only loadable names**, so `main.example` (whose dot `load_preset` rejects) no longer shows in the UI.
+- **The "could not open input" hint lists the inputs** (`0 = BlackHole 2ch, 1 = MacBook Pro Microphone`) instead of pointing at `python -m sounddevice`.
+- Shutdown waits 200 ms so the queued WS Close frames go out.
+
 ## Reference quirks ported on purpose (pure port)
 
-- **`--no-ws` lands on the cfg**, so anything persisted during such a run writes `ws.enabled: false`. Open question for Xander in the plan.
-- **Any FFT reconfigure inflates `fft_drops`.** The read pointer resets to 0, and the next wake counts every hop since stream start as skipped (Python: 293 after one `set_n_fft_bins` at ~5 s uptime; it grows with uptime). Logged under "After cutover" in the plan.
-- **`main.example` is listed as a preset** when the config dir is `configs/` (the reference globs every `*.yaml` except `main`).
-- The startup "could not open input" hint still says `uv run python -m sounddevice`.
+- **`--no-ws` lands on the cfg**, so anything persisted during such a run writes `ws.enabled: false`. Decided by Xander: keep.
 
 ## How it was verified (2026-10-24, M2)
 
@@ -71,7 +93,9 @@ The binary finds the repo (for `configs/` and `ui/`) by walking up from its own 
 | Live numerics | Python and Rust side by side on the same BlackHole drum loop, 30 s of `/audio/lmh` each | same packet count; per-band mean / p10 / p50 / p90 within 0.001; BPM median 119.68 both |
 | YAML both ways | Python `load_config` on Rust-written main.yaml + preset; Rust `load_config` on the Python goldens (`config::tests`) | identical values and types |
 | Load / drops | `live_bench.py` default + heavy (30 s phases) | CPU ~1/4 of Python, zero drops; [`perf_baseline.md`](perf_baseline.md) |
-| 10-min soak | `live_bench.py --phases ui --duration 600` | pure port: a few drop events per run from worker scheduling stalls; with an experimental real-time scheduling class: 0 drops (open question in the plan) |
-| UI | the unmodified UI in Chrome: every slider, toggles, 2D/3D + styles, palette, raw dB, presets, device switch/refresh/probe, band-edge drag, layout drag, tab hide/show | all round-trip through meta; hidden tab idles the WS loop |
+| 10-min soak | `live_bench.py --phases ui --duration 600`, QoS and real-time interleaved | QoS: every run dropped; real-time: 3 × 0 drops (Worker scheduling above) |
+| Python vs Rust | `live_bench.py` default + heavy × 3 interleaved rounds, both offline stage benches | [`perf_baseline.md`](perf_baseline.md); raw JSON `tools/bench/results/compare_2026-10-24/` |
+| Robustness fixes | live against a running server: a client that stops reading (dropped ~40 s in: buffers fill, then the 20 s send timeout), a silent paused client (dropped at 40 s), `set_n_fft_bins` (0 `fft_drops`, both engines), `peak_smear_oct: 1e300` (clamped to 4) | as designed |
+| UI | the unmodified UI in Chrome: every slider, toggles, 2D/3D + styles, palette, raw dB, presets, device switch/refresh/probe, band-edge drag, layout drag, tab hide/show; re-run after the review fixes (smear, raw dB, preset list + load, 3D, Performance panel, a browser tab surviving the ping keepalive) | all round-trip through meta; hidden tab idles the WS loop |
 
-Not verified here (needs hardware hands): physical USB mic unplug/replug recovery, and Linux/ALSA.
+Not verified here (needs hardware hands): physical USB mic unplug/replug recovery, Linux/ALSA (incl. `SCHED_FIFO`), and the probe-vs-`set_device` queueing live (a probe opens every input, which would have flipped a connected Bluetooth speaker into headset mode).

@@ -1,0 +1,162 @@
+{
+  "label": "soak_python_1",
+  "cmd": [
+    "/Users/xandersteenbrugge/Documents/GitHub/Realtime_PyAudio_FFT-rust-engine/.venv/bin/python",
+    "-m",
+    "server.main",
+    "--config",
+    "/var/folders/gx/6k0w47s56vjbct0gh34cc9s00000gn/T/live_bench_71s141ps/main.yaml"
+  ],
+  "config_overrides": [],
+  "input": "blackhole",
+  "signal": "drums",
+  "host": {
+    "machine": "arm64",
+    "cpu_count": 8
+  },
+  "phases": [
+    {
+      "phase": "ui",
+      "wall_s": 600.0241199580487,
+      "cpu_pct_one_core": 11.207624947594063,
+      "rss_mb": 111.375,
+      "num_threads": 9,
+      "loadavg_1m_start_end": [
+        1.46,
+        2.01
+      ],
+      "threads_cpu_pct": {
+        "5:31T": 3.64,
+        "6:31T": 3.25,
+        "0:31T": 2.75,
+        "8:97R": 1.56
+      },
+      "osc": {
+        "/audio/bpm": {
+          "rate_hz": 187.44413142568922,
+          "bytes": 20,
+          "interarrival_ms": {
+            "n": 112470,
+            "mean": 5.334871239370447,
+            "p50": 1.3684994773939252,
+            "p95": 10.743439657380804,
+            "p99": 11.022874969057739,
+            "max": 62.67241598106921
+          }
+        },
+        "/audio/fft": {
+          "rate_hz": 93.72456561234883,
+          "bytes": 656,
+          "interarrival_ms": {
+            "n": 56236,
+            "mean": 10.66954771187487,
+            "p50": 10.66450000507757,
+            "p95": 11.012625560397282,
+            "p99": 11.431422678288072,
+            "max": 62.69408296793699
+          }
+        },
+        "/audio/lmh": {
+          "rate_hz": 187.44413142568922,
+          "bytes": 32,
+          "interarrival_ms": {
+            "n": 112470,
+            "mean": 5.334871555374854,
+            "p50": 1.5164375654421747,
+            "p95": 10.704147518845275,
+            "p99": 10.938384785549715,
+            "max": 62.66791699454188
+          }
+        },
+        "/audio/meta": {
+          "rate_hz": 0.9999598016858883,
+          "bytes": 60
+        },
+        "/audio/onset/high": {
+          "rate_hz": 0.9999598016858883,
+          "bytes": 28
+        },
+        "/audio/onset/low": {
+          "rate_hz": 1.9999196033717765,
+          "bytes": 28
+        },
+        "/audio/onset/mid": {
+          "rate_hz": 1.9999196033717765,
+          "bytes": 28
+        }
+      },
+      "kick_to_onset_low_ms": {
+        "n": 1200,
+        "mean": 18.8302384041405,
+        "p50": 19.04614717932418,
+        "p95": 23.424001975217834,
+        "p99": 23.953273843508214,
+        "max": 28.63687404897064,
+        "kicks": 1201
+      },
+      "ws_rates_hz": {
+        "meta": 0.0,
+        "devices": 0.0,
+        "presets": 0.0,
+        "server_status": 4.978133212726247,
+        "snapshot": 59.96592270743324,
+        "fft_binary": 59.96258950809429
+      },
+      "server_status": {
+        "n": 2987,
+        "cb": {
+          "avg_ms_median": 0.0305244921875,
+          "p95_ms_median": 0.056042,
+          "p95_ms_max": 0.091,
+          "load_pct_median": 0.572334228515625
+        },
+        "dsp": {
+          "avg_ms_median": 0.2616315,
+          "p95_ms_median": 0.655834,
+          "p95_ms_max": 1.089542,
+          "load_pct_median": 4.905590625
+        },
+        "fft": {
+          "avg_ms_median": 0.38562175,
+          "p95_ms_median": 0.739834,
+          "p95_ms_max": 1.274209,
+          "load_pct_median": 3.61520390625
+        },
+        "ws": {
+          "avg_ms_median": 0.06230203125,
+          "p95_ms_median": 0.109667,
+          "p95_ms_max": 0.349,
+          "load_pct_median": 0.37381218749999995
+        },
+        "lmh_e2e": {
+          "avg_ms_median": 0.5753926015625,
+          "p95_ms_median": 1.088209,
+          "p95_ms_max": 14.160917,
+          "load_pct_median": 10.788611279296877
+        },
+        "fft_e2e": {
+          "avg_ms_median": 0.45187690625,
+          "p95_ms_median": 0.819375,
+          "p95_ms_max": 15.90525,
+          "load_pct_median": 4.236345996093751
+        },
+        "cb_overruns": 0,
+        "dsp_drops": 31,
+        "fft_drops": 14,
+        "drop_events": 3,
+        "audio_stalled_any": false,
+        "block_period_ms": 5.333333333333333,
+        "hop_period_ms": 10.666666666666666
+      }
+    }
+  ],
+  "meta": {
+    "sr": 48000,
+    "blocksize": 256,
+    "n_fft_bins": 128,
+    "fft_window_size": 1024,
+    "filter_order": 2,
+    "ws_snapshot_hz": 60,
+    "hop": 512
+  }
+}

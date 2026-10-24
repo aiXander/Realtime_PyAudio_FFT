@@ -7,18 +7,31 @@
 //!   1. control — FIFO, never dropped; > 1024 queued closes the client (1008);
 //!   2. status  — latest-only `server_status`;
 //!   3. stream  — snapshots + binary FFT, drop-oldest, max 4.
+//!
+//! Liveness (the reference gets these from the `websockets` library): a
+//! ping every 20 s, and a client that sends nothing back (no pong, no
+//! message) within 20 s of a ping is dropped; a single send stuck for 20 s
+//! drops the client; an overflow close fires even while a send is stuck.
+//! Inbound: at most `INBOUND_MAX` messages per client wait for the control
+//! loop before the connection stops reading (the reference awaits each
+//! handler before reading the next frame).
 
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::shared::now_ns;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{Notify, mpsc};
 
 pub const STREAM_QUEUE_MAX: usize = 4;
 pub const CONTROL_QUEUE_MAX: usize = 1024;
+pub const INBOUND_MAX: usize = 64;
+const PING_EVERY: Duration = Duration::from_secs(20);
+const SEND_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Inbound to the control loop.
 pub enum Event {
@@ -44,6 +57,13 @@ pub struct Client {
     pub id: u64,
     lanes: Mutex<Lanes>,
     notify: Notify,
+    /// Overflow close: interrupts a stuck send.
+    kill: Notify,
+    /// `now_ns` of the last frame received (any kind, pongs included).
+    last_rx_ns: AtomicU64,
+    /// Inbound messages queued for / being handled by the control loop.
+    inflight: AtomicUsize,
+    inflight_done: Notify,
 }
 
 enum Next {
@@ -54,7 +74,15 @@ enum Next {
 
 impl Client {
     fn new(id: u64) -> Self {
-        Client { id, lanes: Mutex::new(Lanes::default()), notify: Notify::new() }
+        Client {
+            id,
+            lanes: Mutex::new(Lanes::default()),
+            notify: Notify::new(),
+            kill: Notify::new(),
+            last_rx_ns: AtomicU64::new(now_ns()),
+            inflight: AtomicUsize::new(0),
+            inflight_done: Notify::new(),
+        }
     }
 
     fn lanes(&self) -> std::sync::MutexGuard<'_, Lanes> {
@@ -72,6 +100,7 @@ impl Client {
             tracing::warn!("ws client control queue overflow ({} msgs); disconnecting", l.control.len());
             drop(l);
             self.notify.notify_one();
+            self.kill.notify_one();
             return;
         }
         l.control.push_back(msg);
@@ -96,6 +125,12 @@ impl Client {
         l.stream.push_back(msg);
         drop(l);
         self.notify.notify_one();
+    }
+
+    /// The control loop finished with one inbound message from this client.
+    pub fn message_done(&self) {
+        self.inflight.fetch_sub(1, Ordering::AcqRel);
+        self.inflight_done.notify_one();
     }
 
     pub fn streaming(&self) -> bool {
@@ -153,25 +188,46 @@ async fn handle_socket(socket: WebSocket, tx: mpsc::UnboundedSender<Event>, id: 
     let (mut sink, mut stream) = socket.split();
     let c2 = client.clone();
     let sender = async move {
+        let mut next_ping = tokio::time::Instant::now() + PING_EVERY;
+        let mut last_ping_ns: Option<u64> = None;
         loop {
+            if tokio::time::Instant::now() >= next_ping {
+                if last_ping_ns.is_some_and(|t| c2.last_rx_ns.load(Ordering::Relaxed) < t) {
+                    tracing::info!("ws client sent nothing for {} s after a ping; disconnecting", PING_EVERY.as_secs());
+                    return;
+                }
+                last_ping_ns = Some(now_ns());
+                next_ping += PING_EVERY;
+                if !send_or_drop(&mut sink, &c2, Message::Ping(Default::default())).await {
+                    return;
+                }
+            }
             match c2.next() {
                 Next::Msg(m) => {
-                    if sink.send(m).await.is_err() {
+                    if !send_or_drop(&mut sink, &c2, m).await {
                         return;
                     }
                 }
                 Next::Close => {
                     let frame = CloseFrame { code: 1008, reason: "client too slow".into() };
-                    let _ = sink.send(Message::Close(Some(frame))).await;
+                    let close = sink.send(Message::Close(Some(frame)));
+                    let _ = tokio::time::timeout(Duration::from_secs(1), close).await;
                     return;
                 }
-                Next::Empty => c2.notify.notified().await,
+                Next::Empty => {
+                    tokio::select! {
+                        _ = c2.notify.notified() => {}
+                        _ = tokio::time::sleep_until(next_ping) => {}
+                    }
+                }
             }
         }
     };
     let tx2 = tx.clone();
+    let c3 = client.clone();
     let receiver = async move {
         while let Some(Ok(m)) = stream.next().await {
+            c3.last_rx_ns.store(now_ns(), Ordering::Relaxed);
             let text = match m {
                 Message::Text(t) => t.to_string(),
                 // The reference json-decodes binary frames too.
@@ -179,6 +235,15 @@ async fn handle_socket(socket: WebSocket, tx: mpsc::UnboundedSender<Event>, id: 
                 Message::Close(_) => break,
                 _ => continue,
             };
+            // Backpressure: stop reading while the control loop is behind.
+            loop {
+                let done = c3.inflight_done.notified();
+                if c3.inflight.load(Ordering::Acquire) < INBOUND_MAX {
+                    break;
+                }
+                done.await;
+            }
+            c3.inflight.fetch_add(1, Ordering::AcqRel);
             if tx2.send(Event::Message(id, text)).is_err() {
                 break;
             }
@@ -189,6 +254,26 @@ async fn handle_socket(socket: WebSocket, tx: mpsc::UnboundedSender<Event>, id: 
         _ = receiver => {},
     }
     let _ = tx.send(Event::Disconnect(id));
+}
+
+/// One send, bounded by `SEND_TIMEOUT` and cut short by an overflow close.
+/// False = drop the connection.
+async fn send_or_drop(
+    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    c: &Client,
+    m: Message,
+) -> bool {
+    tokio::select! {
+        r = tokio::time::timeout(SEND_TIMEOUT, sink.send(m)) => match r {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                tracing::warn!("ws client stuck: one send took > {} s; disconnecting", SEND_TIMEOUT.as_secs());
+                false
+            }
+        },
+        _ = c.kill.notified() => false,
+    }
 }
 
 /// `[type=1:u8][reserved:u8][n_bins:u16 LE][f32 LE × n_bins]`; `gain` is

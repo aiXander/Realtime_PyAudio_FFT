@@ -196,8 +196,14 @@ pub fn validate_autoscale(
     })
 }
 
+/// Upper clamp on `peak_smear_oct` (deviation: the reference only requires a
+/// finite value). The UI slider stops at 2; past ~4 octaves the kernel spans
+/// the whole spectrum anyway, while a huge value makes `Smear::build` try to
+/// allocate a kernel of billions of taps and aborts the process.
+pub const MAX_PEAK_SMEAR_OCT: f64 = 4.0;
+
 pub fn validate_peak_smear_oct(v: Option<&Value>) -> VResult<f64> {
-    finite_float(v, "peak_smear_oct", None, None)
+    Ok(finite_float(v, "peak_smear_oct", None, None)?.min(MAX_PEAK_SMEAR_OCT))
 }
 
 pub const FFT_TILT_RANGE: (f64, f64) = (-6.0, 12.0);

@@ -194,13 +194,38 @@ struct Callback {
     stride: usize,
     /// Mono = `(ch0 + ch1) · 0.5` (f32) when ≥ 2 channels are used, else ch0.
     mix2: bool,
+    /// Overrun detection by timestamp (see `check_gap`).
+    sr: f64,
+    last_ts: Option<cpal::StreamInstant>,
+    last_frames: usize,
 }
 
 impl Callback {
+    /// cpal's CoreAudio backend never reports `Xrun`, so on macOS an input
+    /// overrun (the reference counts PortAudio's `input_overflow`) is
+    /// detected as a gap in the buffers' host timestamps: more than 1.5× the
+    /// previous buffer's duration means CoreAudio dropped input.
     #[inline]
-    fn on_data<T: ToF32>(&mut self, data: &[T]) {
+    fn check_gap(&mut self, info: &cpal::InputCallbackInfo, frames: usize) {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let ts = info.timestamp().callback;
+        if let Some(prev) = self.last_ts {
+            let expected = self.last_frames as f64 / self.sr;
+            if ts.duration_since(prev).as_secs_f64() > 1.5 * expected {
+                self.shared.cb_overruns.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.last_ts = Some(ts);
+        self.last_frames = frames;
+    }
+
+    #[inline]
+    fn on_data<T: ToF32>(&mut self, data: &[T], info: &cpal::InputCallbackInfo) {
         assert_no_alloc::assert_no_alloc(|| {
             let t0 = now_ns();
+            self.check_gap(info, data.len() / self.stride);
             let bs = self.acc.len();
             for frame in data.chunks_exact(self.stride) {
                 let x0 = frame[0].to_f32();
@@ -229,7 +254,7 @@ fn build<T: ToF32 + cpal::SizedSample>(
 ) -> Result<cpal::Stream, cpal::Error> {
     dev.build_input_stream::<T, _, _>(
         cfg,
-        move |data: &[T], _info: &cpal::InputCallbackInfo| cb.on_data(data),
+        move |data: &[T], info: &cpal::InputCallbackInfo| cb.on_data(data, info),
         move |e: cpal::Error| {
             if e.kind() == cpal::ErrorKind::Xrun {
                 shared.cb_overruns.fetch_add(1, Ordering::Relaxed);
@@ -288,6 +313,9 @@ pub fn open_input_stream(
                 fill: 0,
                 stride: stride as usize,
                 mix2: want >= 2 && stride >= 2,
+                sr: sr as f64,
+                last_ts: None,
+                last_frames: 0,
             };
             let res = match fmt {
                 cpal::SampleFormat::F32 => build::<f32>(&dev, cfg, cb, shared.clone()),
@@ -318,6 +346,27 @@ pub fn signal_active_probe(devices: &[DeviceInfo], duration: f64) -> Vec<(usize,
     devices.iter().map(|d| (d.index, probe_one(d, duration).unwrap_or(false))).collect()
 }
 
+fn probe_stream<T: ToF32 + cpal::SizedSample>(
+    dev: &cpal::Device,
+    cfg: cpal::StreamConfig,
+    buf: &Arc<std::sync::Mutex<Vec<f32>>>,
+    n: usize,
+) -> Option<cpal::Stream> {
+    let b2 = buf.clone();
+    dev.build_input_stream::<T, _, _>(
+        cfg,
+        move |data: &[T], _: &cpal::InputCallbackInfo| {
+            if let Ok(mut v) = b2.lock() {
+                let room = n - v.len().min(n);
+                v.extend(data[..data.len().min(room)].iter().map(|x| x.to_f32()));
+            }
+        },
+        |_e| {},
+        None,
+    )
+    .ok()
+}
+
 fn probe_one(d: &DeviceInfo, duration: f64) -> Option<bool> {
     let dev = device_at(d.index)?;
     let def = dev.default_input_config().ok()?;
@@ -326,20 +375,14 @@ fn probe_one(d: &DeviceInfo, duration: f64) -> Option<bool> {
     let n = ((sr as f64 * duration) as usize).max(256) * ch as usize;
     let buf = Arc::new(std::sync::Mutex::new(Vec::<f32>::with_capacity(n)));
     let cfg = cpal::StreamConfig { channels: ch, sample_rate: sr, buffer_size: cpal::BufferSize::Default };
-    let b2 = buf.clone();
-    let stream = dev
-        .build_input_stream::<f32, _, _>(
-            cfg,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                if let Ok(mut v) = b2.lock() {
-                    let room = n - v.len().min(n);
-                    v.extend_from_slice(&data[..data.len().min(room)]);
-                }
-            },
-            |_e| {},
-            None,
-        )
-        .ok()?;
+    // f32 first, then the device's own format (integer-only ALSA devices),
+    // like the main stream; samples are converted to f32 either way.
+    let stream = [cpal::SampleFormat::F32, def.sample_format()].iter().find_map(|&fmt| match fmt {
+        cpal::SampleFormat::F32 => probe_stream::<f32>(&dev, cfg, &buf, n),
+        cpal::SampleFormat::I16 => probe_stream::<i16>(&dev, cfg, &buf, n),
+        cpal::SampleFormat::I32 => probe_stream::<i32>(&dev, cfg, &buf, n),
+        _ => None,
+    })?;
     stream.play().ok()?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(duration + 2.0);
     loop {

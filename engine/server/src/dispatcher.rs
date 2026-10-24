@@ -26,7 +26,7 @@ impl From<String> for HErr {
     }
 }
 
-type Out = (Vec<Value>, Vec<Value>);
+pub(crate) type Out = (Vec<Value>, Vec<Value>);
 type HRes = Result<Out, HErr>;
 
 const NONE: Out = (Vec::new(), Vec::new());
@@ -97,7 +97,7 @@ impl App {
         }
     }
 
-    fn error_reply(&mut self, reason: String) -> Out {
+    pub(crate) fn error_reply(&mut self, reason: String) -> Out {
         let replies = vec![json!({"type": "error", "reason": reason}), self.meta_message()];
         self.mark_meta_dirty();
         (replies, vec![])

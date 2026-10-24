@@ -79,6 +79,17 @@ fn bind_listener(host: &str, port: i64, what: &str, key: &str) -> Result<std::ne
 }
 
 /// The cfg values the DSP reads (`_build_pipeline_for_sr` / `_build_fft_pipeline`).
+/// Startup hint when no input could be opened: the inputs `--device N` takes
+/// (the reference pointed at `python -m sounddevice` instead).
+fn no_input_hint() -> String {
+    let devs = audio::list_input_devices();
+    if devs.is_empty() {
+        return "no input devices found: plug in / enable a microphone".into();
+    }
+    let list: Vec<String> = devs.iter().map(|d| format!("{} = {}", d.index, d.name)).collect();
+    format!("plug in / enable a microphone, or pick another input with --device N ({})", list.join(", "))
+}
+
 pub fn engine_params(cfg: &Config, sr: f64) -> EngineParams {
     let ob = |b: &config::OnsetBandCfg| OnsetParams {
         sensitivity: b.sensitivity,
@@ -192,9 +203,12 @@ pub struct App {
     retune_at: Option<Instant>,
     rebaseline_at: Option<Instant>,
     wd: Watchdog,
-    /// A device refresh / probe owns the input (the reference's
-    /// `device_switch_lock` held across an await).
+    /// A device probe is running on a blocking thread and owns the inputs
+    /// (the reference's `device_switch_lock` held across an await): the
+    /// watchdog pauses, and `set_device` / `list_devices` wait in `deferred`
+    /// until it's done, like the reference's lock queue.
     pub switch_busy: bool,
+    deferred: std::collections::VecDeque<(u64, String)>,
     pub events_tx: mpsc::UnboundedSender<Event>,
     ws_listener: Option<std::net::TcpListener>,
     http_listener: Option<std::net::TcpListener>,
@@ -226,8 +240,7 @@ impl App {
             Some(d) if d < 0 => {
                 return Err(StartupError::new(
                     format!("could not open input device {d}: Invalid device"),
-                    "plug in / enable a microphone, or pick another input with --device N \
-                     (list them with `uv run python -m sounddevice`)",
+                    no_input_hint(),
                 ));
             }
             d => d.map(|d| d as usize),
@@ -242,8 +255,7 @@ impl App {
                 };
                 StartupError::new(
                     format!("could not open {which}: {e}"),
-                    "plug in / enable a microphone, or pick another input with --device N \
-                     (list them with `uv run python -m sounddevice`)",
+                    no_input_hint(),
                 )
             })?;
         let sr = stream.samplerate;
@@ -252,7 +264,7 @@ impl App {
         let params = engine_params(&cfg, sr);
         let dsp = DspChain::new(&params);
         let fft = FftChain::new(&params).map_err(|e| StartupError::new(format!("invalid FFT geometry: {e}"), ""))?;
-        let mut workers = Workers::spawn(shared.clone(), dsp, fft, bs)
+        let mut workers = Workers::spawn(shared.clone(), dsp, fft, bs, sr)
             .map_err(|e| StartupError::new(format!("could not start worker threads: {e}"), ""))?;
         let _ = wake.set([workers.dsp_thread.clone(), workers.fft_thread.clone()]);
         workers.collect_garbage();
@@ -280,6 +292,7 @@ impl App {
             rebaseline_at: None,
             wd: Watchdog { last_wi: 0, last_change: now, next_attempt: now, next_tick: now + WATCHDOG_TICK },
             switch_busy: false,
+            deferred: Default::default(),
             events_tx,
             ws_listener: None,
             http_listener: None,
@@ -403,6 +416,11 @@ impl App {
             self.workers.collect_garbage();
         }
         self.shutdown();
+        // Let the connection tasks flush the Close frames shutdown queued
+        // (the reference awaits each client's close).
+        if self.ws.as_ref().is_some_and(|w| !w.clients.is_empty()) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     }
 
     fn next_deadline(&self) -> Instant {
@@ -483,11 +501,20 @@ impl App {
             Event::Message(id, text) => {
                 let Some(client) = self.ws.as_ref().and_then(|w| w.client(id)) else { return };
                 self.on_message(&client, &text);
+                client.message_done();
             }
             Event::ProbeDone(id, items) => {
                 self.switch_busy = false;
                 if let Some(c) = self.ws.as_ref().and_then(|w| w.client(id)) {
                     c.put_control_text(&to_text(&json!({"type": "devices", "items": items})));
+                }
+                // Replay what queued behind the probe, in order, until one of
+                // them starts another probe.
+                while !self.switch_busy {
+                    let Some((id, text)) = self.deferred.pop_front() else { break };
+                    if let Some(c) = self.ws.as_ref().and_then(|w| w.client(id)) {
+                        self.on_message(&c, &text);
+                    }
                 }
             }
         }
@@ -514,6 +541,12 @@ impl App {
             client.put_control_text(&to_text(&json!({"type": "error", "reason": "missing 'type'"})));
             return;
         }
+        if self.switch_busy
+            && matches!(msg.get("type").and_then(|t| t.as_str()), Some("set_device" | "list_devices"))
+        {
+            self.deferred.push_back((client.id, raw.to_string()));
+            return;
+        }
         if msg.get("type") == Some(&Value::from("set_stream")) {
             let on = crate::py::get_bool(&msg, "enabled", true);
             client.set_streaming(on);
@@ -523,7 +556,14 @@ impl App {
             }
             return;
         }
-        let (targeted, broadcasts) = self.dispatch(&msg, client.id);
+        // A handler panic must not take the server down: the reference's
+        // dispatcher turns any exception into `internal: …` + meta.
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(&msg, client.id)));
+        let (targeted, broadcasts) = out.unwrap_or_else(|p| {
+            let what = crate::workers::panic_msg(&*p).to_string();
+            tracing::error!("dispatcher handler panicked: {what}");
+            self.error_reply(format!("internal: {what}"))
+        });
         for r in targeted {
             client.put_control_text(&to_text(&r));
         }
@@ -685,7 +725,7 @@ impl App {
         })
     }
 
-    /// `snapshot_meta` with `type` first (26 keys after it).
+    /// `snapshot_meta` with `type` first (26 keys including it).
     pub fn meta_message(&self) -> Value {
         let c = &self.cfg;
         let device = match &self.stream {
@@ -786,7 +826,11 @@ impl App {
                     continue;
                 }
                 let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
-                if stem.to_lowercase() == "main" {
+                // Only names load_preset accepts as-is. Skips `main` (like the
+                // reference) and also `main.example`, which the reference
+                // listed although its dot makes it unloadable.
+                let valid = crate::validate::validate_preset_name(Some(&Value::String(stem.into())));
+                if valid.as_deref() != Ok(stem) {
                     continue;
                 }
                 let Ok(meta) = std::fs::metadata(&p) else { continue };
@@ -944,8 +988,11 @@ impl App {
     }
 
     pub fn apply_fft_n_bins(&mut self, n: usize) -> Result<(), String> {
-        self.cfg.fft.n_bins = n;
-        self.replace_fft_chain()?;
+        let prev = std::mem::replace(&mut self.cfg.fft.n_bins, n);
+        if let Err(e) = self.replace_fft_chain() {
+            self.cfg.fft.n_bins = prev;
+            return Err(e);
+        }
         self.workers.dsp_tx.send(DspCmd::SetFftGeometry(Some(n), None));
         self.mark_osc_meta_dirty();
         Ok(())
@@ -1118,7 +1165,12 @@ impl App {
         self.switch_busy = true;
         let tx = self.events_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let results = audio::signal_active_probe(&items, 0.2);
+            // Always answer (and so release switch_busy), even if a driver
+            // panics mid-probe: the devices then just read as silent.
+            let results = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                audio::signal_active_probe(&items, 0.2)
+            }))
+            .unwrap_or_default();
             let at = config::local_strftime("%H:%M:%S", config::now_time_t());
             let out: Vec<Value> = items
                 .iter()

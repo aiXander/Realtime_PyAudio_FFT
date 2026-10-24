@@ -10,7 +10,9 @@
 //! Backlog policies are the reference's: the DSP worker drains every block,
 //! skips to `wi − 1` when more than 4 blocks behind (counting drops and
 //! advancing the onset clock); the FFT worker drains every complete hop and
-//! skips whole hops when more than `window + 2 hops` behind.
+//! skips whole hops when more than `window + 2 hops` behind. One deviation:
+//! the FFT catch-up skip right after a read-pointer rewind (reconfigure,
+//! stream reset) is not counted as drops; it skips history, not work.
 
 use crate::osc::{FftPacker, LmhPacker};
 use crate::shared::{RateLimitedLog, Shared, now_ns};
@@ -154,7 +156,13 @@ pub struct Workers {
 }
 
 impl Workers {
-    pub fn spawn(shared: Arc<Shared>, dsp: DspChain, fft: FftChain, blocksize: usize) -> std::io::Result<Self> {
+    pub fn spawn(
+        shared: Arc<Shared>,
+        dsp: DspChain,
+        fft: FftChain,
+        blocksize: usize,
+        sr: f64,
+    ) -> std::io::Result<Self> {
         let (dsp_ctx, dsp_crx) = rtrb::RingBuffer::<DspCmd>::new(256);
         let (fft_ctx, fft_crx) = rtrb::RingBuffer::<FftCmd>::new(256);
         let (dsp_gtx, dsp_grx) = rtrb::RingBuffer::<Garbage>::new(64);
@@ -170,6 +178,7 @@ impl Workers {
             store: feat_in,
             packer: LmhPacker::default(),
             buf: vec![0.0; blocksize],
+            block_period_s: blocksize as f64 / sr.max(1.0),
             read_idx: 0,
             seq: 0,
             err: RateLimitedLog::new("dsp-worker"),
@@ -186,6 +195,7 @@ impl Workers {
             store: fft_in,
             packer: FftPacker::default(),
             read_idx: 0,
+            rewound: false,
             seq: 0,
             err: RateLimitedLog::new("fft-worker"),
         };
@@ -239,7 +249,7 @@ fn realtime<T>(f: impl FnOnce() -> T) -> T {
     assert_no_alloc::assert_no_alloc(f)
 }
 
-fn panic_msg(p: &(dyn std::any::Any + Send)) -> &str {
+pub(crate) fn panic_msg(p: &(dyn std::any::Any + Send)) -> &str {
     p.downcast_ref::<&str>()
         .copied()
         .or_else(|| p.downcast_ref::<String>().map(|s| s.as_str()))
@@ -254,6 +264,8 @@ struct DspWorker {
     store: triple_buffer::Input<FeatureSnap>,
     packer: LmhPacker,
     buf: Vec<f32>,
+    /// Wake cadence at spawn, for the real-time scheduling hint.
+    block_period_s: f64,
     read_idx: u64,
     seq: u64,
     err: RateLimitedLog,
@@ -261,7 +273,7 @@ struct DspWorker {
 
 impl DspWorker {
     fn run(&mut self) {
-        crate::priority::boost_current_thread("dsp-worker");
+        crate::priority::realtime_current_thread("dsp-worker", self.block_period_s);
         loop {
             std::thread::park_timeout(WAKE_TIMEOUT);
             if self.shared.stop.load(Ordering::Acquire) {
@@ -391,13 +403,17 @@ struct FftWorker {
     store: triple_buffer::Input<FftFrame>,
     packer: FftPacker,
     read_idx: u64,
+    /// The read pointer was rewound to 0 by a reconfigure / stream reset:
+    /// the next backlog skip is a catch-up over history, not dropped hops.
+    rewound: bool,
     seq: u64,
     err: RateLimitedLog,
 }
 
 impl FftWorker {
     fn run(&mut self) {
-        crate::priority::boost_current_thread("fft-worker");
+        let hop_period_s = self.chain.analyzer.geometry().hop_period_s();
+        crate::priority::realtime_current_thread("fft-worker", hop_period_s);
         loop {
             std::thread::park_timeout(WAKE_TIMEOUT);
             if self.shared.stop.load(Ordering::Acquire) {
@@ -430,6 +446,7 @@ impl FftWorker {
                     std::mem::swap(&mut self.chain, &mut c);
                     self.fresh = true;
                     self.read_idx = 0;
+                    self.rewound = true;
                     moved = true;
                     self.give_back(Garbage::FftChain(c));
                 }
@@ -455,6 +472,7 @@ impl FftWorker {
                 }
                 FftCmd::ResetReadPtr => {
                     self.read_idx = 0;
+                    self.rewound = true;
                     moved = true;
                 }
             }
@@ -478,10 +496,13 @@ impl FftWorker {
             let target = wi - nbw;
             let skipped = target.saturating_sub(self.read_idx) / hb;
             if skipped > 0 {
-                self.shared.fft_drops.fetch_add(skipped, Ordering::Relaxed);
+                if !self.rewound {
+                    self.shared.fft_drops.fetch_add(skipped, Ordering::Relaxed);
+                }
                 self.read_idx += skipped * hb;
             }
         }
+        self.rewound = false;
         while wi - self.read_idx >= nbw {
             if self.drain_cmds() {
                 return;
@@ -528,5 +549,77 @@ impl FftWorker {
             }
             record_latency(&sh.perf.fft_e2e, t_recv);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::osc::OscSender;
+    use crate::ring::SlotRing;
+    use std::time::Instant;
+
+    fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !f() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A reconfigure rewinds the FFT read pointer to 0; the catch-up skip
+    /// over the ring's history on the next wake is not a drop (the reference
+    /// counted it: ~1000 phantom `fft_drops` here).
+    #[test]
+    fn fft_reconfigure_counts_no_phantom_drops() {
+        let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut cfg = crate::config::load_config(&repo.join("configs/main.example.yaml")).unwrap();
+        cfg.fft.enabled = true;
+        cfg.osc.send_fft = false;
+        let (sr, bs) = (48_000.0, cfg.audio.blocksize);
+        let shared = Arc::new(Shared::new(SlotRing::new(64, bs), OscSender::new(&[]), &cfg));
+        let params = crate::app::engine_params(&cfg, sr);
+        let mut w = Workers::spawn(
+            shared.clone(),
+            DspChain::new(&params),
+            FftChain::new(&params).unwrap(),
+            bs,
+            sr,
+        )
+        .unwrap();
+        let block = vec![0.1f32; bs];
+        let fft_thread = w.fft_thread.clone();
+        let write = |n: usize| {
+            for _ in 0..n {
+                shared.ring.write_block(&block, now_ns());
+                fft_thread.unpark();
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        };
+        let seq = |w: &mut Workers| w.fft_out.read().seq;
+
+        // Long-running stream, worker keeping up.
+        write(2000);
+        wait_until("first hops", || seq(&mut w) > 0);
+        let drops0 = shared.fft_drops.load(Ordering::Relaxed);
+
+        // set_n_fft_bins → a fresh chain; then the stream continues.
+        let mut cfg2 = cfg.clone();
+        cfg2.fft.n_bins = 64;
+        let chain = FftChain::new(&crate::app::engine_params(&cfg2, sr)).unwrap();
+        w.fft_tx.send(FftCmd::ReplaceChain(Box::new(chain)));
+        let before = seq(&mut w);
+        write(40);
+        wait_until("hops after reconfigure", || seq(&mut w) > before + 5);
+        assert_eq!(w.fft_out.read().n, 64);
+        assert_eq!(shared.fft_drops.load(Ordering::Relaxed), drops0, "phantom drops after reconfigure");
+
+        // A real backlog after that is still counted.
+        for _ in 0..40 {
+            shared.ring.write_block(&block, now_ns());
+        }
+        fft_thread.unpark();
+        wait_until("real drops", || shared.fft_drops.load(Ordering::Relaxed) > drops0);
+        w.stop(&shared);
     }
 }

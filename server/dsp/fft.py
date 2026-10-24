@@ -204,6 +204,68 @@ class FFTWorker(threading.Thread):
         with self._lock:
             self.read_block_idx = max(0, self.ring.write_idx - self.n_blocks_per_window)
 
+    def process_hop(self):
+        """One hop of DSP on `self.window_buf` (the caller has already copied
+        the window in): Hann window -> rfft -> window-corrected power ->
+        mean-of-power log bins -> dB -> f32 wire buffer (+ empty-bin
+        sentinels) -> post-processor. No publish, no OSC, no timing: `run()`
+        calls it per hop, and the offline parity tools (tools/parity/) call it
+        directly so the goldens come from exactly this code.
+
+        Returns `(bins_f32, processed)` — refs into the double-buffered wire
+        outputs (valid until two further hops); `processed` is None without a
+        post-processor. Toggles the wire buffer for the next hop.
+        """
+        np.multiply(self.window_buf, self.hann, out=self.window_buf)
+        np.fft.rfft(self.window_buf, out=self.spectrum)
+        # Window-corrected RMS² power per rfft bin: re² + im².
+        power = self.power_buf
+        np.multiply(self._spec_re, self._spec_re, out=power)
+        np.multiply(self._spec_im, self._spec_im, out=self._power_scratch)
+        np.add(power, self._power_scratch, out=power)
+        np.multiply(power, self._win_power_corr, out=power)
+        # Mean-of-power log-bin aggregation: sum(power) per log bin /
+        # rfft-count per log bin. Mean-of-dB underweights peaks; this
+        # is energy-conserving. Alloc-free hot path:
+        #   1. np.take valid rfft powers into preallocated scratch.
+        #   2. np.add.reduceat with precomputed run starts → per-run
+        #      sums into preallocated _reduceat_out.
+        #   3. scatter into _bins_scratch (skipping empty log bins).
+        #   4. multiply by _bin_count_inv (zeros empty bins).
+        # Replaces np.bincount, which allocated a fresh n_bins-length
+        # array every hop.
+        # mode="clip": indices are in range by construction; the
+        # default mode="raise" always buffers `out` (allocates).
+        np.take(self.power_buf, self._valid_rfft_idx, out=self._valid_power, mode="clip")
+        bins = self._bins_scratch
+        if self._reduceat_starts.size > 0:
+            np.add.reduceat(
+                self._valid_power, self._reduceat_starts,
+                out=self._reduceat_out,
+            )
+            bins[self._reduceat_targets] = self._reduceat_out
+        np.multiply(bins, self._bin_count_inv, out=bins)
+        # → dB (10·log10(RMS²) ≡ 20·log10(RMS)). Floor at EPS to keep
+        # log10 finite; empty bins are overwritten with sentinel below.
+        np.maximum(bins, EPS, out=bins)
+        np.log10(bins, out=bins)
+        np.multiply(bins, 10.0, out=bins)
+        # Cast once into the back buffer of the double-buffered wire
+        # output, then patch sentinels via the cached index.
+        bins_f32 = self._bins_f32_buffers[self._wire_idx]
+        bins_f32[:] = bins
+        if self._has_empty_bins:
+            bins_f32[self._empty_bin_idx] = EMPTY_BIN_SENTINEL
+        # Run the post-processor (if present) and publish both streams.
+        # Producer-side double-buffering on both streams means the
+        # published refs stay stable across the next hop's writes; no
+        # copies needed on the publish path.
+        processed = None
+        if self.post_processor is not None:
+            processed = self.post_processor.process(bins_f32)
+        self._wire_idx ^= 1
+        return bins_f32, processed
+
     def run(self) -> None:
         boost_current_thread("fft-worker")
         while True:
@@ -249,55 +311,8 @@ class FFTWorker(threading.Thread):
                             )
                             continue
 
-                        np.multiply(self.window_buf, self.hann, out=self.window_buf)
-                        np.fft.rfft(self.window_buf, out=self.spectrum)
-                        # Window-corrected RMS² power per rfft bin: re² + im².
-                        power = self.power_buf
-                        np.multiply(self._spec_re, self._spec_re, out=power)
-                        np.multiply(self._spec_im, self._spec_im, out=self._power_scratch)
-                        np.add(power, self._power_scratch, out=power)
-                        np.multiply(power, self._win_power_corr, out=power)
-                        # Mean-of-power log-bin aggregation: sum(power) per log bin /
-                        # rfft-count per log bin. Mean-of-dB underweights peaks; this
-                        # is energy-conserving. Alloc-free hot path:
-                        #   1. np.take valid rfft powers into preallocated scratch.
-                        #   2. np.add.reduceat with precomputed run starts → per-run
-                        #      sums into preallocated _reduceat_out.
-                        #   3. scatter into _bins_scratch (skipping empty log bins).
-                        #   4. multiply by _bin_count_inv (zeros empty bins).
-                        # Replaces np.bincount, which allocated a fresh n_bins-length
-                        # array every hop.
-                        # mode="clip": indices are in range by construction; the
-                        # default mode="raise" always buffers `out` (allocates).
-                        np.take(self.power_buf, self._valid_rfft_idx, out=self._valid_power, mode="clip")
-                        bins = self._bins_scratch
-                        if self._reduceat_starts.size > 0:
-                            np.add.reduceat(
-                                self._valid_power, self._reduceat_starts,
-                                out=self._reduceat_out,
-                            )
-                            bins[self._reduceat_targets] = self._reduceat_out
-                        np.multiply(bins, self._bin_count_inv, out=bins)
-                        # → dB (10·log10(RMS²) ≡ 20·log10(RMS)). Floor at EPS to keep
-                        # log10 finite; empty bins are overwritten with sentinel below.
-                        np.maximum(bins, EPS, out=bins)
-                        np.log10(bins, out=bins)
-                        np.multiply(bins, 10.0, out=bins)
-                        # Cast once into the back buffer of the double-buffered wire
-                        # output, then patch sentinels via the cached index.
-                        bins_f32 = self._bins_f32_buffers[self._wire_idx]
-                        bins_f32[:] = bins
-                        if self._has_empty_bins:
-                            bins_f32[self._empty_bin_idx] = EMPTY_BIN_SENTINEL
-                        # Run the post-processor (if present) and publish both streams.
-                        # Producer-side double-buffering on both streams means the
-                        # published refs stay stable across the next hop's writes; no
-                        # copies needed on the publish path.
-                        processed = None
-                        if self.post_processor is not None:
-                            processed = self.post_processor.process(bins_f32)
+                        bins_f32, processed = self.process_hop()
                         self.fft_store.publish(bins_f32, processed, t_recv_ns)
-                        self._wire_idx ^= 1
                         # Direct OSC dispatch on this thread (skip if disabled
                         # via cfg.osc.send_fft / fft_enabled — the publisher
                         # checks both internally).

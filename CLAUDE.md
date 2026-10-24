@@ -4,7 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository layout
 
-**Planned: full port of `server/` to Rust** — `docs/TODO/rust_port.md`. Until cutover the Python server is a **frozen reference**: bug fixes only; any DSP-semantics change must land in both engines (read the plan before touching `server/dsp/`).
+**In flight: full port of `server/` to Rust**, planned in `docs/TODO/rust_port.md` (the plan lives in `docs/TODO/`). Until cutover the Python server is a **frozen reference**: bug fixes only. Any DSP-semantics change must land in both engines **and** be followed by regenerating the goldens (read the plan before touching `server/dsp/`).
+
+| Reference doc | Open it when |
+|---|---|
+| `docs/reference/engine_contracts.md` | changing or porting anything outward-facing: CLI, config load/persist, a WS message or handler, OSC packets, HTTP, devices, timing/backlog constants |
+| `docs/reference/perf_baseline.md` | measuring load/latency, comparing engines, or judging a perf change |
+| `docs/reference/fft_3d_styles.md` | touching the 3D FFT view or the palette |
+| `testdata/golden/README.md` | writing/reading parity tests or regenerating goldens |
 
 The design is documented in detail in `realtime_audio_server_plan.md`; if behavior in code seems surprising, the plan is the authoritative source for *why*. **Note:** the plan predates the FFT post-processor — for FFT processing semantics, the code (`server/dsp/fft_postprocess.py`) is the source of truth.
 
@@ -24,6 +31,11 @@ ui/          # Vanilla-JS browser UI (ES modules, no build step). Pure viz —
              # OSC payload.
 configs/     # main.yaml = persisted runtime state (auto-written when UI changes
              # settings); any other *.yaml here is a saved preset
+tools/       # signals.py (deterministic test signals); parity/ (golden generator +
+             # offline App driver, wire recorder/compare); bench/ (engine-agnostic
+             # live bench, Python stage bench, results/ = committed baseline JSON)
+testdata/golden/  # committed parity goldens (DSP .npy + manifest, wire/ captures);
+             # the Rust engine is tested against these. Never hand-edit.
 ```
 
 ## Commands
@@ -49,6 +61,12 @@ uv run audio-server --config /path/cfg.yaml --log-level DEBUG
 # Tests (pytest dirs exist but are empty — no tests yet)
 uv run pytest tests/
 uv run pytest tests/unit/test_foo.py::test_bar    # single test
+
+# Rust-port harness (see testdata/golden/README.md, docs/reference/perf_baseline.md)
+uv run python tools/parity/make_goldens.py [--check]   # DSP goldens; --check = byte-identical regen
+uv run tools/parity/record_wire.py [--server-cmd CMD --out DIR] [--compare A B]  # wire goldens
+uv run tools/bench/live_bench.py [--server-cmd CMD] [--set k=v]  # live load/latency (BlackHole input)
+uv run python tools/bench/stage_bench.py [--quick]     # Python per-stage µs
 ```
 
 > Note: the console script lives in `.venv/bin/audio-server`, so bare `audio-server` only works if that venv is activated (`source .venv/bin/activate`). Prefer `uv run audio-server …`, which doesn't need activation.
@@ -141,7 +159,7 @@ Per-bin port of `features.AutoScaler`, intentionally structurally identical to t
 
 1. **Sentinel interpolation (precomputed LUT).** Empty-log-bin sentinels (`-1000 dB`, generated at the low end where rfft Δf > log-bin width) are filled with a linear blend of their nearest valid neighbors so the spectrum is continuous. The blend coefficients (`_left_idx`, `_right_idx`, `_w_left`, `_w_right`) are computed once on the first hop after `_allocate()` (bin layout is stable until the next `reconfigure()`), so the hot path is a pure `np.take` + multiply-add + scatter — no `np.interp` call, no per-hop temporaries. Edge handling: empty bins below the lowest valid bin clamp to that bin's value (w_left=0); empty bins above the highest valid bin clamp to that bin's value (w_right=0). Note: clamping sentinels to `db_floor` instead of interpolating produces visible gaps at the low end because the gate downstream zeros bins below `noise_floor`, and a sentinel-clamped low bin sits well below it — interpolation propagates the loud first valid bin's value across the empty gap so the gate fires uniformly.
 2. **Pre-tilt + dB → linear.** `_lin = 10^((interp_db + tilt_db) / 20)`, where `tilt_db[k] = tilt_db_per_oct · log2(f_center[k] / 1 kHz)`. Calibration to L/M/H RMS² scale lives in `FFTWorker._win_power_corr = 2 / sum(hann)²`, applied at bincount time: a sine of amplitude A reads as bin-power A²/2 = sine RMS², so the same `noise_floor` value gates similarly on both pipelines without any extra dB shift.
-3. **Per-bin EMA smoother.** Tau is piecewise-linear interpolation of `(log10(f_center), tau_band)` anchors at the L/M/H band geometric-mean centers. Outside the lowest/highest center, clamp to the nearest band's tau. Same `set_smoothing` slider drives both this and the L/M/H smoother.
+3. **Per-bin asymmetric EMA smoother** (attack tau on rising bins, release tau on falling, like the L/M/H `ExpSmoother`, which also has per-band `tau` + `tau_attack`). Tau is piecewise-linear interpolation of `(log10(f_center), tau_band)` anchors at the L/M/H band geometric-mean centers. Outside the lowest/highest center, clamp to the nearest band's tau. Same `set_smoothing` slider drives both this and the L/M/H smoother.
 4. **Asymmetric peak follower.** Fast attack (`tau_attack_s`, default 50 ms) on rising values, slow release (`tau_release_s`, default 60 s). Both taus are shared with the L/M/H `AutoScaler`. Implemented alloc-free as `fill(release) → np.copyto(attack, where=mask) → multiply → add`, all into preallocated buffers (`_diff`, `_alpha`, `_mask`).
 5. **Spatial smear of the peak.** `gaussian_filter1d(peak_lin, σ, output=peak_smoothed, mode='reflect')` where σ is `peak_smear_oct × bins_per_octave`. Without this, a sustained single-frequency tone drives ITS bin's peak to fully self-normalize, so the tone bin reads *smaller* than its quiet neighbors. Sharing the divisor across a Gaussian neighborhood preserves local frequency contour while still flattening the long-term spectral envelope. `mode='reflect'` is self-normalising at the edges (mirrored neighbours carry the same kernel mass as the interior), so no per-bin normalisation divide is needed. Default 0.3 oct.
 6. **AutoScaler core.** `tanh(max(0, smooth - noise_floor) / max(peak_smoothed, noise_floor))`. Bit-for-bit identical math to the L/M/H side, except divisor is the smeared peak.
@@ -204,5 +222,5 @@ When toggling the "raw dB" checkbox or any other server-bound control, the UI se
 
 ## Things not to do
 
-- Don't add tests under `tests/` blindly — the directories exist but no fixtures or shared conftest is set up yet. Ask before scaffolding test infra.
+- Don't add tests under `tests/` blindly — the directories exist but no fixtures or shared conftest is set up yet. Ask before scaffolding test infra. (The Rust-port parity harness in `tools/parity/` + `testdata/golden/` is the approved exception.)
 - Don't add a build step to `ui/`. The whole point is that it's hackable static files.

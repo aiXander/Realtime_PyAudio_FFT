@@ -1,0 +1,1 @@
+{"type": "devices", "items": [{"index": 0, "name": "BlackHole 2ch", "hostapi": "Core Audio", "default_samplerate": 48000.0, "max_input_channels": 2}, {"index": 1, "name": "MacBook Pro Microphone", "hostapi": "Core Audio", "default_samplerate": 44100.0, "max_input_channels": 1}]}

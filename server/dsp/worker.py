@@ -54,6 +54,31 @@ class DSPWorker(threading.Thread):
         idling on its event timeout while this runs."""
         self.read_block_idx = 0
 
+    def process_block(self, x: np.ndarray) -> float:
+        """One audio block through filter -> RMS -> smoother -> autoscaler ->
+        onset tracker. Pure DSP (no publish, no OSC, no timing): `run()` calls
+        it per block, and the offline parity tools (tools/parity/) call it
+        directly so the goldens come from exactly this code.
+
+        Results: raw (smoothed RMS) in `self.smoother.values`, scaled in
+        `self.scaled_buf`, onset pulses in `self.onsets_buf`; returns the BPM.
+        """
+        lo, md, hi = self.filter_bank.process(x)
+        rms_lo = block_rms(lo)
+        rms_md = block_rms(md)
+        rms_hi = block_rms(hi)
+        self.smoother.update(rms_lo, rms_md, rms_hi)
+        self.auto_scaler.update(self.smoother.values, self.scaled_buf)
+        # Onset detection runs on the FULLY post-processed L/M/H
+        # signals (after smoother + autoscaler + strength blend)
+        # so that the same UI knobs that shape the bars/lines —
+        # bandpass edges, smoothing, autoscale strength, noise
+        # gate — also tune the trackers. The user dials each
+        # band's signal in until it 'pulses' cleanly on the
+        # transients of interest (kicks / snares / hats); the
+        # detectors ride those exact signals.
+        return self.onset_tracker.update(self.scaled_buf, self.onsets_buf)
+
     def run(self) -> None:
         boost_current_thread("dsp-worker")
         while True:
@@ -91,21 +116,7 @@ class DSPWorker(threading.Thread):
                     if self.ring.try_read_block(self.read_block_idx, self.dsp_in):
                         t_recv_ns = int(self.ring.block_t_ns[self.read_block_idx & self.ring.mask])
                         t0 = time.perf_counter_ns()
-                        lo, md, hi = self.filter_bank.process(self.dsp_in)
-                        rms_lo = block_rms(lo)
-                        rms_md = block_rms(md)
-                        rms_hi = block_rms(hi)
-                        self.smoother.update(rms_lo, rms_md, rms_hi)
-                        self.auto_scaler.update(self.smoother.values, self.scaled_buf)
-                        # Onset detection runs on the FULLY post-processed L/M/H
-                        # signals (after smoother + autoscaler + strength blend)
-                        # so that the same UI knobs that shape the bars/lines —
-                        # bandpass edges, smoothing, autoscale strength, noise
-                        # gate — also tune the trackers. The user dials each
-                        # band's signal in until it 'pulses' cleanly on the
-                        # transients of interest (kicks / snares / hats); the
-                        # detectors ride those exact signals.
-                        bpm = self.onset_tracker.update(self.scaled_buf, self.onsets_buf)
+                        bpm = self.process_block(self.dsp_in)
                         # Pass numpy refs straight through; FeatureStore copies
                         # into its own preallocated buffers under the lock so we
                         # don't allocate per-block tuples here.

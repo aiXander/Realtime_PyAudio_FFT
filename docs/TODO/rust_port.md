@@ -1,19 +1,23 @@
 # Rust port of the audio server
 
-**Status:** not started. This is the next major piece of work. **Scope:** replace the whole Python server (`server/`) with a Rust binary that behaves the same. The browser UI (`ui/`), the config files (`configs/*.yaml`), the WS protocol and the OSC protocol stay unchanged.
+**Status:** phase 0 Python-side prep is done (reference refactor, parity goldens, wire goldens, benchmarks, crate picks verified; see phase 0 below). **Next: scaffold `engine/` and start phase 1.** **Scope:** replace the whole Python server (`server/`) with a Rust binary that behaves the same. The browser UI (`ui/`), the config files (`configs/*.yaml`), the WS protocol and the OSC protocol stay unchanged.
 
 ## Why
 
-Measured on an M2 (default config: 44.1 kHz, 256-sample blocks, FFT window 1024 / hop 512, 256 log bins, OSC FFT on). The server uses about 10% of one core and has 0 drops. The interesting part is *where* the time goes:
+Measured on the M2 in phase 0 (48 kHz, 256-sample blocks, example config, BlackHole drum loop; full numbers and the rerun commands are in [`reference/perf_baseline.md`](../reference/perf_baseline.md)):
 
-| Stage | Python, full stage | Just the math (microbenchmark) | Overhead |
-|---|---|---|---|
-| DSP per block (5.8 ms budget) | 350 µs | ~18 µs (3 IIR bandpasses + RMS) | ~95% |
-| FFT per hop (11.6 ms budget) | 460 µs | ~30–50 µs (rfft, smear, ~40 small numpy calls) | ~90% |
+| | Python, live server (avg / p95) | Same Python stage, offline single thread (mean) |
+|---|---|---|
+| DSP per block (5.33 ms budget) | 264 / 662 µs | 29 µs |
+| FFT per hop (10.67 ms budget) | 403 / 893 µs | 53 µs |
+| Whole process | 8.5% of one core idle, 11.8% with a UI client | — |
 
-Almost all of the cost is interpreter overhead and the fixed per-call cost of numpy on tiny arrays. On a Pi 4 that overhead is projected to reach roughly 70–90% of one core. The GIL serialises it onto a single core. The p95 times are about 2.5× the average, which exceeds the 5.8 ms block period on a Pi 4, so dropouts are likely. The projected Rust load is about 3–5% of one core, with tight tail latency and stages that actually run in parallel. The port also gets rid of a whole class of Python-only workarounds: the allocation audit traps, the private scipy `_sosfilt` probe, `sys.setswitchinterval`, the double-buffered no-copy tricks and the PortAudio re-init hack.
+- **Where the live cost goes.** The numerics are already near their floor even in Python. Live, ~90% of the cost is contention: GIL hand-offs between the CoreAudio callback thread, the two workers and the asyncio loop, plus thread wake-ups.
+- **Tail failures.** With a UI client streaming, the Python server reproducibly stalls for 50–75 ms a few times per 30 s, with ~25 DSP / ~10 FFT drops.
+- **Pi 4 projection.** The same contention is projected to reach a large fraction of a core, with p95s past the block period, so dropouts are likely.
+- **What Rust buys.** Real parallelism with no GIL, a few µs per stage, and tight tails. It also deletes a whole class of Python-only workarounds: the allocation audit traps, the private scipy `_sosfilt` probe, `sys.setswitchinterval`, the double-buffered no-copy tricks and the PortAudio re-init hack.
 
-These are estimates scaled from the M2. Measure on a real Pi in phase 4 (below).
+The Pi has no baseline yet; measure it in phase 4 (below).
 
 ## Decisions
 
@@ -21,7 +25,7 @@ These are estimates scaled from the M2. Measure on a real Pi in phase 4 (below).
 - **Python feature freeze for the duration.** The Python server gets bug fixes only. Any change to DSP semantics lands in both engines, or waits. UI-only changes are fine as long as the wire format is untouched.
 - **Pure port first, improvements after.** No behaviour changes, no new knobs, no DSP "fixes" during the port, even obvious ones. Every deviation from Python breaks parity testing. Log improvement ideas under "After cutover" below.
 - **The UI must work unmodified.** That is the acceptance test for the control plane. If the UI needs a change, the Rust server is wrong.
-- **Legacy config migrations are dropped (decided by Xander).** The Rust server does not port the `beat:` → `onset:` schema migration (`server/config.py:_build_config` and the preset loader) or the old `./config.yaml` + `presets/` → `configs/` layout move (`server/main.py:_migrate_legacy_config_layout`). It reads only the current schema. A file in the old shape falls back per field to defaults, like any other invalid value. Phase 4 converts the existing files first (see below).
+- **Legacy config migrations are dropped (decided by Xander).** The Rust server does not port the `beat:` → `onset:` schema migration (`server/config.py:_build_config` and the preset loader) or the old `./config.yaml` + `presets/` → `configs/` layout move (`server/main.py:_migrate_legacy_config_layout`). It reads only the current schema. Phase 4 converts the existing files first (see below). *Correction (phase 0 audit):* the Python loader is **not** per-field-fallback. A missing required key or an unparseable file counts as corrupt (back up + reseed from the example); an invalid value is a fatal startup error; a short list of optional keys (including the whole `onset:` block) take defaults. Port exactly that. The list is in [`reference/engine_contracts.md`](../reference/engine_contracts.md) → Config. Without the migration, a file that lacks `onset:` simply gets the onset defaults, as Python does today when there's no `beat:` either.
 - **This plan introduces test infra** (a parity harness plus committed golden fixtures). CLAUDE.md says to ask before scaffolding tests. Approving this plan is that approval, but only for the harness described here.
 
 ## Layout
@@ -35,27 +39,34 @@ engine/            Cargo workspace (new)
   server/          bin crate `audio-server`: audio input, ring, workers, OSC, WS + HTTP,
                    config / validate / persist, dispatcher, device management, CLI
   dsp/tests/       parity tests against goldens
-tools/parity/      Python golden generator (imports the `server` package); deleted at cutover
-testdata/golden/   committed golden fixtures (.npy + manifest.json), kept after cutover
+tools/signals.py   deterministic test signals (numpy only); kept
+tools/parity/      make_goldens.py + offline.py (import `server`; deleted at cutover),
+                   record_wire.py (engine-agnostic wire capture/compare; kept)
+tools/bench/       live_bench.py (engine-agnostic; kept), stage_bench.py (Python-only; deleted),
+                   results/ (committed baseline JSON)
+testdata/golden/   committed goldens: DSP (.npy + manifest.json) + wire/; kept after cutover
 ui/  configs/      shared, unchanged
 ```
 
-## Crate choices (confirm in phase 0, don't relitigate after)
+## Crate choices (verified in phase 0 on rustc 1.95 — don't relitigate)
+
+Checked 2026-10-24 with throwaway test projects. The versions are the ones that resolved; pin the major.
 
 | Need | Pick | Notes |
 |---|---|---|
-| Audio input | `cpal` | CoreAudio / ALSA / WASAPI. It enumerates devices live, so the `reinitialize_portaudio()` hack disappears. Callback buffer size is **not** guaranteed to equal `blocksize`; re-block inside the callback (see traps). |
-| Real FFT | `realfft` (on `rustfft`) | Has NEON on aarch64. Plan the FFT once per window size. |
-| Butterworth SOS design | `sci-rs` if its `iirfilter`/`butter` SOS output matches scipy to ~1e-12; else port scipy's `buttap → lp2bp_zpk → bilinear_zpk → zpk2sos` (~200 lines) | The filter *runtime* is a hand-written DF2T biquad cascade, which is trivial. |
-| Async / WS / HTTP | `tokio` (current-thread runtime) + `axum` (WS) + `tower-http` `ServeDir` | Keep **two ports** (WS 8765, HTTP 8766) and `Cache-Control: no-cache` on static files. |
-| JSON / YAML | `serde_json`; for YAML a maintained serde_yaml successor | `serde_yaml` is archived. Pick in phase 0 and check that round-tripping `configs/main.yaml` is stable. |
-| Worker → WS stores | `triple_buffer` for FFT frames; atomics / small `Mutex` for L/M/H | Replaces the Python double-buffer ref trick entirely. |
-| Control → worker | per-worker SPSC command queue (`rtrb`) | See threading below. |
-| Enforce no-alloc | `assert_no_alloc` in debug builds around the callback and the worker hot paths | Turns the CLAUDE.md "no allocation" rule into a crash in tests. |
-| Thread priority | `libc` (`pthread_set_qos_class_self_np` on macOS, absolute nice −5 on Linux) | Same policy as `server/priority.py`. |
-| CLI / logging / open browser | `clap`, `tracing`, `webbrowser` | Same flags: `--open --device --no-ws --config --log-level`. |
-| Pi builds | `cross` or `cargo-zigbuild` → `aarch64-unknown-linux-gnu` | ALSA dev libs in the sysroot. |
-| Packaging | `maturin` (`bindings = "bin"`), `maturin-action`, `rust-embed`, `directories` | Phase 5: the pip wheel carries the binary; `ui/` + the example config are embedded. |
+| Audio input | `cpal` 0.18 | **API changed vs older docs:** `DeviceTrait::name()` is gone (use `to_string()` / `id()`), streams need an explicit `play()`, `build_input_stream` takes the config by value, and the error type is unified. Request `SampleFormat::F32` explicitly (the default can be I24/I32). CoreAudio honours `BufferSize::Fixed(256)` exactly, but it sets the buffer **device-wide**. On ALSA it's only a request (`set_period_size_near`), so keep the re-blocking accumulator. One xrun error fires at stream start; don't treat it as fatal. The device list isn't cached (live enumeration, so the PortAudio re-init hack goes away). There's no "devices changed" event, so keep the 1 s watchdog. Physical hot-plug is untested. |
+| Real FFT | `realfft` 3.5 (`rustfft` 6.4, NEON on by default) | vs `numpy.fft.rfft`: ~3e-16 relative error, ~1e-12 dB. Not bit-exact, so after the f32 cast expect an occasional 1-ULP (~4e-6 dB) difference, well inside tolerance. `process_with_scratch` doesn't allocate, but it **overwrites its input**, so copy the window in every hop. 1024-point: 3.8 µs on the M2. |
+| Butterworth SOS design | `sci-rs` 0.4.1 | **Matches scipy: no hand port.** 96/96 cases (sr 16k/44.1k/48k × order 1/2/4/8 × 8 bands) have the same section count and order; worst coefficient error 3.6e-15, worst effect on block RMS 3.3e-12. scipy's `iirfilter` uses `zpk2sos(pairing='nearest')`, and sci-rs ports it. Caveats: it panics on invalid Wn (validate/clamp first; it runs on the control thread anyway), allocates, and pulls in ~50 crates (nalgebra/ndarray). If it's ever dropped, the hand port is `buttap → lp2bp_zpk → bilinear_zpk → zpk2sos(nearest)`, ~250 lines; the traps are `_cplxreal`'s `100·eps·|z|` tolerance and first-index argmin tie-breaking. The goldens' `filter_design_sos.npy` is the check. |
+| Async / WS / HTTP | `tokio` 1.54 (current-thread) + `axum` 0.8 (`ws`) + `tower-http` 0.7 `ServeDir` | Smoke-tested together: WS text/binary to a Python client, plus `SetResponseHeaderLayer::overriding(CACHE_CONTROL, "no-cache")`. Keep **two ports** (WS 8765, HTTP 8766). |
+| JSON / YAML | `serde_json` 1.0 (features **`preserve_order`, `float_roundtrip`**) + **`serde-saphyr` 2.0** | serde_yaml is archived. `serde_yaml_ng` / `serde_norway` are rejected: they write floats like `1e16` / `1e-7`, which PyYAML reads back as **strings** (1442 of 6020 test floats). serde-saphyr had 0 failures and round-trips both configs bit-exactly. Gotcha: parsing into a dynamic `Value` rejects `.inf` by default (typed f64 fields accept it). Load into a `Value` first and validate field by field to reproduce the corrupt-vs-invalid split (Config in `reference/engine_contracts.md`). |
+| Worker → WS stores | `triple_buffer` 9 for FFT frames; atomics / small `Mutex` for L/M/H | Replaces the Python double-buffer ref trick entirely. |
+| Control → worker | per-worker SPSC command queue (`rtrb` 0.4) | crates.io's "newest" shows 0.3.5 (a backport); 0.4.0 is current. |
+| Enforce no-alloc | `assert_no_alloc` 1.1 in debug builds around the callback and the worker hot paths | Its default `disable_release` feature makes it a no-op in release. `AllocDisabler` exists only under `debug_assertions`, and each test binary needs `#[global_allocator]`. Verified that it aborts on a deliberate allocation. |
+| Thread priority | `libc` 0.2 (`pthread_set_qos_class_self_np` on macOS, absolute nice −5 on Linux) | Same policy as `server/priority.py`. Avoid the `libc` 1.0 alpha. |
+| CLI / logging / open browser | `clap` 4, `tracing` 0.1 + `tracing-subscriber` 0.3, `webbrowser` 1 | Same flags: `--open --device --no-ws --config --log-level`. |
+| Parity tests / benches | `npyz` 0.9 (reads the goldens), `criterion` 0.8, `loom` 0.7 (slot-ring), `hound` 3.5 (replay bin WAV) | |
+| Pi builds | `cross` or `cargo-zigbuild` → `aarch64-unknown-linux-gnu` | ALSA dev libs in the sysroot. **This Mac has Homebrew rust (no rustup)**, so install rustup before phase 4 to add the target. |
+| Packaging | `maturin` 1.15 (`bindings = "bin"`), `maturin-action`, `rust-embed` 8, `directories` 6 | Phase 5: the pip wheel carries the binary; `ui/` + the example config are embedded. |
 
 ## Threading model in Rust
 
@@ -68,6 +79,8 @@ Keep the shape of the Python design (`CLAUDE.md` → "Architecture: the threadin
 - **OSC** is sent directly from the worker threads with pre-encoded packet templates, as in `server/io/osc_sender.py`.
 
 ## Python → Rust inventory
+
+The outward behaviour each row must keep (CLI, config load semantics, every WS message and handler, OSC packets, HTTP, device handling, timing and backlog constants) is mapped in [`reference/engine_contracts.md`](../reference/engine_contracts.md). Use it as the phase 2/3 checklist.
 
 | Python | Rust home | Notes |
 |---|---|---|
@@ -110,52 +123,74 @@ Each of these is a place where a "reasonable" reimplementation diverges from the
 15. **OSC raw-dB FFT** rewrites sentinels to `db_floor`. OSC is big-endian, WS binary is little-endian (`[1][0][n:u16][f32×n]`).
 16. **JSON:** avoid NaN/inf (Python emits a non-standard `NaN` and serde errors). `meta.sr` is an int. Match key sets exactly; the UI reads by key.
 17. **Band edges are clamped** to ≤ 0.45·sr at startup, `set_band`, preset load and every hot-switch, and the clamped values are written back to cfg.
+18. **Both smoothers are asymmetric** (added after this plan was first written). `ExpSmoother` has per-band `tau` (release) and `tau_attack`, and picks attack iff `rms − v > 0.0` (strict). The FFT post-processor's per-bin smoother does the same, using `tau_attack_per_bin` interpolated exactly like `tau_per_bin`. The first frame copies `smooth = lin` with no smoothing.
+19. **Onset `abs_floor` is per band.** `thr_high = max(sens·thr_avg, abs_floor)`, `thr_low = max(K_LOW·thr_avg, 0.5·abs_floor)`.
+20. **`tau_to_alpha` floors tau at 1e-3 s**; OnsetTracker uses its own `max(tau, 1e-3)` and `dt = blocksize / max(sr, 1)`.
+21. **Geometry guards:** `log_bin_centers` uses `max(f, 1e-3)` and `log_span ≥ 1e-6`. AutoScaler log-bin geometry uses `log2(max(nyq/f_min, 1+1e-6))` and `max(oct, 1e-3)`. `build_log_bin_map` uses `f_max = 2·f_min` when `sr/2 ≤ f_min`. Smear is off when `f_max ≤ f_min`.
+22. **`FFTPostProcessor.reset()` resets smooth + peak + warm-up only.** `peak_smoothed` and the sentinel LUT survive. `reconfigure()` rebuilds everything, and the LUT is rebuilt from the next frame.
+23. **`load_preset` always reconfigures the FFT** through the `fft.n_bins` and `fft.window` sections, even with unchanged values, which resets all FFT post-processing state. The goldens' `script_drums` event at block 1100 records the exact call sequence.
+24. **Unknown WS message types get an error with no snap-back meta.** Only handler `ValueError`s add the targeted meta (see `testdata/golden/wire/`).
 
-## Parity harness
+## Parity harness (built in phase 0)
 
-The parity harness is how "same behaviour" gets proven. Build it before porting any stage.
+The parity harness is how "same behaviour" gets proven. Everything below exists and runs. The format and replay contract are in [`testdata/golden/README.md`](../../testdata/golden/README.md); read it before writing the Rust parity test.
 
-- **Python side (`tools/parity/make_goldens.py`):** drives the real `server.dsp` classes offline, block by block, from a deterministic signal plus a config plus a *parameter script* (e.g. "at block 400 set noise_floor=…, at block 900 set bands=…, at block 1200 set n_bins=64"). It dumps per block: `raw[3]`, `scaled[3]`, `onsets[3]`, `bpm`; and per hop: `raw_db[n]` (f32), `processed[n]` (f32). Requires one behaviour-preserving refactor of the reference: extract the loop bodies of `DSPWorker.run` and `FFTWorker.run` into `process_block(block)` / `process_hop(window)` methods, so the golden script calls exactly the production code.
-- **Signals** are generated deterministically by the script, so no audio files are committed: a synthetic drum loop at 120 BPM (decaying sine kick, noise-burst snare, hi-passed noise hats), a log sine sweep, white and pink noise, silence, a silence→loud step, and full-scale clipping.
-- **Matrix:** the default config (`configs/main.example.yaml`); strength 0 / 0.5 / 1; tilt 0; smear 0; `n_bins` 16 / 256 / 1024; filter order 1 / 4 / 8; sr 16000 / 44100 / 48000; window 512 / 4096; plus the parameter-script run. Keep clips to a few seconds so the fixtures stay at a few MB.
-- **Rust side:** `cargo test -p dsp` replays the same signal, config and script through the `dsp` crate and compares with these tolerances:
+- **DSP goldens:** `uv run python tools/parity/make_goldens.py` writes `testdata/golden/` (27 cases, ~20 MB, deterministic; `--check` proves it byte for byte).
+  - **Driver:** it drives the real engine offline through `tools/parity/offline.py`, which is `App` with the device/network edges stubbed. Each block goes through `DSPWorker.process_block`, each hop through `FFTWorker.process_hop`, and control changes go through the real `Dispatcher`.
+  - **Recorded:** per block `raw`/`scaled`/`onsets`/`bpm`; per hop `raw_db`/`processed` (f32), plus a hop table; `derived_*` internal state (bin map, taus, alphas, kernel, noise budget, SOS) for localising divergence; and a standalone filter-design table (sr × order 1–8 × 9 band pairs).
+  - **Matrix:**
 
-| Output | Tolerance |
-|---|---|
-| L/M/H raw + scaled (f64) | max abs ≤ 1e-9 |
-| Onset streams | identical. Any exception must be a documented threshold-edge case (value within 1e-9 of the threshold) |
-| BPM | ≤ 1e-9 |
-| FFT raw dB (f32) | ≤ 1e-4 dB, identical sentinel positions |
-| FFT processed (f32) | ≤ 1e-6 abs |
+    | Group | Cases |
+    |---|---|
+    | Default config × signal | 7 signals: drums, sweep, white, pink, silence, step, clip |
+    | Strength | 0 / 0.5 / 1 |
+    | Tilt, smear | tilt 0, smear 0 |
+    | Log bins | 16 / 256 / 1024 |
+    | Filter order | 1 / 4 / 8 |
+    | FFT window | 512 / 4096 |
+    | Blocksize | 128 / 512 |
+    | Sample rate | 16 k (bands clamp), 44.1 k |
+    | Noise floor | 0 (white), 0.01 (pink) |
+    | Scripted run | 10 s, 19 real WS messages (incl. a partial `load_preset`, FFT off/on, `n_bins` changes) |
 
-- **Wire goldens:** record one of each WS JSON message type (`meta`, `snapshot`, `server_status`, `devices`, `presets`, `error`) and one OSC packet per address from the Python server. A Rust test compares **schemas** (key sets and value types) and OSC packet **layout** byte for byte, apart from payload values.
-- Goldens are committed under `testdata/golden/`, so the Rust tests keep running after Python is deleted.
+  - **Event calls:** each scripted event records the DSP-level setter calls it caused. The Rust dsp-crate replay therefore needs no dispatcher, and the server crate's dispatcher test can check message → calls separately.
+- **Deviation from the original plan:** the input signals **are committed** (as f32 `.npy`). numpy's RNG (PCG64 + ziggurat normals) can't be reproduced in Rust, and committing them also pins the goldens against numpy changes. Generator: `tools/signals.py`.
+- **Tolerances** (in the manifest): L/M/H raw + scaled + BPM ≤ 1e-9 abs; onsets identical (the only allowed exception is a documented threshold-edge case); FFT raw dB ≤ 1e-4 dB with identical sentinel positions; FFT processed ≤ 1e-6; SOS ≤ 1e-12.
+- **Wire goldens:** `uv run tools/parity/record_wire.py` captures from a live server into `testdata/golden/wire/`: every WS message type (4 error flavours), both binary FFT modes, all 8 OSC packets, the persisted main.yaml and a saved preset. For the Rust engine: `--out <dir> --server-cmd <rust binary>`, then `--compare testdata/golden/wire <dir>` diffs JSON key sets/types, OSC layout, FFT headers and YAML shape.
+- **Live bench:** `uv run tools/bench/live_bench.py` is engine-agnostic and runs a Rust binary via `--server-cmd`. See [`reference/perf_baseline.md`](../reference/perf_baseline.md).
+- Goldens stay after cutover. `tools/parity/make_goldens.py`, `offline.py` and `tools/bench/stage_bench.py` import `server` and go with it. `record_wire.py`, `live_bench.py` and `tools/signals.py` are engine-agnostic PEP 723 scripts and stay.
 
 ## Phases
 
 Order matters; each phase's acceptance gates the next.
 
-### Phase 0: scaffold + reference prep
-- Cargo workspace `engine/` with `dsp` + `server` crates. CI-less is fine for now; `cargo test` and `cargo clippy` run locally.
-- Confirm the crate picks above (`sci-rs` vs a hand port; the YAML crate).
-- The Python `process_block` / `process_hop` extraction (behaviour-preserving; verify that the running server's perf and output are unchanged).
-- `tools/parity/make_goldens.py` + committed goldens + wire goldens.
-- **Done when:** goldens regenerate deterministically (same bytes twice) and an empty Rust parity test loads them.
+### Phase 0: scaffold + reference prep (Python side done)
+
+- **Done:**
+  - **Reference refactor:** `DSPWorker.process_block`, `FFTWorker.process_hop` and `App._build_fft_pipeline` were extracted. This is pure code motion; checked bit-identical against the pre-refactor HEAD on 5 cases, and the live perf is unchanged.
+  - **Crate picks** are confirmed (table above).
+  - **Goldens + wire goldens + benches** are committed (harness section above).
+  - **Configs:** `grep -l "^beat:" configs/*.yaml` is already empty.
+- **Remaining (first task of the implementer):**
+  - **Workspace:** create the Cargo workspace `engine/` (`dsp` lib + `server` bin crates; add `engine/target/` to `.gitignore`).
+  - **Golden loader:** write a `dsp` integration test that loads `testdata/golden/manifest.json` + one case through `npyz` and asserts shapes/dtypes (the "empty parity test").
+  - **Lint:** run `cargo test` and `cargo clippy` clean.
+- **Done when:** that test passes. Then phase 1.
 
 ### Phase 1: `dsp` crate at parity (offline, no audio device)
 - Port in pipeline order and turn each golden green before the next: filter design + biquads → RMS → ExpSmoother → AutoScaler → OnsetTracker/BPM → log-bin map + FFT power → FFTPostProcessor. Then add the setters and the parameter script.
 - `replay` bin: WAV in → the same dump format out (useful for debugging divergence against the Python script).
-- Benchmark per stage with `criterion` on the M2.
-- **Done when:** the whole golden matrix passes within tolerance, `assert_no_alloc` is clean on `process_block` / `process_hop`, and the benchmark numbers are recorded in this doc.
+- Benchmark per stage with `criterion` on the M2, using the stage names of `tools/bench/stage_bench.py` (`dsp.filter_bank`, `dsp.dsp_block_total`, `fft.postprocess`, `fft.fft_hop_total` …) so the two tables line up.
+- **Done when:** the whole golden matrix passes within tolerance, `assert_no_alloc` is clean on `process_block` / `process_hop`, and the Rust stage numbers sit next to the Python ones in [`reference/perf_baseline.md`](../reference/perf_baseline.md).
 
 ### Phase 2: realtime spine, headless
 - cpal input + re-blocking, slot ring, DSP + FFT worker threads, command queues, stores, OSC publisher, perf rings and drop counters, priority boost, the backlog policies (DSP max backlog 4 blocks; FFT 2 hops), and the audio watchdog (1 s stall → `send_silence` → reopen by name every 3 s, falling back to the default device).
 - `audio-server --no-ws` runs end-to-end.
-- **Done when:** the OSC output is byte-layout-identical to Python. Live comparison: feed both servers the same loopback input (BlackHole) and diff `/audio/lmh` statistically; exactness is covered by phase 1. Unplugging and replugging a USB mic recovers. Zero drops in a 10-minute soak on the M2.
+- **Done when:** the OSC output is byte-layout-identical to Python (`tools/parity/record_wire.py --compare` on the `osc_*` files; WS files will be missing until phase 3). `uv run tools/bench/live_bench.py --phases idle --server-cmd <rust>` shows zero drops. Live comparison: feed both servers the same loopback input (BlackHole) and diff `/audio/lmh` statistically; exactness is covered by phase 1. Unplugging and replugging a USB mic recovers. Zero drops in a 10-minute soak on the M2.
 
 ### Phase 3: control plane, UI works unmodified
 - Config load/validate/fallback, the persister, presets (save/list/load with partial-section apply), the dispatcher (all handlers + `set_stream`), coalesced meta, the WS three-lane client queues + binary FFT, `server_status` (same perf schema), static HTTP, idle-when-nobody-watches, device list/probe/hot-switch with rollback, the 50 ms filter-retune debounce, band clamping, and the OSC meta loop (≤ 50 ms after a change, plus a 1 Hz resend).
-- **Done when:** the wire-golden schema tests pass and a manual pass through the **unmodified** UI works: every slider, preset save/load, device switch, 2D/3D FFT, palette, raw-dB toggle, tab hide/show idling. `configs/main.yaml` written by Rust loads in Python and vice versa.
+- **Done when:** `record_wire.py --compare testdata/golden/wire <rust capture>` is all `ok`, the full `live_bench.py` run is recorded in `reference/perf_baseline.md` next to Python, and a manual pass through the **unmodified** UI works: every slider, preset save/load, device switch, 2D/3D FFT, palette, raw-dB toggle, tab hide/show idling. `configs/main.yaml` written by Rust loads in Python and vice versa.
 
 ### Phase 4: Pi validation + cutover
 - Cross-compile for `aarch64-unknown-linux-gnu`. Run Python and Rust on a Pi 4 (and a Pi 5 if one is available) with the same config, and record `server_status.perf` plus `top` CPU for both in this doc.
@@ -176,6 +211,8 @@ Decided by Xander: offer **both**. `pip install` / `uvx` stays the friendly "jus
 ## Open questions (for Xander)
 
 1. **Python library API?** The pip package above gives Python users the *server*: OSC/WS out, same as today. Should it *also* let people `import` the DSP from their own Python scripts, e.g. feed numpy blocks in and get L/M/H, onsets and FFT bins back? That would mean PyO3 bindings on the `dsp` crate, shipped in the same wheel. *Recommendation:* not in this sprint. Add it after cutover if someone asks; the `dsp` crate is designed pure and IO-free, so wrapping it later is cheap.
+
+2. **Device identity on Linux.** Saved configs reopen the input **by name**. cpal's ALSA device names will likely differ from PortAudio's (PortAudio embeds `(hw:2,0)`; unverified), so on the Pi a Python-era `audio.device.name` may not match after cutover, and the server falls back to the system default once. cpal also offers a stable `id()` (CoreAudio UID / ALSA id). *Recommendation:* pure port: keep name matching; on a miss, fall back to default as today; the user re-picks once. Storing the `id` too would be a schema change, so do it after cutover if it bites. Not blocking before phase 4.
 
 ## After cutover (not this sprint)
 

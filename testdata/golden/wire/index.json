@@ -1,0 +1,137 @@
+{
+ "server_cmd": [
+  "/Users/xandersteenbrugge/Documents/GitHub/Realtime_PyAudio_FFT/.venv/bin/python",
+  "-m",
+  "server.main",
+  "--config",
+  "/var/folders/gx/6k0w47s56vjbct0gh34cc9s00000gn/T/record_wire_1zgcpofl/main.yaml"
+ ],
+ "files": [
+  {
+   "file": "ws_meta.json",
+   "request": "greeting"
+  },
+  {
+   "file": "ws_devices.json",
+   "request": "greeting"
+  },
+  {
+   "file": "ws_presets.json",
+   "request": "greeting"
+  },
+  {
+   "file": "ws_server_status.json",
+   "request": "greeting / 5 Hz"
+  },
+  {
+   "file": "ws_snapshot.json",
+   "request": "stream (60 Hz)"
+  },
+  {
+   "file": "ws_snapshot_onset.json",
+   "request": "stream, a tick where low_onset fired"
+  },
+  {
+   "file": "ws_fft_processed.bin",
+   "request": "stream, meta.fft_send_raw_db=false"
+  },
+  {
+   "file": "ws_error_unknown_type.json",
+   "request": {
+    "type": "no_such_message"
+   }
+  },
+  {
+   "file": "ws_error_invalid_value.json",
+   "request": {
+    "type": "set_band",
+    "band": "low",
+    "lo_hz": 500.0,
+    "hi_hz": 100.0
+   }
+  },
+  {
+   "file": "ws_meta_after_error.json",
+   "request": "targeted snap-back meta right after a validation error"
+  },
+  {
+   "file": "ws_error_invalid_json.json",
+   "request": "{not json"
+  },
+  {
+   "file": "ws_error_missing_type.json",
+   "request": {
+    "no_type": 1
+   }
+  },
+  {
+   "file": "ws_meta_raw_db.json",
+   "request": "coalesced meta after set_fft_send_raw_db true"
+  },
+  {
+   "file": "ws_fft_raw_db.bin",
+   "request": "stream, meta.fft_send_raw_db=true"
+  },
+  {
+   "file": "ws_presets_after_save.json",
+   "request": {
+    "type": "save_preset",
+    "name": "wire golden"
+   }
+  },
+  {
+   "file": "ws_devices_reply.json",
+   "request": {
+    "type": "list_devices",
+    "probe": false
+   }
+  },
+  {
+   "file": "ws_meta_on_resume.json",
+   "request": {
+    "type": "set_stream",
+    "enabled": true
+   }
+  },
+  {
+   "file": "osc_audio_bpm.bin",
+   "request": "OSC capture (last packet before shutdown)"
+  },
+  {
+   "file": "osc_audio_fft.bin",
+   "request": "OSC capture (last packet before shutdown)"
+  },
+  {
+   "file": "osc_audio_lmh.bin",
+   "request": "OSC capture (last packet before shutdown)"
+  },
+  {
+   "file": "osc_audio_meta.bin",
+   "request": "OSC capture (last packet before shutdown)"
+  },
+  {
+   "file": "osc_audio_onset_high.bin",
+   "request": "OSC capture (last packet before shutdown)"
+  },
+  {
+   "file": "osc_audio_onset_low.bin",
+   "request": "OSC capture (last packet before shutdown)"
+  },
+  {
+   "file": "osc_audio_onset_mid.bin",
+   "request": "OSC capture (last packet before shutdown)"
+  },
+  {
+   "file": "osc_audio_fft_raw_db.bin",
+   "request": "OSC /audio/fft with send_raw_db=true"
+  },
+  {
+   "file": "persisted_main.yaml",
+   "request": "main.yaml as rewritten by the persister"
+  },
+  {
+   "file": "preset_saved.yaml",
+   "request": "save_preset 'wire golden'"
+  }
+ ]
+}

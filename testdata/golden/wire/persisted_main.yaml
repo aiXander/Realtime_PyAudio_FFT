@@ -1,0 +1,83 @@
+audio:
+  device:
+    name: BlackHole 2ch
+    index: null
+  blocksize: 256
+  channels: 1
+dsp:
+  low:
+    lo_hz: 88.0
+    hi_hz: 184.0
+  mid:
+    lo_hz: 304.0
+    hi_hz: 1760.0
+  high:
+    lo_hz: 2944.0
+    hi_hz: 13952.0
+  tau:
+    low: 0.11992496177470643
+    mid: 0.0904286944435064
+    high: 0.04974534040012045
+  tau_attack:
+    low: 0.015115496248775449
+    mid: 0.004940579455869164
+    high: 0.0031420094470879134
+  filter_order: 2
+autoscale:
+  tau_attack_s: 0.2552096536028223
+  tau_release_s: 30.0
+  noise_floor: 3.213660538640315e-05
+  strength: 0.65
+  master_gain: 1.0
+fft:
+  enabled: true
+  n_bins: 128
+  window_size: 1024
+  hop: 512
+  f_min: 30.0
+  db_floor: -90.0
+  db_ceiling: -10.0
+  peak_smear_oct: 0.3
+  tilt_db_per_oct: 3.5
+  send_raw_db: false
+onset:
+  low:
+    sensitivity: 1.8
+    refractory_s: 0.25
+    slow_tau_s: 0.3
+    abs_floor: 0.1
+  mid:
+    sensitivity: 1.8
+    refractory_s: 0.18
+    slow_tau_s: 0.2
+    abs_floor: 0.1
+  high:
+    sensitivity: 1.8
+    refractory_s: 0.12
+    slow_tau_s: 0.15
+    abs_floor: 0.1
+osc:
+  destinations:
+  - host: 127.0.0.1
+    port: 19000
+  send_fft: true
+ws:
+  enabled: true
+  host: 127.0.0.1
+  port: 18765
+  snapshot_hz: 60
+  http_port: 18766
+ui:
+  peak_decay_per_s: 0.5
+  layout:
+    split_x: 0.34536064701337327
+    split_y: 0.3863162718337408
+    quadrants:
+    - bars
+    - lines
+    - scene
+    - fft
+  show_onsets: false
+  fft_view: 2d
+  fft3d_style: cloud
+  palette: classic

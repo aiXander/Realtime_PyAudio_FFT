@@ -20,3 +20,13 @@ configs/main.yaml
 # Locally cloned reference repos (not part of this project)
 Realtime-beat-tracking/
 madmom/
+
+# Rust engine build output
+engine/target/
+
+# DSP parity goldens (~20 MB of .npy): regenerate with
+# `uv run python tools/parity/make_goldens.py` (README.md + wire/ stay tracked)
+testdata/golden/signals/
+testdata/golden/cases/
+testdata/golden/manifest.json
+testdata/golden/filter_design_sos.npy

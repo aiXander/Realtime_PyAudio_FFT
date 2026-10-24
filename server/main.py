@@ -504,6 +504,47 @@ class App:
         )
         return clamped
 
+    def _build_fft_pipeline(self, sr: float) -> None:
+        """Construct the FFT post-processor + FFT worker (not started) for
+        sample rate `sr` from the current cfg. Called once from start();
+        the offline parity tools (tools/parity/offline.py) call it too, so
+        goldens are built with exactly the production wiring."""
+        cfg = self.cfg
+        self.fft_postprocessor = FFTPostProcessor(
+            n_bins=cfg.fft.n_bins,
+            f_min=cfg.fft.f_min,
+            sr=sr,
+            bands=self._bands_meta_dict(),
+            tau=dict(cfg.dsp.tau),
+            tau_attack=dict(cfg.dsp.tau_attack),
+            tau_release_s=cfg.autoscale.tau_release_s,
+            noise_floor=cfg.autoscale.noise_floor,
+            strength=cfg.autoscale.strength,
+            db_floor=cfg.fft.db_floor,
+            db_ceiling=cfg.fft.db_ceiling,
+            hop_period_s=cfg.fft.hop / sr,
+            tau_attack_s=cfg.autoscale.tau_attack_s,
+            peak_smear_oct=cfg.fft.peak_smear_oct,
+            tilt_db_per_oct=cfg.fft.tilt_db_per_oct,
+        )
+        self.fft_worker = FFTWorker(
+            ring=self.ring,
+            fft_event=self.fft_event,
+            fft_enabled=self.fft_enabled,
+            stop_flag=self.stop_flag,
+            fft_store=self.fft_store,
+            osc_publisher=self.osc_publisher,
+            blocksize=cfg.audio.blocksize,
+            sr=sr,
+            window_size=cfg.fft.window_size,
+            hop=cfg.fft.hop,
+            n_bins=cfg.fft.n_bins,
+            f_min=cfg.fft.f_min,
+            perf_ring=self.perf_fft,
+            db_floor=cfg.fft.db_floor,
+            post_processor=self.fft_postprocessor,
+        )
+
     def start(self) -> None:
         cfg = self.cfg
         self.loop = asyncio.get_running_loop()
@@ -572,40 +613,7 @@ class App:
             blocksize=cfg.audio.blocksize,
             perf_ring=self.perf_dsp,
         )
-        self.fft_postprocessor = FFTPostProcessor(
-            n_bins=cfg.fft.n_bins,
-            f_min=cfg.fft.f_min,
-            sr=self.stream.samplerate,
-            bands=self._bands_meta_dict(),
-            tau=dict(cfg.dsp.tau),
-            tau_attack=dict(cfg.dsp.tau_attack),
-            tau_release_s=cfg.autoscale.tau_release_s,
-            noise_floor=cfg.autoscale.noise_floor,
-            strength=cfg.autoscale.strength,
-            db_floor=cfg.fft.db_floor,
-            db_ceiling=cfg.fft.db_ceiling,
-            hop_period_s=cfg.fft.hop / self.stream.samplerate,
-            tau_attack_s=cfg.autoscale.tau_attack_s,
-            peak_smear_oct=cfg.fft.peak_smear_oct,
-            tilt_db_per_oct=cfg.fft.tilt_db_per_oct,
-        )
-        self.fft_worker = FFTWorker(
-            ring=self.ring,
-            fft_event=self.fft_event,
-            fft_enabled=self.fft_enabled,
-            stop_flag=self.stop_flag,
-            fft_store=self.fft_store,
-            osc_publisher=self.osc_publisher,
-            blocksize=cfg.audio.blocksize,
-            sr=self.stream.samplerate,
-            window_size=cfg.fft.window_size,
-            hop=cfg.fft.hop,
-            n_bins=cfg.fft.n_bins,
-            f_min=cfg.fft.f_min,
-            perf_ring=self.perf_fft,
-            db_floor=cfg.fft.db_floor,
-            post_processor=self.fft_postprocessor,
-        )
+        self._build_fft_pipeline(self.stream.samplerate)
         self.dsp_worker.start()
         self.fft_worker.start()
 

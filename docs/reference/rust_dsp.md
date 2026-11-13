@@ -10,10 +10,10 @@ rustup, pinned in `engine/rust-toolchain.toml` (1.99.1 with clippy and rustfmt).
 
 | File | Python source | Notes |
 |---|---|---|
-| `src/lib.rs` | `App._build_pipeline_for_sr`, `_build_fft_pipeline`, `DSPWorker.process_block`, `FFTWorker.process_hop/reconfigure` | `EngineParams` (the cfg values the DSP reads, bands already clamped) → `DspChain` (filter → RMS → smoother → autoscaler → onset) and `FftChain` (analyzer + post-processor). These are the worker cores the server crate owns. |
+| `src/lib.rs` | `App._build_pipeline_for_sr`, `_build_fft_pipeline`, `DSPWorker.process_block`, `FFTWorker.process_hop/reconfigure` | `EngineParams` (the cfg values the DSP reads, bands already clamped) → `DspChain` (level meter on the raw block, then filter → RMS → smoother → autoscaler → onset) and `FftChain` (analyzer + post-processor). These are the worker cores the server crate owns. |
 | `src/math.rs` | `_math.py` + numpy internals | `tau_to_alpha`, `log_bin_center(s)`, `tilt_db`, plus exact replicas of `np.linspace`/`logspace`/`interp` and numpy's **pairwise summation** (`pairwise_sum` = `np.sum`; `reduce_segment` = one `np.add.reduceat` segment = `a[0] + pairwise(a[1:])`). |
 | `src/filters.rs` | `filters.py` | `clamp_band_edges`; `design_bandpass` (sci-rs `iirfilter_dyn`, matches scipy to ~2e-15); `FilterDesign` is a fixed-capacity `Copy` struct (≤ 8 sections per band) so `FilterBank::install` never allocates. The kernel is scipy's DF2T `_sosfilt`, run as `run::<N>` (see Decisions). |
-| `src/features.rs` | `features.py` | `block_rms`, `ExpSmoother`, `AutoScaler`: scalar n=3 code, line for line. |
+| `src/features.rs` | `features.py` | `block_rms`, `ExpSmoother`, `AutoScaler`: scalar n=3 code, line for line. `LevelMeter` (`/audio/level`): its scale is a wire contract, see [`engine_contracts.md`](engine_contracts.md) → OSC. |
 | `src/onset.rs` | `onset.py` | The BPM ring is a fixed `[f64; 12]`. `onset_count` is never reset. |
 | `src/fft.rs` | `fft.py` | `build_log_bin_map`, symmetric `hanning`, `FftAnalyzer` (realfft plan, contiguous valid-bin runs, f32 wire frame + sentinels). The sentinels are written once at construction; `process_hop` only computes (and takes the `log10` of) the non-empty bins. |
 | `src/fft_post.rs` | `fft_postprocess.py` | `FftPostProcessor`. All setters are alloc-free except the smear. `Smear::build` is pure and runs on the control thread; `install_smear` swaps it in and returns the old one to drop off-thread. `prime_lut` builds the sentinel LUT ahead of the first frame. |

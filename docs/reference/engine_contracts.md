@@ -117,18 +117,27 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
 
 ## OSC (`server/io/osc_sender.py`, `server/io/osc_publisher.py`)
 
-- **Transport:** UDP to every `osc.destinations` entry, from one non-blocking socket. Send errors are swallowed and logged at DEBUG. Byte layouts: `testdata/golden/wire/osc_*.bin`.
+- **Transport:** UDP to every `osc.destinations` entry, from one non-blocking socket, IPv4 only. Every packet goes to every destination. Send errors are swallowed and logged at DEBUG. Byte layouts: `testdata/golden/wire/osc_*.bin`.
+- **Destination hosts.** An IPv4 literal is used as-is and never looked up. A host name (**Rust engine only**) is resolved on its own thread (`osc-resolve`), first right after start and then every 5 s: startup never waits for a name or fails on one; until it resolves that destination is skipped; a later failed lookup keeps the last address; an address change is picked up within 5 s. Logged on change only (one warning when a name starts failing, one info line when it resolves or moves). Never resolve on a worker thread or the control loop: an absent `.local` name blocks `getaddrinfo` for 5 s on macOS. Pinned by `osc::tests::late_resolved_destination_starts_receiving`.
+  - **The Python reference needs literal IPs.** It resolves in the `OscSender` constructor (an unknown name stops the server from starting) and again on every packet on the DSP worker (a host that disappears blocks each send for 5 s).
+  - Destinations are set by hand in `configs/main.yaml` while the server is stopped (the persister rewrites the file from memory). No WS message or UI field. `configs/*.yaml` is gitignored except the example, because presets snapshot the destinations too: never write a real host into the example, a doc or a test.
 
   | address | args | when |
   |---|---|---|
   | `/audio/lmh` | `,fff` scaled × master_gain | every DSP block (32 B) |
   | `/audio/bpm` | `,f` | every DSP block (20 B) |
+  | `/audio/level` | `,f` loudness on a fixed scale, `0..1`, no master_gain | every DSP block (24 B, float at offset 20), after `bpm` and before that block's onsets |
   | `/audio/onset/{low,mid,high}` | `,i 1` | only on that band's onset blocks (28 B, constant) |
   | `/audio/fft` | `,f×n` processed × gain, or raw dB with sentinels and sub-floor values raised to `db_floor` | every hop while `osc.send_fft` and FFT is enabled. One datagram; `n ≤ 1024` keeps it under macOS's 9216-byte limit |
   | `/audio/meta` | `,iiiffffff` = sr, blocksize, n_bins, low_lo, low_hi, mid_lo, mid_hi, high_lo, high_hi | at startup, then every 1 s, ≥ 50 ms after a change to sr / bands / n_bins, and right after any stream change |
 
-- **Silence:** `/audio/lmh 0 0 0` + `/audio/bpm 0` (the zero templates), sent once when the audio watchdog detects a stall.
-- LMH, BPM and onsets go out on the DSP worker thread; FFT goes out on the FFT worker thread; meta goes out on the control loop.
+- **`/audio/level` is a fixed scale, part of the contract** (`LevelMeter` in `server/dsp/features.py` / `engine/dsp/src/features.rs`). Per mono block, before the filter bank: `ms = mean(x²)` in f64 (non-finite → 0); `p += α·(ms − p)` with `α = 1 − exp(−(blocksize/sr)/0.1 s)`, `p` starting at 0 and zeroed when the sample rate changes; `level = 0` when `p ≤ 1e-6`, else `min(1, 1 + 10·log10(p)/60)`. So −60 dBFS RMS reads 0, −30 reads 0.5, a full-scale sine 0.95.
+  - The floor and time constant are constants, not config: consumers write their thresholds in this scale. No config block, WS message, meta key or UI.
+  - Never auto-scaled, noise-gated or multiplied by `master_gain`, and always inside `0..1` on the wire. A consumer that min/max-rescales any float leaving `0..1` would turn it back into an auto-gained signal.
+  - The power is smoothed, then the log taken (an RMS meter): the reading doesn't depend on the block size. Smoothing the dB value instead reads lower the smaller the block.
+- **Order within a DSP block:** `lmh`, `bpm`, `level`, then the onsets, so a consumer woken by an onset already holds that block's level.
+- **Silence:** `/audio/lmh 0 0 0` + `/audio/bpm 0` + `/audio/level 0` (the zero templates), sent once when the audio watchdog detects a stall.
+- LMH, BPM, level and onsets go out on the DSP worker thread; FFT goes out on the FFT worker thread; meta goes out on the control loop.
 
 ## Static HTTP (`server/io/http_server.py`)
 

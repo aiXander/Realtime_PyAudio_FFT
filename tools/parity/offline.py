@@ -83,6 +83,7 @@ class OfflineApp(App):
             smoother=self.smoother,
             auto_scaler=self.auto_scaler,
             onset_tracker=self.onset_tracker,
+            level_meter=self.level_meter,
             features_store=self.features_store,
             osc_publisher=None,
             blocksize=cfg.audio.blocksize,

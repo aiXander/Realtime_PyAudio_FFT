@@ -44,6 +44,7 @@ TOLERANCES = {
     "raw": {"max_abs": 1e-9},
     "scaled": {"max_abs": 1e-9},
     "bpm": {"max_abs": 1e-9},
+    "level": {"max_abs": 1e-9},
     "onsets": {"exact": True,
                "note": "an exception must be a documented threshold-edge case: novelty within 1e-9 of the threshold"},
     "fft_raw_db": {"max_abs": 1e-4, "sentinel_positions": "identical"},
@@ -243,6 +244,7 @@ def run_case(case: dict, sig: np.ndarray, out: Path, work: Path) -> dict:
     scaled = np.zeros((n_blocks, 3), np.float64)
     onsets = np.zeros((n_blocks, 3), np.int8)
     bpm = np.zeros(n_blocks, np.float64)
+    level = np.zeros(n_blocks, np.float64)
     hop_rows, raw_db_chunks, proc_chunks, offsets = [], [], [], [0]
 
     events_by_block: dict[int, list[dict]] = {}
@@ -261,6 +263,7 @@ def run_case(case: dict, sig: np.ndarray, out: Path, work: Path) -> dict:
         raw[b] = app.smoother.values
         scaled[b] = app.dsp_worker.scaled_buf
         onsets[b] = app.dsp_worker.onsets_buf
+        level[b] = app.dsp_worker.level
         for start, bins_f32, processed in eng.fft_hops():
             hop_rows.append((start, b))
             raw_db_chunks.append(bins_f32.copy())
@@ -279,6 +282,7 @@ def run_case(case: dict, sig: np.ndarray, out: Path, work: Path) -> dict:
     put("scaled", scaled)
     put("onsets", onsets)
     put("bpm", bpm)
+    put("level", level)
     put("hops", np.array(hop_rows, np.int64).reshape(-1, 2))
     put("fft_offsets", np.array(offsets, np.int64))
     put("fft_raw_db", np.concatenate(raw_db_chunks).astype(np.float32) if raw_db_chunks
@@ -379,7 +383,7 @@ def generate_all(out: Path) -> None:
         "replay_order": [
             "for each block b: apply events with block == b (their `calls`, depth 0 only, in order)",
             "write block b (float32) into the slot ring",
-            "DSP: filter -> rms -> smoother -> autoscaler -> onset; record raw/scaled/onsets/bpm",
+            "DSP: level meter on the block, then filter -> rms -> smoother -> autoscaler -> onset; record raw/scaled/onsets/bpm/level",
             "FFT: for each row of hops with processed_after_block == b, window = blocks "
             "[start, start + window_blocks) cast to f64 -> process_hop; record raw_db, processed",
         ],
@@ -388,6 +392,8 @@ def generate_all(out: Path) -> None:
             "(master_gain only multiplies wire outputs, never DSP state).",
             "fft_raw_db / fft_processed are per-hop frames concatenated; frame k is "
             "[fft_offsets[k], fft_offsets[k+1]) (n_bins changes mid-script).",
+            "level = LevelMeter output (/audio/level): fixed-scale loudness of the mono block "
+            "before the filter bank, in [0, 1]; no event changes it.",
             "hops rows are [window_start_block, processed_after_block].",
             "events[].calls are the DSP-level setter calls the dispatcher made, depth 0 = called by "
             "App/Dispatcher, depth 1 = nested inside another traced call (e.g. FFTWorker.reconfigure "

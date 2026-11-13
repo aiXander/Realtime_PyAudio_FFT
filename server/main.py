@@ -33,7 +33,7 @@ from .config import (
 )
 from .control import validate as V
 from .control.dispatcher import Dispatcher
-from .dsp.features import AutoScaler, ExpSmoother
+from .dsp.features import AutoScaler, ExpSmoother, LevelMeter
 from .dsp.fft import FFTWorker
 from .dsp.fft_postprocess import FFTPostProcessor
 from .dsp.filters import FilterBank, clamp_band_edges
@@ -145,6 +145,7 @@ class App:
         self.smoother: ExpSmoother | None = None
         self.auto_scaler: AutoScaler | None = None
         self.onset_tracker: OnsetTracker | None = None
+        self.level_meter: LevelMeter | None = None
         self.dsp_worker: DSPWorker | None = None
         self.fft_worker: FFTWorker | None = None
         self.fft_postprocessor: FFTPostProcessor | None = None
@@ -477,6 +478,10 @@ class App:
             db_floor=cfg.fft.db_floor,
             db_ceiling=cfg.fft.db_ceiling,
         )
+        if self.level_meter is None:
+            self.level_meter = LevelMeter(sr, cfg.audio.blocksize)
+        else:
+            self.level_meter.reconfigure(sr, cfg.audio.blocksize)
         if self.onset_tracker is not None:
             # Hot-switch: alphas depend on dt = blocksize / sr. User-tuned
             # per-band params are persisted on the instance and survive
@@ -608,6 +613,7 @@ class App:
             smoother=self.smoother,
             auto_scaler=self.auto_scaler,
             onset_tracker=self.onset_tracker,
+            level_meter=self.level_meter,
             features_store=self.features_store,
             osc_publisher=self.osc_publisher,
             blocksize=cfg.audio.blocksize,

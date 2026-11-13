@@ -14,6 +14,57 @@ pub fn block_rms(x: &[f64]) -> f64 {
     (acc / x.len() as f64).sqrt()
 }
 
+/// `/audio/level` scale. Constants, not config: consumers write their own
+/// thresholds in this scale, so it is part of the wire contract.
+pub const LEVEL_TAU_S: f64 = 0.1;
+pub const LEVEL_FLOOR_DB: f64 = -60.0;
+/// `10^(LEVEL_FLOOR_DB / 10)`.
+const LEVEL_FLOOR_POWER: f64 = 1e-6;
+
+/// Broadband loudness on a fixed scale, never auto-gained (`/audio/level`,
+/// port of Python `LevelMeter`): one-pole smooth the block's mean square
+/// (0.1 s), then map dBFS linearly so −60 dB reads 0 and 0 dB reads 1.
+/// Runs on the mono block before the filter bank.
+pub struct LevelMeter {
+    p: f64,
+    alpha: f64,
+}
+
+impl LevelMeter {
+    pub fn new(sr: f64, blocksize: usize) -> Self {
+        let mut m = LevelMeter { p: 0.0, alpha: 0.0 };
+        m.reconfigure(sr, blocksize);
+        m
+    }
+
+    /// New sr / blocksize (device hot-switch): re-derive alpha, zero `p`.
+    pub fn reconfigure(&mut self, sr: f64, blocksize: usize) {
+        self.alpha = tau_to_alpha(blocksize as f64 / sr, LEVEL_TAU_S);
+        self.p = 0.0;
+    }
+
+    /// One block of mono samples → level in `[0, 1]`. Allocation-free.
+    #[inline]
+    pub fn update(&mut self, x: &[f32]) -> f64 {
+        let mut acc = 0.0f64;
+        for &v in x {
+            let v = v as f64;
+            acc += v * v;
+        }
+        let mut ms = acc / x.len() as f64;
+        if !ms.is_finite() {
+            ms = 0.0;
+        }
+        self.p += self.alpha * (ms - self.p);
+        if self.p <= LEVEL_FLOOR_POWER {
+            return 0.0;
+        }
+        (1.0 + 10.0 * self.p.log10() / -LEVEL_FLOOR_DB)
+            .max(0.0)
+            .min(1.0)
+    }
+}
+
 /// Per-band asymmetric one-pole envelope follower: attack alpha when
 /// `rms - v > 0.0` (strict), release alpha otherwise.
 pub struct ExpSmoother {

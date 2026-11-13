@@ -4,7 +4,7 @@
   "-m",
   "server.main",
   "--config",
-  "/var/folders/gx/6k0w47s56vjbct0gh34cc9s00000gn/T/record_wire_1zgcpofl/main.yaml"
+  "/var/folders/gx/6k0w47s56vjbct0gh34cc9s00000gn/T/record_wire_8gch37sm/main.yaml"
  ],
  "files": [
   {
@@ -99,6 +99,10 @@
   },
   {
    "file": "osc_audio_fft.bin",
+   "request": "OSC capture (last packet before shutdown)"
+  },
+  {
+   "file": "osc_audio_level.bin",
    "request": "OSC capture (last packet before shutdown)"
   },
   {

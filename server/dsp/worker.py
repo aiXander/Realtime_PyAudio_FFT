@@ -9,7 +9,7 @@ import time
 import numpy as np
 
 from ._errlog import RateLimitedErrorLog
-from .features import ExpSmoother, AutoScaler, block_rms
+from .features import ExpSmoother, AutoScaler, LevelMeter, block_rms
 from .filters import FilterBank
 from .onset import OnsetTracker
 from ..io.osc_publisher import OscPublisher
@@ -23,7 +23,7 @@ MAX_DSP_BACKLOG_BLOCKS = 4  # ~21 ms at 48k/256
 class DSPWorker(threading.Thread):
     def __init__(self, ring, dsp_event: threading.Event, stop_flag: threading.Event,
                  filter_bank: FilterBank, smoother: ExpSmoother, auto_scaler: AutoScaler,
-                 onset_tracker: OnsetTracker,
+                 onset_tracker: OnsetTracker, level_meter: LevelMeter,
                  features_store, osc_publisher: OscPublisher | None,
                  blocksize: int, perf_ring: np.ndarray):
         super().__init__(name="dsp-worker", daemon=True)
@@ -34,6 +34,8 @@ class DSPWorker(threading.Thread):
         self.smoother = smoother
         self.auto_scaler = auto_scaler
         self.onset_tracker = onset_tracker
+        self.level_meter = level_meter
+        self.level = 0.0  # this block's /audio/level (fixed scale, 0..1)
         self.features_store = features_store
         # OSC is dispatched directly from this worker thread (no asyncio
         # hop). May be None in test / headless setups; absence skips OSC.
@@ -62,8 +64,11 @@ class DSPWorker(threading.Thread):
         directly so the goldens come from exactly this code.
 
         Results: raw (smoothed RMS) in `self.smoother.values`, scaled in
-        `self.scaled_buf`, onset pulses in `self.onsets_buf`; returns the BPM.
+        `self.scaled_buf`, onset pulses in `self.onsets_buf`, the broadband
+        level (of `x` itself, before the filter bank) in `self.level`;
+        returns the BPM.
         """
+        self.level = self.level_meter.update(x)
         lo, md, hi = self.filter_bank.process(x)
         rms_lo = block_rms(lo)
         rms_md = block_rms(md)
@@ -140,7 +145,7 @@ class DSPWorker(threading.Thread):
                         # cycle.
                         if self.osc_publisher is not None:
                             self.osc_publisher.publish_lmh(
-                                self.scaled_buf, self.onsets_buf, bpm, t_recv_ns,
+                                self.scaled_buf, self.onsets_buf, bpm, self.level, t_recv_ns,
                             )
                         t1 = time.perf_counter_ns()
                         i = self.perf_idx

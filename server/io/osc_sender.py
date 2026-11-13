@@ -7,7 +7,7 @@ float payload in place and call `sendto` — zero allocation per packet.
 Thread-safety:
   * Each `send_*` method mutates its own packet bytearray. As long as a
     given method is only called from one thread, no locking is needed.
-    Current usage: LMH/onset/BPM from the DSP worker; FFT from the FFT
+    Current usage: LMH/BPM/level/onset from the DSP worker; FFT from the FFT
     worker. The two methods touch disjoint buffers.
   * The shared UDP socket is thread-safe at the kernel level (`sendto`
     releases the GIL and is atomic at the OS layer for datagrams).
@@ -60,6 +60,11 @@ _BPM_TEMPLATE = b"/audio/bpm\x00\x00,f\x00\x00\x00\x00\x00\x00"
 _BPM_FLOAT_OFFSET = 16
 _BPM_PACK = struct.Struct("!f").pack_into
 
+# Pre-encoded "/audio/level ,f <f>": address (12 chars) padded to 16, ",f"
+# padded to 4, one float32 BE at offset 20. Total: 24.
+_LEVEL_TEMPLATE = b"/audio/level\x00\x00\x00\x00,f\x00\x00\x00\x00\x00\x00"
+_LEVEL_FLOAT_OFFSET = 20
+
 
 def _build_fft_packet(n_bins: int) -> tuple[bytearray, np.ndarray, int]:
     """Build an "/audio/fft ,ff...f <f32 * n_bins>" packet template.
@@ -93,6 +98,7 @@ class OscSender:
         # allocation per send.
         self._lmh_buf = bytearray(_LMH_TEMPLATE)
         self._bpm_buf = bytearray(_BPM_TEMPLATE)
+        self._level_buf = bytearray(_LEVEL_TEMPLATE)
         self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._udp_sock.setblocking(False)
         self._addrs = [(d.host, int(d.port)) for d in self._dests]
@@ -166,14 +172,26 @@ class OscSender:
             except Exception as e:
                 log.debug("osc bpm send failed: %s", e)
 
+    def send_level(self, level: float) -> None:
+        """Sends `/audio/level <f>` (fixed-scale loudness, 0..1). Per-block,
+        same shape as `send_bpm`."""
+        _BPM_PACK(self._level_buf, _LEVEL_FLOAT_OFFSET, float(level))
+        buf = self._level_buf
+        sock = self._udp_sock
+        for addr in self._addrs:
+            try:
+                sock.sendto(buf, addr)
+            except Exception as e:
+                log.debug("osc level send failed: %s", e)
+
     def send_silence(self) -> None:
-        """Send `/audio/lmh 0 0 0` + `/audio/bpm 0`. Safe from any thread:
+        """Send `/audio/lmh 0 0 0` + `/audio/bpm 0` + `/audio/level 0`. Safe from any thread:
         the unmutated templates (all-zero floats) are immutable bytes, so
         this never touches the buffers the DSP worker packs into. Sent when
         audio input stalls, so downstream consumers settle to silence
         instead of holding the last level."""
         sock = self._udp_sock
-        for pkt in (_LMH_TEMPLATE, _BPM_TEMPLATE):
+        for pkt in (_LMH_TEMPLATE, _BPM_TEMPLATE, _LEVEL_TEMPLATE):
             for addr in self._addrs:
                 try:
                     sock.sendto(pkt, addr)

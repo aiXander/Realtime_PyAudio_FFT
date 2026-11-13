@@ -15,7 +15,7 @@ pub mod filters;
 pub mod math;
 pub mod onset;
 
-use features::{AutoScaler, AutoScalerParams, ExpSmoother, block_rms};
+use features::{AutoScaler, AutoScalerParams, ExpSmoother, LevelMeter, block_rms};
 use fft::{FftAnalyzer, FftGeometry};
 use fft_post::{FftPostParams, FftPostProcessor, PostReconfigure};
 use filters::FilterBank;
@@ -61,15 +61,19 @@ pub struct BlockOut {
     pub scaled: [f64; 3],
     pub onsets: [i8; 3],
     pub bpm: f64,
+    /// Fixed-scale loudness of the block before the filter bank, `[0, 1]`
+    /// (`/audio/level`). Never multiplied by master_gain.
+    pub level: f64,
 }
 
-/// The DSP worker's state: filter → RMS → smoother → autoscaler → onset
-/// (Python `DSPWorker.process_block`).
+/// The DSP worker's state: level meter on the block, then filter → RMS →
+/// smoother → autoscaler → onset (Python `DSPWorker.process_block`).
 pub struct DspChain {
     pub filter_bank: FilterBank,
     pub smoother: ExpSmoother,
     pub auto_scaler: AutoScaler,
     pub onset_tracker: OnsetTracker,
+    pub level_meter: LevelMeter,
 }
 
 impl DspChain {
@@ -95,12 +99,14 @@ impl DspChain {
                 },
             ),
             onset_tracker: OnsetTracker::new(p.sr, p.blocksize, p.onset),
+            level_meter: LevelMeter::new(p.sr, p.blocksize),
         }
     }
 
     /// One audio block. Allocation-free.
     #[inline]
     pub fn process_block(&mut self, x: &[f32]) -> BlockOut {
+        let level = self.level_meter.update(x);
         let [lo, md, hi] = self.filter_bank.process(x);
         let mut rms = [block_rms(lo), block_rms(md), block_rms(hi)];
         if !rms.iter().all(|r| r.is_finite()) {
@@ -118,6 +124,7 @@ impl DspChain {
             scaled,
             onsets,
             bpm,
+            level,
         }
     }
 }

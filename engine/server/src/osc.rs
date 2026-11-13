@@ -1,10 +1,15 @@
 //! OSC over UDP (`server/io/osc_sender.py` + `osc_publisher.py`):
 //! byte-identical packets from pre-encoded templates, one non-blocking
-//! socket shared by the workers (L/M/H, BPM, onsets, FFT) and the control
+//! socket shared by the workers (L/M/H, BPM, level, onsets, FFT) and the control
 //! loop (meta, silence). Hot-path sends never allocate; send errors are
-//! swallowed (logged at DEBUG).
+//! swallowed (logged at DEBUG). Destinations given as host names are
+//! resolved off those threads, by `spawn_resolver`, first right after start
+//! and then every 5 s, so one can join the network after the server started.
 
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs, UdpSocket};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 /// "/audio/lmh ,fff <f><f><f>": address 12 B, tags 8 B, floats at 20. 32 B.
 pub const LMH_TEMPLATE: [u8; 32] = *b"/audio/lmh\0\0,fff\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
@@ -12,6 +17,9 @@ const LMH_FLOAT_OFFSET: usize = 20;
 /// "/audio/bpm ,f <f>": float at 16. 20 B.
 pub const BPM_TEMPLATE: [u8; 20] = *b"/audio/bpm\0\0,f\0\0\0\0\0\0";
 const BPM_FLOAT_OFFSET: usize = 16;
+/// "/audio/level ,f <f>": address padded to 16, float at 20. 24 B.
+pub const LEVEL_TEMPLATE: [u8; 24] = *b"/audio/level\0\0\0\0,f\0\0\0\0\0\0";
+const LEVEL_FLOAT_OFFSET: usize = 20;
 /// "/audio/onset/{low,mid,high} ,i 1": constant, 28 B each.
 pub const ONSET_PACKETS: [[u8; 28]; 3] = [
     *b"/audio/onset/low\0\0\0\0,i\0\0\0\0\0\x01",
@@ -24,16 +32,46 @@ const FFT_ADDR_FIELD: &[u8; 12] = b"/audio/fft\0\0";
 pub const MAX_FFT_PACKET: usize =
     crate::validate::osc_fft_packet_bytes(crate::validate::MAX_N_FFT_BINS);
 
+/// How often the resolver thread looks every host name up again.
+const RESOLVE_PERIOD: Duration = Duration::from_secs(5);
+const RESOLVE_SLEEP_SLICE: Duration = Duration::from_millis(250);
+
+/// Bit 48 marks a resolved slot; below it the IPv4 address (32 bits) and
+/// the port (16 bits). 0 = not resolved yet.
+const SLOT_VALID: u64 = 1 << 48;
+
+fn pack_addr(a: SocketAddrV4) -> u64 {
+    SLOT_VALID | (u64::from(u32::from(*a.ip())) << 16) | u64::from(a.port())
+}
+
+fn unpack_addr(v: u64) -> Option<SocketAddrV4> {
+    (v & SLOT_VALID != 0).then(|| SocketAddrV4::new(Ipv4Addr::from((v >> 16) as u32), v as u16))
+}
+
+/// A destination given as a host name: resolved by the `osc-resolve`
+/// thread into `slots[slot]`.
+struct NamedDest {
+    slot: usize,
+    host: String,
+    port: u16,
+}
+
 pub struct OscSender {
     sock: Option<UdpSocket>,
-    addrs: Vec<SocketAddr>,
+    /// One per destination. Read lock-free by the DSP / FFT workers and
+    /// the control loop; written only by `set_slot`.
+    slots: Box<[AtomicU64]>,
+    names: Vec<NamedDest>,
 }
 
 impl OscSender {
-    /// Resolve every destination once (IPv4, like the reference's AF_INET
-    /// socket). An unresolvable destination is skipped with a warning.
+    /// IPv4 only (like the reference's AF_INET socket). A destination whose
+    /// host is an IPv4 literal is usable at once and never looked up. A host
+    /// name gets an empty slot that `spawn_resolver`'s thread fills: this
+    /// constructor resolves nothing, so startup never waits for a name.
     pub fn new(dests: &[crate::config::OscDest]) -> Self {
-        let mut addrs = Vec::new();
+        let mut slots = Vec::new();
+        let mut names = Vec::new();
         for d in dests {
             let port = match u16::try_from(d.port) {
                 Ok(p) => p,
@@ -42,29 +80,82 @@ impl OscSender {
                     continue;
                 }
             };
-            match (d.host.as_str(), port).to_socket_addrs() {
-                Ok(it) => match it.into_iter().find(|a| a.is_ipv4()) {
-                    Some(a) => addrs.push(a),
-                    None => tracing::warn!("osc destination {}:{} has no IPv4 address; skipped", d.host, port),
-                },
-                Err(e) => tracing::warn!("osc destination {}:{} unresolvable ({e}); skipped", d.host, port),
+            match d.host.parse::<Ipv4Addr>() {
+                Ok(ip) => slots.push(AtomicU64::new(pack_addr(SocketAddrV4::new(ip, port)))),
+                Err(_) => {
+                    names.push(NamedDest { slot: slots.len(), host: d.host.clone(), port });
+                    slots.push(AtomicU64::new(0));
+                }
             }
         }
         let sock = UdpSocket::bind(("0.0.0.0", 0))
             .and_then(|s| s.set_nonblocking(true).map(|_| s))
             .map_err(|e| tracing::warn!("osc socket unavailable: {e}"))
             .ok();
-        OscSender { sock, addrs }
+        OscSender { sock, slots: slots.into_boxed_slice(), names }
     }
 
+    /// Lock-free and allocation-free: destinations whose name has not
+    /// resolved yet are skipped.
     #[inline]
     pub fn send(&self, pkt: &[u8]) {
         let Some(sock) = &self.sock else { return };
-        for a in &self.addrs {
+        for slot in self.slots.iter() {
+            let Some(a) = unpack_addr(slot.load(Ordering::Relaxed)) else { continue };
             if let Err(e) = sock.send_to(pkt, a)
                 && tracing::enabled!(tracing::Level::DEBUG)
             {
                 assert_no_alloc::permit_alloc(|| tracing::debug!("osc send to {a} failed: {e}"));
+            }
+        }
+    }
+
+    /// Point destination `slot` at `addr`; the next `send` on any thread
+    /// uses it.
+    fn set_slot(&self, slot: usize, addr: SocketAddrV4) {
+        self.slots[slot].store(pack_addr(addr), Ordering::Relaxed);
+    }
+
+    /// Look every host name up once. A name that resolves (or whose address
+    /// changed) is stored; a failed lookup keeps the last address, so a
+    /// destination that reboots keeps receiving once it is back. Blocking
+    /// (an absent `.local` name takes ~5 s to fail): resolver thread only.
+    /// Logs on change only; `failing[i]` remembers that name i was warned.
+    fn resolve_names(&self, failing: &mut [bool]) {
+        for (n, failing) in self.names.iter().zip(failing) {
+            let found = (n.host.as_str(), n.port).to_socket_addrs().map(|it| {
+                it.into_iter().find_map(|a| match a {
+                    SocketAddr::V4(a) => Some(a),
+                    SocketAddr::V6(_) => None,
+                })
+            });
+            match found {
+                Ok(Some(a)) => {
+                    if unpack_addr(self.slots[n.slot].load(Ordering::Relaxed)) != Some(a) {
+                        self.set_slot(n.slot, a);
+                        tracing::info!("osc destination {}:{} resolved to {a}", n.host, n.port);
+                    }
+                    *failing = false;
+                }
+                other => {
+                    if !*failing {
+                        let why = match other {
+                            Err(e) => e.to_string(),
+                            _ => "no IPv4 address".to_string(),
+                        };
+                        let held = match unpack_addr(self.slots[n.slot].load(Ordering::Relaxed)) {
+                            Some(a) => format!("keeping {a}"),
+                            None => "skipped until it resolves".to_string(),
+                        };
+                        tracing::warn!(
+                            "osc destination {}:{} does not resolve ({why}); {held}, retrying every {} s",
+                            n.host,
+                            n.port,
+                            RESOLVE_PERIOD.as_secs()
+                        );
+                    }
+                    *failing = true;
+                }
             }
         }
     }
@@ -74,11 +165,41 @@ impl OscSender {
         self.send(&meta_packet(sr, blocksize, n_bins, bands));
     }
 
-    /// `/audio/lmh 0 0 0` + `/audio/bpm 0` from the immutable templates
-    /// (safe from any thread).
+    /// `/audio/lmh 0 0 0` + `/audio/bpm 0` + `/audio/level 0` from the
+    /// immutable templates (safe from any thread).
     pub fn send_silence(&self) {
         self.send(&LMH_TEMPLATE);
         self.send(&BPM_TEMPLATE);
+        self.send(&LEVEL_TEMPLATE);
+    }
+}
+
+/// Start the `osc-resolve` thread when any destination is a host name
+/// (none: no thread). It looks the names up right away and then every
+/// `RESOLVE_PERIOD`, and returns once `shared.stop` is set. Never joined:
+/// at shutdown it may be inside a lookup that takes seconds. Not on the
+/// control loop for the same reason (a lookup there would freeze the WS
+/// broadcast and the audio watchdog).
+pub fn spawn_resolver(shared: Arc<crate::shared::Shared>) {
+    if shared.osc.names.is_empty() {
+        return;
+    }
+    let run = move || {
+        let mut failing = vec![false; shared.osc.names.len()];
+        loop {
+            shared.osc.resolve_names(&mut failing);
+            let mut slept = Duration::ZERO;
+            while slept < RESOLVE_PERIOD {
+                if shared.stop.load(Ordering::Acquire) {
+                    return;
+                }
+                std::thread::sleep(RESOLVE_SLEEP_SLICE);
+                slept += RESOLVE_SLEEP_SLICE;
+            }
+        }
+    };
+    if let Err(e) = std::thread::Builder::new().name("osc-resolve".into()).spawn(run) {
+        tracing::warn!("could not start the osc-resolve thread ({e}); host-name destinations stay unresolved");
     }
 }
 
@@ -98,23 +219,26 @@ pub fn meta_packet(sr: i32, blocksize: i32, n_bins: i32, bands: dsp::Bands) -> [
     p
 }
 
-/// The DSP worker's packet buffers (L/M/H + BPM are mutated in place).
+/// The DSP worker's packet buffers (L/M/H, BPM and level are mutated in
+/// place).
 pub struct LmhPacker {
     lmh: [u8; 32],
     bpm: [u8; 20],
+    level: [u8; 24],
 }
 
 impl Default for LmhPacker {
     fn default() -> Self {
-        LmhPacker { lmh: LMH_TEMPLATE, bpm: BPM_TEMPLATE }
+        LmhPacker { lmh: LMH_TEMPLATE, bpm: BPM_TEMPLATE, level: LEVEL_TEMPLATE }
     }
 }
 
 impl LmhPacker {
     /// `OscPublisher.publish_lmh`: scaled × gain (f64 product, packed f32),
-    /// BPM, then one constant packet per band that fired.
+    /// BPM, level (no gain), then one constant packet per band that fired
+    /// — a consumer woken by an onset already holds that block's level.
     #[inline]
-    pub fn publish(&mut self, osc: &OscSender, scaled: [f64; 3], gain: f64, onsets: [i8; 3], bpm: f64) {
+    pub fn publish(&mut self, osc: &OscSender, scaled: [f64; 3], gain: f64, onsets: [i8; 3], bpm: f64, level: f64) {
         for (i, s) in scaled.iter().enumerate() {
             let o = LMH_FLOAT_OFFSET + 4 * i;
             self.lmh[o..o + 4].copy_from_slice(&((s * gain) as f32).to_be_bytes());
@@ -122,6 +246,8 @@ impl LmhPacker {
         osc.send(&self.lmh);
         self.bpm[BPM_FLOAT_OFFSET..].copy_from_slice(&(bpm as f32).to_be_bytes());
         osc.send(&self.bpm);
+        self.level[LEVEL_FLOAT_OFFSET..].copy_from_slice(&(level as f32).to_be_bytes());
+        osc.send(&self.level);
         for (i, &fired) in onsets.iter().enumerate() {
             if fired != 0 {
                 osc.send(&ONSET_PACKETS[i]);
@@ -213,6 +339,9 @@ mod tests {
         assert_eq!(&g[..20], &LMH_TEMPLATE[..20]);
         let g = golden("osc_audio_bpm.bin");
         assert_eq!(&g[..16], &BPM_TEMPLATE[..16]);
+        let g = golden("osc_audio_level.bin");
+        assert_eq!(g.len(), 24);
+        assert_eq!(&g[..20], &LEVEL_TEMPLATE[..20]);
         for (i, band) in ["low", "mid", "high"].iter().enumerate() {
             assert_eq!(golden(&format!("osc_audio_onset_{band}.bin")), ONSET_PACKETS[i]);
         }
@@ -234,9 +363,31 @@ mod tests {
         crate::validate::osc_fft_packet_bytes(n)
     }
 
+    /// A destination that appears late starts receiving without a restart:
+    /// nothing is sent to an unresolved name, and the first send after the
+    /// resolver's store reaches it.
+    #[test]
+    fn late_resolved_destination_starts_receiving() {
+        let rx = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        let SocketAddr::V4(rx_addr) = rx.local_addr().unwrap() else { panic!("ipv4") };
+        let dest = crate::config::OscDest { host: "late-host.invalid".into(), port: rx_addr.port() as i64 };
+        let osc = OscSender::new(&[dest]);
+        let mut buf = [0u8; 64];
+
+        osc.send(&LEVEL_TEMPLATE);
+        rx.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        assert!(rx.recv_from(&mut buf).is_err(), "sent to an unresolved destination");
+
+        osc.set_slot(osc.names[0].slot, rx_addr);
+        osc.send(&LEVEL_TEMPLATE);
+        rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let (n, _) = rx.recv_from(&mut buf).expect("no packet after the slot was stored");
+        assert_eq!(&buf[..n], &LEVEL_TEMPLATE);
+    }
+
     #[test]
     fn fft_values() {
-        let osc = OscSender { sock: None, addrs: vec![] };
+        let osc = OscSender::new(&[]);
         let mut f = FftPacker::default();
         f.send_raw_db(&osc, &[-1000.0, -50.0, -95.0], -90.0);
         let pk = f.packet();

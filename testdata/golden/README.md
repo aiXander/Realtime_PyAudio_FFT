@@ -36,6 +36,7 @@ Per-case arrays (`cases/<id>/`):
 | `scaled.npy` | f64 (n_blocks, 3) | AutoScaler output (after the strength blend, **before master_gain**) = the onset detector's input |
 | `onsets.npy` | i8 (n_blocks, 3) | per-block onset pulse per band |
 | `bpm.npy` | f64 (n_blocks,) | `OnsetTracker.update` return value |
+| `level.npy` | f64 (n_blocks,) | `LevelMeter.update` return value = the `/audio/level` payload: fixed-scale loudness of the block before the filter bank, in `[0, 1]` |
 | `hops.npy` | i64 (n_hops, 2) | `[window_start_block, processed_after_block]` |
 | `fft_offsets.npy` | i64 (n_hops+1,) | frame k of the two arrays below is `[off[k], off[k+1])`. Frames are variable length because `n_bins` changes mid-script. |
 | `fft_raw_db.npy` | f32 (Σ n_bins,) | wire dB per hop, with `-1000` sentinels in empty log bins |
@@ -47,14 +48,14 @@ Per-case arrays (`cases/<id>/`):
 For each block `b` in `0..n_blocks`:
 
 1. Apply every event with `block == b`, in order. Each event's `calls` lists the DSP-level setter calls that the Python dispatcher made (`target`, `method`, `args`, `kwargs`, `depth`). Replay **depth-0 calls only**. Depth-1 calls happen *inside* a depth-0 call (e.g. `fft_worker.reconfigure` → `fft_postprocessor.reconfigure`) and are part of that call's semantics. `fft_worker.resync` / `reset` only move the read pointer; the `hops` table already encodes their effect.
-2. Run the DSP block on samples `[b·bs, (b+1)·bs)` (f32 → f64 for the filters), then compare row `b` of raw / scaled / onsets / bpm.
+2. Run the DSP block on samples `[b·bs, (b+1)·bs)` (f32 → f64 for the filters), then compare row `b` of raw / scaled / onsets / bpm / level.
 3. For every `hops` row with `processed_after_block == b`, in order: build the window from blocks `[start, start + window_size/bs)` (f32 → f64), run the hop, and compare the frame.
 
 The filter retunes (`set_band`) are applied immediately at the event. The live server debounces them by 50 ms, but that's a server timing detail, not DSP behaviour. `load_preset` deep-merges the preset (`preset_files`) over main.yaml as it was persisted at that moment, which is the current state.
 
 ## Tolerances
 
-These live in `manifest.tolerances`: L/M/H raw and scaled, and BPM, ≤ 1e-9 abs. Onsets are exact; any exception must be documented as a threshold-edge case. FFT raw dB ≤ 1e-4 dB, with identical sentinel positions. FFT processed ≤ 1e-6 abs. Filter-design SOS ≤ 1e-12.
+These live in `manifest.tolerances`: L/M/H raw and scaled, BPM and level ≤ 1e-9 abs. Onsets are exact; any exception must be documented as a threshold-edge case. FFT raw dB ≤ 1e-4 dB, with identical sentinel positions. FFT processed ≤ 1e-6 abs. Filter-design SOS ≤ 1e-12.
 
 ## Filter design table
 

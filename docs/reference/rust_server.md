@@ -40,7 +40,7 @@ The binary finds the repo (for `configs/` and `ui/`) by walking up from its own 
 | `ring.rs` | `audio/ringbuffer.py` | slot ring, atomics + a correct seqlock (below); stress test |
 | `audio.rs` | `audio/{devices,stream,callback}.py` | device list / lookup / probe, stream open (F32, Fixed blocksize when in range, else the device's own format: every cpal integer/float format via `with_sample_type!`), the realtime callback |
 | `workers.rs` | `dsp/worker.py`, `FFTWorker.run` | worker loops, backlog policies, commands, stores |
-| `osc.rs` | `io/osc_sender.py`, `osc_publisher.py` | byte-identical templates; header tests against `testdata/golden/wire/osc_*.bin` |
+| `osc.rs` | `io/osc_sender.py`, `osc_publisher.py` | byte-identical templates; header tests against `testdata/golden/wire/osc_*.bin`. One atomic slot per destination, so `send` stays lock- and allocation-free (the DSP worker runs under `assert_no_alloc`); host names are filled in by the `osc-resolve` thread (below) |
 | `ws.rs` | `io/ws_server.py` (`_Client`, connection handling) | the three lanes, axum upgrade handler, binary FFT encoder |
 | `http.rs` | `io/http_server.py` | `ServeDir` + `Cache-Control: no-cache` + forced MIME types |
 | `shared.rs` | perf arrays, `_errlog.py` | `now_ns` (CLOCK_MONOTONIC, the e2e clock), `PerfRing` + stats, rate-limited worker error log |
@@ -66,6 +66,15 @@ The binary finds the repo (for `configs/` and `ui/`) by walking up from its own 
 - **Refused** (any kern_return ≠ success): one warning, the thread stays at QoS `USER_INITIATED`. `priority::tests` checks the kernel accepts the periods we use.
 - **Linux:** `SCHED_FIFO` priority 10 (above normal threads, below kernel / audio-server RT threads) when `RLIMIT_RTPRIO` / `CAP_SYS_NICE` allow, else the reference's nice −5. Type-checked for `aarch64-unknown-linux-gnu`, **not run on hardware** (phase 4).
 - **Not done: joining CoreAudio's IO workgroup (`os_workgroup`).** Apple's recommended mechanism for auxiliary audio threads, but cpal doesn't expose the device's workgroup (it would need raw CoreAudio FFI from the device UID), a thread must already be real-time to join, and our workers are decoupled from the IO cycle by the ring (the FFT runs at hop rate). Revisit only if real-time scheduling alone stops being enough.
+
+## OSC destinations that are host names (deviation from the reference)
+
+Contract: [`engine_contracts.md`](engine_contracts.md) → OSC. `OscSender::new` resolves nothing; `osc::spawn_resolver` starts a plain `std::thread` only when a destination is not an IPv4 literal.
+
+- **Why a thread of its own.** `send` is called from the DSP worker, the FFT worker and the control loop. A lookup can block 5 s, which on the control loop would freeze the WS broadcast and the audio watchdog.
+- **Never joined at shutdown** (it may be inside a lookup); it sleeps in 250 ms slices and returns on `shared.stop`. It is spawned after the worker threads, past the last startup failure point, because nothing else would stop it.
+- **Slot encoding:** one `AtomicU64` per destination = valid bit, IPv4, port; 0 = not resolved, skipped by `send`.
+- Untested on Linux (a Pi-local server sends to `127.0.0.1`).
 
 ## Robustness beyond the reference (2026-10-24 review)
 

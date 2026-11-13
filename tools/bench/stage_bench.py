@@ -72,7 +72,7 @@ def bench_config(overrides: dict, sr: float = 48000.0) -> dict:
         asc.update(sm.values, dw.scaled_buf); t4 = pc()
         bpm = ot.update(dw.scaled_buf, dw.onsets_buf); t5 = pc()
         app.features_store.publish(sm.values, dw.scaled_buf, dw.onsets_buf, ot.onset_count, bpm, 0); t6 = pc()
-        pub.publish_lmh(dw.scaled_buf, dw.onsets_buf, bpm, 0); t7 = pc()
+        pub.publish_lmh(dw.scaled_buf, dw.onsets_buf, bpm, dw.level, 0); t7 = pc()
         for k, a, b in (("filter_bank", t0, t1), ("rms_x3", t1, t2), ("smoother", t2, t3),
                         ("autoscaler", t3, t4), ("onset", t4, t5), ("feature_store_publish", t5, t6),
                         ("osc_publish_lmh", t6, t7)):

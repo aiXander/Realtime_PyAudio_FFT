@@ -201,6 +201,7 @@ struct CaseResult {
     raw: MaxErr,
     scaled: MaxErr,
     bpm: MaxErr,
+    level: MaxErr,
     fft_raw_db: MaxErr,
     fft_processed: MaxErr,
     onset_mismatches: Vec<String>,
@@ -224,12 +225,14 @@ fn replay_case(m: &Value, case: &Value) -> CaseResult {
     let scaled = load_npy::<f64>(&path("scaled")).data;
     let onsets = load_npy::<i8>(&path("onsets")).data;
     let bpm = load_npy::<f64>(&path("bpm")).data;
+    let level = load_npy::<f64>(&path("level")).data;
+    assert_eq!(level.len(), n_blocks, "{id}: level length");
     let hops = load_npy::<i64>(&path("hops")).data;
     let offsets = load_npy::<i64>(&path("fft_offsets")).data;
     let want_db = load_npy::<f32>(&path("fft_raw_db")).data;
     let want_proc = load_npy::<f32>(&path("fft_processed")).data;
 
-    let (t_lmh, t_bpm) = (tol(m, "raw"), tol(m, "bpm"));
+    let (t_lmh, t_bpm, t_level) = (tol(m, "raw"), tol(m, "bpm"), tol(m, "level"));
     let (t_db, t_proc) = (tol(m, "fft_raw_db"), tol(m, "fft_processed"));
 
     let mut dsp = DspChain::new(&p);
@@ -244,6 +247,7 @@ fn replay_case(m: &Value, case: &Value) -> CaseResult {
         raw: MaxErr::default(),
         scaled: MaxErr::default(),
         bpm: MaxErr::default(),
+        level: MaxErr::default(),
         fft_raw_db: MaxErr::default(),
         fft_processed: MaxErr::default(),
         onset_mismatches: Vec::new(),
@@ -276,6 +280,8 @@ fn replay_case(m: &Value, case: &Value) -> CaseResult {
             }
         }
         r.bpm.add(out.bpm, bpm[b], t_bpm, || format!("block {b}"));
+        r.level
+            .add(out.level, level[b], t_level, || format!("block {b}"));
 
         while hop < n_hops && hops[hop * 2 + 1] as usize == b {
             let start = hops[hop * 2] as usize;
@@ -314,8 +320,8 @@ fn replay_matrix_within_tolerance() {
     let only = std::env::var("PARITY_CASE").ok();
     let mut bad = Vec::new();
     eprintln!(
-        "{:<16} {:>9} {:>9} {:>9} {:>9} {:>9} {:>4} {:>4} {:>8}",
-        "case", "raw", "scaled", "bpm", "fft_db", "fft_proc", "ons", "sent", "n_fft"
+        "{:<16} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>4} {:>4} {:>8}",
+        "case", "raw", "scaled", "bpm", "level", "fft_db", "fft_proc", "ons", "sent", "n_fft"
     );
     for case in m["cases"].as_array().unwrap() {
         if only
@@ -326,11 +332,12 @@ fn replay_matrix_within_tolerance() {
         }
         let r = replay_case(&m, case);
         eprintln!(
-            "{:<16} {:>9.1e} {:>9.1e} {:>9.1e} {:>9.1e} {:>9.1e} {:>4} {:>4} {:>8}",
+            "{:<16} {:>9.1e} {:>9.1e} {:>9.1e} {:>9.1e} {:>9.1e} {:>9.1e} {:>4} {:>4} {:>8}",
             r.id,
             r.raw.max,
             r.scaled.max,
             r.bpm.max,
+            r.level.max,
             r.fft_raw_db.max,
             r.fft_processed.max,
             r.onset_mismatches.len(),
@@ -341,6 +348,7 @@ fn replay_matrix_within_tolerance() {
             ("raw", &r.raw),
             ("scaled", &r.scaled),
             ("bpm", &r.bpm),
+            ("level", &r.level),
             ("fft_raw_db", &r.fft_raw_db),
             ("fft_processed", &r.fft_processed),
         ] {

@@ -268,6 +268,9 @@ impl App {
             .map_err(|e| StartupError::new(format!("could not start worker threads: {e}"), ""))?;
         let _ = wake.set([workers.dsp_thread.clone(), workers.fft_thread.clone()]);
         workers.collect_garbage();
+        // After the last startup failure point: the thread only ends on
+        // `shared.stop`, which the workers' shutdown sets.
+        crate::osc::spawn_resolver(shared.clone());
 
         let now = Instant::now();
         let mut app = App {

@@ -307,6 +307,7 @@ impl DspWorker {
                     std::mem::swap(&mut c.auto_scaler, &mut core.auto_scaler);
                     c.onset_tracker.reconfigure(sr, self.buf.len());
                     c.onset_tracker.reset();
+                    c.level_meter.reconfigure(sr, self.buf.len());
                     self.give_back(Garbage::DspCore(core));
                 }
                 DspCmd::ResetReadPtr => {
@@ -364,7 +365,7 @@ impl DspWorker {
                     };
                     self.store.publish();
                     let sh = &*self.shared;
-                    self.packer.publish(&sh.osc, out.scaled, sh.master_gain.load(), out.onsets, out.bpm);
+                    self.packer.publish(&sh.osc, out.scaled, sh.master_gain.load(), out.onsets, out.bpm, out.level);
                     record_latency(&sh.perf.lmh_e2e, t_recv);
                     sh.perf.dsp.record(now_ns() - t0);
                     self.read_idx += 1;

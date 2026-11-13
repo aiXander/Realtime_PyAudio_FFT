@@ -11,11 +11,11 @@ venv/
 build/
 dist/
 
-# Saved presets
-preset-*.yaml
-
-# Local runtime config (seeded from configs/main.example.yaml on first run)
-configs/main.yaml
+# Local runtime config (main.yaml, seeded from configs/main.example.yaml on
+# first run) and saved presets. Both carry osc.destinations, which may name
+# a private host: only the example is tracked.
+configs/*.yaml
+!configs/main.example.yaml
 
 # Locally cloned reference repos (not part of this project)
 Realtime-beat-tracking/

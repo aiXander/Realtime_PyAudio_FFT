@@ -205,7 +205,7 @@ def record(args) -> int:
         (out / "preset_saved.yaml").write_text(preset.read_text())
         log.append({"file": "preset_saved.yaml", "request": "save_preset 'wire golden'"})
     (out / "index.json").write_text(json.dumps({"server_cmd": cmd, "files": log}, indent=1) + "\n")
-    missing = {"/audio/lmh", "/audio/bpm", "/audio/fft", "/audio/meta", "/audio/onset/low",
+    missing = {"/audio/lmh", "/audio/bpm", "/audio/level", "/audio/fft", "/audio/meta", "/audio/onset/low",
                "/audio/onset/mid", "/audio/onset/high"} - set(osc.packets)
     print(f"wrote {len(log)} files to {out}" + (f"; MISSING OSC {sorted(missing)}" if missing else ""))
     return 1 if missing or osc.fft_raw is None else 0

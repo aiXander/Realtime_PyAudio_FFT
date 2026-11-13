@@ -24,6 +24,50 @@ def block_rms(x: np.ndarray) -> float:
     return math.sqrt(float(np.dot(x, x)) / x.size)
 
 
+# `/audio/level` scale. Constants, not config: consumers write their own
+# thresholds in this scale, so it is part of the wire contract. Mirrored in
+# engine/dsp/src/features.rs.
+LEVEL_TAU_S = 0.1
+LEVEL_FLOOR_DB = -60.0
+_LEVEL_FLOOR_POWER = 10.0 ** (LEVEL_FLOOR_DB / 10.0)  # 1e-6
+
+
+class LevelMeter:
+    """Broadband loudness on a fixed scale, never auto-gained (`/audio/level`).
+
+    An RMS meter over the mono block BEFORE the filter bank: one-pole smooth
+    the mean square (0.1 s), then map dBFS linearly so -60 dB reads 0 and
+    0 dB reads 1. Smoothing power (not dB) keeps the reading independent of
+    the block size. Not scaled by master_gain, not noise-gated.
+    """
+
+    def __init__(self, sr: float, blocksize: int):
+        self._scratch = np.zeros(int(blocksize), dtype=np.float64)
+        self.reconfigure(sr, blocksize)
+
+    def reconfigure(self, sr: float, blocksize: int) -> None:
+        """New sr / blocksize (device hot-switch): re-derive alpha, zero p."""
+        if self._scratch.size != int(blocksize):
+            self._scratch = np.zeros(int(blocksize), dtype=np.float64)
+        self._alpha = tau_to_alpha(int(blocksize) / float(sr), LEVEL_TAU_S)
+        self._p = 0.0
+
+    def update(self, x: np.ndarray) -> float:
+        """One block of mono samples -> level in [0, 1]. No allocation."""
+        s = self._scratch
+        # float32 -> float64 first: np.dot on float32 sums in float32, which
+        # is outside the 1e-9 parity tolerance against the Rust engine.
+        np.copyto(s, x)
+        ms = float(np.dot(s, s)) / s.size
+        if not math.isfinite(ms):
+            ms = 0.0
+        p = self._p + self._alpha * (ms - self._p)
+        self._p = p
+        if p <= _LEVEL_FLOOR_POWER:  # also guards log10(0)
+            return 0.0
+        return min(1.0, max(0.0, 1.0 + 10.0 * math.log10(p) / -LEVEL_FLOOR_DB))
+
+
 class ExpSmoother:
     """Per-band ASYMMETRIC one-pole envelope follower.
 

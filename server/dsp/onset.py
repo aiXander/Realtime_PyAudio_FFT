@@ -18,7 +18,7 @@ tempo-shaped — kick / sub events).
 Algorithm (industry-standard real-time onset detection — per band):
 
 1. Two one-pole envelopes of the band's input:
-     fast (~12 ms, shared, fixed) — removes per-block jitter
+     fast (~8 ms, shared, fixed) — removes per-block jitter
      slow (`slow_tau_s` per band) — local DC reference / "what 'normal' sounds like"
 2. Novelty function: half-wave rectified flux, `nov = max(0, fast - slow)`.
    Equivalent to a band-pass on the envelope: positive only when the signal
@@ -85,7 +85,7 @@ class OnsetTracker:
     K_LOW = 0.6
 
     # Fast envelope time constant — fixed; just removes per-block jitter.
-    FAST_TAU_S = 0.012
+    FAST_TAU_S = 0.008
 
     # Adaptive-threshold EMA tau — how quickly the trigger floor follows
     # changing dynamic content. Held constant.

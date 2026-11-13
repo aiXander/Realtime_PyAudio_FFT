@@ -8,7 +8,7 @@ pub const DEFAULT_SLOW_TAU_S: f64 = 0.30;
 pub const DEFAULT_ABS_FLOOR: f64 = 0.10;
 
 pub const K_LOW: f64 = 0.6;
-pub const FAST_TAU_S: f64 = 0.012;
+pub const FAST_TAU_S: f64 = 0.008;
 pub const THR_TAU_S: f64 = 1.000;
 
 pub const BPM_MIN: f64 = 60.0;

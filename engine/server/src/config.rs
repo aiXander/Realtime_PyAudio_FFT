@@ -134,6 +134,17 @@ impl OnsetCfg {
     }
 }
 
+/// `/audio/level` knobs: power smoothing, and the dBFS range mapped to 0..1.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq)]
+pub struct LevelCfg {
+    pub tau_s: f64,
+    pub floor_db: f64,
+    pub ceiling_db: f64,
+}
+
+/// `level:` values for a config that predates the block (`LEVEL_DEFAULTS`).
+pub const LEVEL_DEFAULTS: LevelCfg = LevelCfg { tau_s: 0.1, floor_db: -60.0, ceiling_db: 0.0 };
+
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct OscDest {
     pub host: String,
@@ -174,6 +185,7 @@ pub struct Config {
     pub autoscale: AutoscaleCfg,
     pub fft: FftCfg,
     pub onset: OnsetCfg,
+    pub level: LevelCfg,
     pub osc: OscCfg,
     pub ws: WsCfg,
     pub ui: UiCfg,
@@ -385,6 +397,26 @@ fn build_config(d: &Value) -> Result<Config, BuildErr> {
     }
     let onset = OnsetCfg { low: bands[0], mid: bands[1], high: bands[2] };
 
+    // A missing / non-mapping `level:`, or a null key, uses the defaults.
+    let lv = match d.get("level") {
+        Some(o @ Value::Object(_)) => o.clone(),
+        _ => Value::Object(Default::default()),
+    };
+    let lv_field = |k: &str, dv: f64| -> Value {
+        lv.get(k).filter(|x| !x.is_null()).cloned().unwrap_or(Value::from(dv))
+    };
+    let (lt, lf, lc) = (
+        lv_field("tau_s", LEVEL_DEFAULTS.tau_s),
+        lv_field("floor_db", LEVEL_DEFAULTS.floor_db),
+        lv_field("ceiling_db", LEVEL_DEFAULTS.ceiling_db),
+    );
+    let ok = v::validate_level(Some(&lt), Some(&lf), Some(&lc), None)?;
+    let level = LevelCfg {
+        tau_s: need(ok.tau_s, "tau_s")?,
+        floor_db: need(ok.floor_db, "floor_db")?,
+        ceiling_db: need(ok.ceiling_db, "ceiling_db")?,
+    };
+
     let od = req(d, "osc")?;
     let dests_raw = req(od, "destinations")?;
     let Value::Array(items) = dests_raw else {
@@ -422,7 +454,7 @@ fn build_config(d: &Value) -> Result<Config, BuildErr> {
         palette: v::validate_palette(opt(ud, "palette")?).unwrap_or_else(|_| "classic".into()),
     };
 
-    Ok(Config { audio, dsp, autoscale, fft, onset, osc, ws, ui })
+    Ok(Config { audio, dsp, autoscale, fft, onset, level, osc, ws, ui })
 }
 
 /// YAML → JSON value with the reference's scalar resolution. Non-finite
@@ -690,11 +722,13 @@ mod tests {
         assert_eq!(c.fft.n_bins, 1024);
         assert_eq!(c.ui.palette, "classic");
         assert_eq!(c.ws.snapshot_hz, 240);
-        // Missing onset block → defaults.
+        // Missing onset and level blocks → defaults (a main.yaml written
+        // before `level:` existed must load, not be reseeded).
         let i = t.find("onset:").unwrap();
         let j = t.find("osc:").unwrap();
         let c = load_str(&format!("{}{}", &t[..i], &t[j..])).unwrap();
         assert_eq!(c.onset.high, ONSET_DEFAULTS[2]);
+        assert_eq!(c.level, LEVEL_DEFAULTS);
     }
 
     #[test]

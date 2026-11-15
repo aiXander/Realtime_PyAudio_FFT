@@ -71,6 +71,14 @@ onset:
     refractory_s: 0.12
     slow_tau_s: 0.15
     abs_floor: 0.10
+level:
+  # /audio/level: broadband loudness, never auto-gained. The block power is
+  # smoothed over tau_s, then floor_db..ceiling_db (dBFS RMS) maps to 0..1
+  # and anything outside is clipped. Consumers write their thresholds in
+  # this 0..1 scale, so moving the range moves what they react to.
+  tau_s: 0.1
+  floor_db: -60.0
+  ceiling_db: 0.0
 osc:
   destinations:
   - host: 127.0.0.1

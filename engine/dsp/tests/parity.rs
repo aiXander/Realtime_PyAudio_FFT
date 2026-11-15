@@ -165,6 +165,10 @@ fn apply_call(call: &Value, dsp: &mut DspChain, fft: &mut FftChain) {
                 },
             )
         }
+        ("level_meter", "set_params") => {
+            dsp.level_meter
+                .set_params(f(&kw["tau_s"]), f(&kw["floor_db"]), f(&kw["ceiling_db"]))
+        }
         ("onset_tracker", "reset") => dsp.onset_tracker.reset(),
         ("onset_tracker", "advance") => dsp.onset_tracker.advance(u(&args[0]) as u64),
         ("onset_tracker", "reconfigure") => dsp.onset_tracker.reconfigure(f(&args[0]), u(&args[1])),

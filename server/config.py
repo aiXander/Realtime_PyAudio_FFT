@@ -23,6 +23,9 @@ from .control import validate as V
 
 log = logging.getLogger(__name__)
 
+# `level:` values for a config that predates the block.
+LEVEL_DEFAULTS = {"tau_s": 0.1, "floor_db": -60.0, "ceiling_db": 0.0}
+
 CANONICAL_CONFIG_PATH = (Path(__file__).resolve().parent.parent / "configs" / "main.yaml")
 
 
@@ -94,6 +97,13 @@ class OnsetCfg:
 
 
 @dataclass
+class LevelCfg:
+    tau_s: float        # smoothing of the block power (seconds)
+    floor_db: float     # dBFS RMS that reads 0 on /audio/level
+    ceiling_db: float   # dBFS RMS that reads 1
+
+
+@dataclass
 class OscDest:
     host: str
     port: int
@@ -131,6 +141,7 @@ class Config:
     autoscale: AutoscaleCfg
     fft: FftCfg
     onset: OnsetCfg
+    level: LevelCfg
     osc: OscCfg
     ws: WsCfg
     ui: UiCfg
@@ -239,6 +250,14 @@ def _build_config(d: dict) -> Config:
         onset_bands[name] = OnsetBandCfg(**ok)
     onset = OnsetCfg(**onset_bands)
 
+    # Added after the initial schema: a config without `level:` gets the
+    # defaults (the scale /audio/level had while it was fixed).
+    lv = d.get("level")
+    if not isinstance(lv, dict):
+        lv = {}
+    lv = {k: dv if lv.get(k) is None else lv[k] for k, dv in LEVEL_DEFAULTS.items()}
+    level = LevelCfg(**V.validate_level(**lv))
+
     od = d["osc"]
     dests = [OscDest(host=str(x["host"]), port=int(x["port"])) for x in od["destinations"]]
     osc = OscCfg(destinations=dests, send_fft=bool(od["send_fft"]))
@@ -268,7 +287,8 @@ def _build_config(d: dict) -> Config:
         palette=_or_default(V.validate_palette, ud.get("palette"), "classic"),
     )
 
-    return Config(audio=audio, dsp=dsp, autoscale=autoscale, fft=fft, onset=onset, osc=osc, ws=ws, ui=ui)
+    return Config(audio=audio, dsp=dsp, autoscale=autoscale, fft=fft, onset=onset, level=level,
+                  osc=osc, ws=ws, ui=ui)
 
 
 def _or_default(validate, v, default):

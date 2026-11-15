@@ -371,6 +371,18 @@ class App:
                 abs_floor=ok.get("abs_floor"),
             )
 
+    def apply_level(self, ok: dict) -> None:
+        """Apply a validated `/audio/level` update (any subset of tau_s,
+        floor_db, ceiling_db) to cfg + the meter. The meter always gets all
+        three current values in one call."""
+        lv = self.cfg.level
+        for k in ("tau_s", "floor_db", "ceiling_db"):
+            if k in ok:
+                setattr(lv, k, ok[k])
+        if self.level_meter is not None and ok:
+            self.level_meter.set_params(tau_s=lv.tau_s, floor_db=lv.floor_db,
+                                        ceiling_db=lv.ceiling_db)
+
     def apply_fft_n_bins(self, n: int) -> None:
         self.cfg.fft.n_bins = n
         self.fft_worker.reconfigure(n_bins=n)
@@ -479,7 +491,8 @@ class App:
             db_ceiling=cfg.fft.db_ceiling,
         )
         if self.level_meter is None:
-            self.level_meter = LevelMeter(sr, cfg.audio.blocksize)
+            self.level_meter = LevelMeter(sr, cfg.audio.blocksize, cfg.level.tau_s,
+                                          cfg.level.floor_db, cfg.level.ceiling_db)
         else:
             self.level_meter.reconfigure(sr, cfg.audio.blocksize)
         if self.onset_tracker is not None:
@@ -726,6 +739,11 @@ class App:
                 "noise_floor": cfg.autoscale.noise_floor,
                 "strength": cfg.autoscale.strength,
                 "master_gain": cfg.autoscale.master_gain,
+            },
+            "level": {
+                "tau_s": cfg.level.tau_s,
+                "floor_db": cfg.level.floor_db,
+                "ceiling_db": cfg.level.ceiling_db,
             },
             "onset": {
                 "low": {

@@ -72,6 +72,8 @@ SCRIPT = [
     (700, {"type": "set_fft_peak_smear", "peak_smear_oct": 0.8}),
     (800, {"type": "set_n_fft_bins", "n": 64}),
     (900, {"type": "set_filter_order", "order": 4}),
+    (950, {"type": "set_level", "tau_s": 0.3, "floor_db": -48.0, "commit": False}),
+    (975, {"type": "set_level", "ceiling_db": -6.0}),
     (1000, {"type": "set_onset", "band": "low", "sensitivity": 1.4, "refractory_s": 0.15}),
     (1050, {"type": "set_onset", "band": "high", "slow_tau_s": 0.08, "abs_floor": 0.05}),
     (1100, {"type": "load_preset", "name": "golden-window"}),
@@ -143,6 +145,7 @@ TRACED = {
     "auto_scaler": ("set_taus", "set_noise_floor", "set_tilt", "set_bands", "set_n_fft_window",
                     "set_fft_geometry", "set_strength", "reset"),
     "onset_tracker": ("set_params", "reconfigure", "reset", "advance"),
+    "level_meter": ("set_params",),
     "fft_worker": ("reconfigure", "reset", "resync"),
     "fft_postprocessor": ("reconfigure", "update_smoothing", "update_bands", "update_smear",
                           "update_tilt", "update_autoscale", "reset"),
@@ -392,8 +395,8 @@ def generate_all(out: Path) -> None:
             "(master_gain only multiplies wire outputs, never DSP state).",
             "fft_raw_db / fft_processed are per-hop frames concatenated; frame k is "
             "[fft_offsets[k], fft_offsets[k+1]) (n_bins changes mid-script).",
-            "level = LevelMeter output (/audio/level): fixed-scale loudness of the mono block "
-            "before the filter bank, in [0, 1]; no event changes it.",
+            "level = LevelMeter output (/audio/level): loudness of the mono block before the "
+            "filter bank, mapped from cfg.level's dB range to [0, 1]; set_level events retune it.",
             "hops rows are [window_start_block, processed_after_block].",
             "events[].calls are the DSP-level setter calls the dispatcher made, depth 0 = called by "
             "App/Dispatcher, depth 1 = nested inside another traced call (e.g. FFTWorker.reconfigure "

@@ -3,8 +3,9 @@
 //! socket shared by the workers (L/M/H, BPM, level, onsets, FFT) and the control
 //! loop (meta, silence). Hot-path sends never allocate; send errors are
 //! swallowed (logged at DEBUG). Destinations given as host names are
-//! resolved off those threads, by `spawn_resolver`, first right after start
-//! and then every 5 s, so one can join the network after the server started.
+//! resolved off those threads, by `spawn_resolver` (every 5 s until a name
+//! has an address, then once a minute), so one can join the network after
+//! the server started.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
@@ -32,8 +33,13 @@ const FFT_ADDR_FIELD: &[u8; 12] = b"/audio/fft\0\0";
 pub const MAX_FFT_PACKET: usize =
     crate::validate::osc_fft_packet_bytes(crate::validate::MAX_N_FFT_BINS);
 
-/// How often the resolver thread looks every host name up again.
+/// How often the resolver thread looks up a host name that has not
+/// resolved yet.
 const RESOLVE_PERIOD: Duration = Duration::from_secs(5);
+/// A name that has an address is looked up again only every this many
+/// periods (once a minute): enough to follow a destination that came back
+/// with a new address, without a lookup every few seconds during a show.
+const RESOLVED_EVERY: u32 = 12;
 const RESOLVE_SLEEP_SLICE: Duration = Duration::from_millis(250);
 
 /// Bit 48 marks a resolved slot; below it the IPv4 address (32 bits) and
@@ -54,6 +60,13 @@ struct NamedDest {
     slot: usize,
     host: String,
     port: u16,
+}
+
+/// The resolver thread's memory of one host name.
+#[derive(Clone, Copy, Default)]
+struct NameState {
+    failing: bool,
+    ticks_since_lookup: u32,
 }
 
 pub struct OscSender {
@@ -116,13 +129,23 @@ impl OscSender {
         self.slots[slot].store(pack_addr(addr), Ordering::Relaxed);
     }
 
-    /// Look every host name up once. A name that resolves (or whose address
+    /// One resolver tick (every `RESOLVE_PERIOD`). A name without an address
+    /// is looked up on every tick, one that has an address only every
+    /// `RESOLVED_EVERY` ticks. A name that resolves (or whose address
     /// changed) is stored; a failed lookup keeps the last address, so a
     /// destination that reboots keeps receiving once it is back. Blocking
     /// (an absent `.local` name takes ~5 s to fail): resolver thread only.
-    /// Logs on change only; `failing[i]` remembers that name i was warned.
-    fn resolve_names(&self, failing: &mut [bool]) {
-        for (n, failing) in self.names.iter().zip(failing) {
+    /// Logs on change only (`NameState::failing` = already warned).
+    fn resolve_names(&self, state: &mut [NameState]) {
+        for (n, st) in self.names.iter().zip(state) {
+            if self.slots[n.slot].load(Ordering::Relaxed) != 0 {
+                st.ticks_since_lookup += 1;
+                if st.ticks_since_lookup < RESOLVED_EVERY {
+                    continue;
+                }
+            }
+            st.ticks_since_lookup = 0;
+            let failing = &mut st.failing;
             let found = (n.host.as_str(), n.port).to_socket_addrs().map(|it| {
                 it.into_iter().find_map(|a| match a {
                     SocketAddr::V4(a) => Some(a),
@@ -148,10 +171,9 @@ impl OscSender {
                             None => "skipped until it resolves".to_string(),
                         };
                         tracing::warn!(
-                            "osc destination {}:{} does not resolve ({why}); {held}, retrying every {} s",
+                            "osc destination {}:{} does not resolve ({why}); {held}, retrying",
                             n.host,
-                            n.port,
-                            RESOLVE_PERIOD.as_secs()
+                            n.port
                         );
                     }
                     *failing = true;
@@ -175,8 +197,9 @@ impl OscSender {
 }
 
 /// Start the `osc-resolve` thread when any destination is a host name
-/// (none: no thread). It looks the names up right away and then every
-/// `RESOLVE_PERIOD`, and returns once `shared.stop` is set. Never joined:
+/// (none: no thread). It looks the names up right away, then every
+/// `RESOLVE_PERIOD` until a name has an address and once a minute after
+/// that, and returns once `shared.stop` is set. Never joined:
 /// at shutdown it may be inside a lookup that takes seconds. Not on the
 /// control loop for the same reason (a lookup there would freeze the WS
 /// broadcast and the audio watchdog).
@@ -185,9 +208,9 @@ pub fn spawn_resolver(shared: Arc<crate::shared::Shared>) {
         return;
     }
     let run = move || {
-        let mut failing = vec![false; shared.osc.names.len()];
+        let mut state = vec![NameState::default(); shared.osc.names.len()];
         loop {
-            shared.osc.resolve_names(&mut failing);
+            shared.osc.resolve_names(&mut state);
             let mut slept = Duration::ZERO;
             while slept < RESOLVE_PERIOD {
                 if shared.stop.load(Ordering::Acquire) {

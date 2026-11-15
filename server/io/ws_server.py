@@ -322,7 +322,7 @@ class WSServer:
         if not streamers:
             return
         # L/M/H snapshot
-        seq, raw, scaled, _t, _onsets_block, onset_counts, bpm = self.features_store.read()
+        seq, raw, scaled, _t, _onsets_block, onset_counts, bpm, level = self.features_store.read()
         if seq != state["feat_seq"]:
             state["feat_seq"] = seq
             g = self.get_master_gain()
@@ -349,6 +349,7 @@ class WSServer:
                 "mid_onset": o_md,
                 "high_onset": o_hi,
                 "bpm": bpm,
+                "level": level,
                 "t": self._server_ms(),
             }
             text = json.dumps(msg)

@@ -33,7 +33,7 @@ The binary finds the repo (for `configs/` and `ui/`) by walking up from its own 
 |---|---|---|
 | `main.rs` | `main.py:main`, `_resolve_config_path` | CLI (clap), repo-root discovery, seeding, fatal `error:`/`hint:` lines; `AllocDisabler` global allocator in debug builds |
 | `app.rs` | `main.py:App`, `ws_server.WSServer` (broadcast/status loops) | startup order, the event loop, meta / server_status builders, apply_* bus, hot-switch with rollback, watchdog, presets list |
-| `dispatcher.rs` | `control/dispatcher.py` | all 22 handlers; `load_preset` deep-merges over main.yaml *as on disk* and applies section by section |
+| `dispatcher.rs` | `control/dispatcher.py` | all 23 handlers; `load_preset` deep-merges over main.yaml *as on disk* and applies section by section |
 | `config.rs` | `config.py` | typed schema in dataclass field order; strict load (corrupt vs invalid), `.corrupt-<stamp>` backup + reseed, atomic write, `deep_merge` |
 | `validate.rs`, `py.rs` | `control/validate.py`, Python builtins | error strings word for word; `py.rs` = `bool()`/`int()`/`float()`/`str()`/`repr()` semantics over `serde_json::Value` |
 | `persist.rs` | `config.Persister` | deadline state machine (1 s drag / 50 ms commit / 250 ms cap) |
@@ -73,6 +73,7 @@ Contract: [`engine_contracts.md`](engine_contracts.md) → OSC. `OscSender::new`
 
 - **Why a thread of its own.** `send` is called from the DSP worker, the FFT worker and the control loop. A lookup can block 5 s, which on the control loop would freeze the WS broadcast and the audio watchdog.
 - **Never joined at shutdown** (it may be inside a lookup); it sleeps in 250 ms slices and returns on `shared.stop`. It is spawned after the worker threads, past the last startup failure point, because nothing else would stop it.
+- **Cadence:** a tick every 5 s; a name without an address is looked up on every tick, one with an address every 12th (`RESOLVED_EVERY`).
 - **Slot encoding:** one `AtomicU64` per destination = valid bit, IPv4, port; 0 = not resolved, skipped by `send`.
 - Untested on Linux (a Pi-local server sends to `127.0.0.1`).
 

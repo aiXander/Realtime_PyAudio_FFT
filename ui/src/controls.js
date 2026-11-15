@@ -227,6 +227,32 @@ export function setupControls() {
     send: (v, commit) => send({ type: "set_autoscale", strength: v, commit }),
   });
 
+  // Level (`/audio/level`): smoothing in ms (protocol in seconds) and the
+  // dBFS range mapped to 0..1. The two range ends keep LEVEL_MIN_SPAN_DB
+  // apart (the server rejects a range under 1 dB).
+  const LEVEL_MIN_SPAN_DB = 3;
+  const levelNow = () => store.meta.level || {};
+  const fmtDb = (v) => `${Math.round(v)} dBFS`;
+  const levelTauCtl = bindSlider($("level-tau"), $("level-tau-val"), {
+    fmt: (v) => (v >= 1000 ? `${(v / 1000).toFixed(1)} s` : fmtMs(v)),
+    send: (v, commit) => send({ type: "set_level", tau_s: v / 1000, commit }),
+  });
+  // onShow writes the snapped value back, so a thumb dragged past the other
+  // end stops there instead of sitting where the range can't go.
+  const levelFloorEl = $("level-floor"), levelCeilingEl = $("level-ceiling");
+  const levelFloorCtl = bindSlider(levelFloorEl, $("level-floor-val"), {
+    fmt: fmtDb,
+    onShow: (v) => { levelFloorEl.value = String(v); },
+    snap: (v) => Math.min(v, (levelNow().ceiling_db ?? 0) - LEVEL_MIN_SPAN_DB),
+    send: (v, commit) => send({ type: "set_level", floor_db: v, commit }),
+  });
+  const levelCeilingCtl = bindSlider(levelCeilingEl, $("level-ceiling-val"), {
+    fmt: fmtDb,
+    onShow: (v) => { levelCeilingEl.value = String(v); },
+    snap: (v) => Math.max(v, (levelNow().floor_db ?? -60) + LEVEL_MIN_SPAN_DB),
+    send: (v, commit) => send({ type: "set_level", ceiling_db: v, commit }),
+  });
+
   // Onset detection — per band. One set of sliders edits the selected band;
   // the band tabs switch which band's params they read/write. `onsetCfg` is
   // the live mirror of meta.onset.
@@ -529,6 +555,10 @@ export function setupControls() {
     floorCtl.setValue(as.noise_floor || 0, force);
     strengthCtl.setValue(as.strength ?? 1.0, force);
     masterCtl.setValue(as.master_gain ?? 1.0, force);
+    const lv = m.level || {};
+    levelTauCtl.setValue((lv.tau_s ?? 0.1) * 1000, force);
+    levelFloorCtl.setValue(lv.floor_db ?? -60, force);
+    levelCeilingCtl.setValue(lv.ceiling_db ?? 0, force);
     wsCtl.setValue(m.ws_snapshot_hz || 60, force);
     peakDecayCtl.setValue(m.ui_peak_decay_per_s ?? 0.6, force);
     if (m.ui_show_onsets !== undefined) {

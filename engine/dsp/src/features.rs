@@ -14,32 +14,51 @@ pub fn block_rms(x: &[f64]) -> f64 {
     (acc / x.len() as f64).sqrt()
 }
 
-/// `/audio/level` scale. Constants, not config: consumers write their own
-/// thresholds in this scale, so it is part of the wire contract.
-pub const LEVEL_TAU_S: f64 = 0.1;
-pub const LEVEL_FLOOR_DB: f64 = -60.0;
-/// `10^(LEVEL_FLOOR_DB / 10)`.
-const LEVEL_FLOOR_POWER: f64 = 1e-6;
-
-/// Broadband loudness on a fixed scale, never auto-gained (`/audio/level`,
-/// port of Python `LevelMeter`): one-pole smooth the block's mean square
-/// (0.1 s), then map dBFS linearly so −60 dB reads 0 and 0 dB reads 1.
-/// Runs on the mono block before the filter bank.
+/// Broadband loudness that is never auto-gained (`/audio/level`, port of
+/// Python `LevelMeter`): one-pole smooth the block's mean square (`tau_s`),
+/// then map dBFS linearly so `floor_db` reads 0 and `ceiling_db` reads 1,
+/// clipped to `[0, 1]`. Runs on the mono block before the filter bank. The
+/// three params are `cfg.level` (UI knobs).
 pub struct LevelMeter {
     p: f64,
     alpha: f64,
+    dt: f64,
+    tau_s: f64,
+    floor_db: f64,
+    inv_span: f64,
+    /// Power at the floor; also guards `log10(0)`.
+    floor_power: f64,
 }
 
 impl LevelMeter {
-    pub fn new(sr: f64, blocksize: usize) -> Self {
-        let mut m = LevelMeter { p: 0.0, alpha: 0.0 };
-        m.reconfigure(sr, blocksize);
+    pub fn new(sr: f64, blocksize: usize, tau_s: f64, floor_db: f64, ceiling_db: f64) -> Self {
+        let mut m = LevelMeter {
+            p: 0.0,
+            alpha: 0.0,
+            dt: blocksize as f64 / sr,
+            tau_s,
+            floor_db,
+            inv_span: 0.0,
+            floor_power: 0.0,
+        };
+        m.set_params(tau_s, floor_db, ceiling_db);
         m
+    }
+
+    /// All three params at once. `p` (the smoothed power) is kept: the
+    /// curve moves, the meter doesn't restart.
+    pub fn set_params(&mut self, tau_s: f64, floor_db: f64, ceiling_db: f64) {
+        self.tau_s = tau_s;
+        self.alpha = tau_to_alpha(self.dt, tau_s);
+        self.floor_db = floor_db;
+        self.inv_span = 1.0 / (ceiling_db - floor_db);
+        self.floor_power = 10f64.powf(floor_db / 10.0);
     }
 
     /// New sr / blocksize (device hot-switch): re-derive alpha, zero `p`.
     pub fn reconfigure(&mut self, sr: f64, blocksize: usize) {
-        self.alpha = tau_to_alpha(blocksize as f64 / sr, LEVEL_TAU_S);
+        self.dt = blocksize as f64 / sr;
+        self.alpha = tau_to_alpha(self.dt, self.tau_s);
         self.p = 0.0;
     }
 
@@ -56,10 +75,10 @@ impl LevelMeter {
             ms = 0.0;
         }
         self.p += self.alpha * (ms - self.p);
-        if self.p <= LEVEL_FLOOR_POWER {
+        if self.p <= self.floor_power {
             return 0.0;
         }
-        (1.0 + 10.0 * self.p.log10() / -LEVEL_FLOOR_DB)
+        ((10.0 * self.p.log10() - self.floor_db) * self.inv_span)
             .max(0.0)
             .min(1.0)
     }

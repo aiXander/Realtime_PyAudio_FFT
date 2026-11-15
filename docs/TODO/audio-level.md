@@ -5,10 +5,16 @@
 > Pi. Sibling plans: `~/Documents/GitHub/animated_LED/docs/TODO/wzrd-input.md` (`ledctl`) and
 > `~/Documents/GitHub/Gigabrain/VJ/WZRD/docs/TODO/led-sync.md` (WZRD).
 >
-> **Settled by Xander (2026-11-13), do not reopen:** the level's floor and time constant are
-> fixed constants; the Pi's address is set by hand-editing the gitignored `configs/main.yaml`
-> (no UI field for the gig); onsets stay single packets with no redundancy; the Python
-> engine's resolver can follow the gig.
+> **Settled by Xander (2026-11-13), do not reopen:** the Pi's address is set by hand-editing
+> the gitignored `configs/main.yaml` (no UI field for the gig); onsets stay single packets with
+> no redundancy; the Python engine's resolver can follow the gig.
+>
+> **Reversed by Xander (2026-11-15), built:** `/audio/level` is tunable from the server UI
+> (config block `level: {tau_s, floor_db, ceiling_db}`, WS message `set_level`). The defaults
+> 0.1 s / -60 dB / 0 dB send what the fixed scale sent; the value stays clipped to 0..1 and
+> the packet is unchanged. Consumers' thresholds (`ledctl`'s swell `quiet` / `loud`) are
+> relative to the range set here, so at soundcheck set this range first and theirs second.
+> The Rust resolver looks a name up every 5 s until it has an address, then once a minute.
 
 ## Open: the gig runbook (Xander, with the Pi on)
 
@@ -26,7 +32,7 @@
 
 Start WZRD with the Pi powered off, power the Pi on, and see `ledctl` report audio within
 about 10 s of it joining the hotspot. Then play one loop at two volumes 20 dB apart:
-`/audio/level` differs by 0.33 and stays apart, while `/audio/lmh` returns to its old range
+`/audio/level` differs by 0.33 (at the default -60 to 0 dB range) and stays apart, while `/audio/lmh` returns to its old range
 within a minute. Not exercised on the Mac: a host whose address really changes, and the
 resolver on Linux.
 
@@ -58,7 +64,8 @@ goldens, and `ledctl` must de-duplicate. Not without evidence.
 
 ## Shipped
 
-`/audio/level` (a loudness on a fixed scale, never auto-gained) in both engines at parity,
+`/audio/level` (a loudness that is never auto-gained, on a range set in the server UI) in both
+engines at parity,
 with DSP and wire goldens; host-name destinations resolved on the `osc-resolve` thread in the
 Rust engine; `configs/*.yaml` gitignored except the example. Nothing here depends on the
 Rust-on-Pi phase of `rust_port.md`: the gig runs this server on the Mac only.

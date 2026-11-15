@@ -117,6 +117,9 @@ pub fn engine_params(cfg: &Config, sr: f64) -> EngineParams {
         fft_peak_smear_oct: cfg.fft.peak_smear_oct,
         fft_tilt_db_per_oct: cfg.fft.tilt_db_per_oct,
         onset: [ob(&cfg.onset.low), ob(&cfg.onset.mid), ob(&cfg.onset.high)],
+        level_tau_s: cfg.level.tau_s,
+        level_floor_db: cfg.level.floor_db,
+        level_ceiling_db: cfg.level.ceiling_db,
     }
 }
 
@@ -673,6 +676,7 @@ impl App {
                 "mid_onset": o_md,
                 "high_onset": o_hi,
                 "bpm": snap.bpm,
+                "level": snap.level,
                 "t": ws.t0.elapsed().as_secs_f64() * 1000.0,
             });
             let text = to_text(&msg);
@@ -768,6 +772,11 @@ impl App {
                 "noise_floor": c.autoscale.noise_floor,
                 "strength": c.autoscale.strength,
                 "master_gain": c.autoscale.master_gain,
+            },
+            "level": {
+                "tau_s": c.level.tau_s,
+                "floor_db": c.level.floor_db,
+                "ceiling_db": c.level.ceiling_db,
             },
             "onset": {"low": ob(&c.onset.low), "mid": ob(&c.onset.mid), "high": ob(&c.onset.high)},
             "ws_snapshot_hz": self.ws.as_ref().map(|w| w.snapshot_hz).unwrap_or(c.ws.snapshot_hz),
@@ -958,6 +967,25 @@ impl App {
         };
         if u.tau_attack_s.is_some() || u.tau_release_s.is_some() || u.noise_floor.is_some() || u.strength.is_some() {
             self.workers.fft_tx.send(FftCmd::UpdateAutoscale(u));
+        }
+    }
+
+    /// `App.apply_level`: update cfg, then hand the meter all three current
+    /// values in one command.
+    pub fn apply_level(&mut self, ok: &crate::validate::LevelOk) {
+        let lv = &mut self.cfg.level;
+        if let Some(v) = ok.tau_s {
+            lv.tau_s = v;
+        }
+        if let Some(v) = ok.floor_db {
+            lv.floor_db = v;
+        }
+        if let Some(v) = ok.ceiling_db {
+            lv.ceiling_db = v;
+        }
+        if !ok.is_empty() {
+            let lv = self.cfg.level;
+            self.workers.dsp_tx.send(DspCmd::SetLevel(lv.tau_s, lv.floor_db, lv.ceiling_db));
         }
     }
 

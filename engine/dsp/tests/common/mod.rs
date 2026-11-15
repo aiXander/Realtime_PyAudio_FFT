@@ -131,6 +131,9 @@ pub fn engine_params(case: &Value) -> EngineParams {
         fft_peak_smear_oct: f(&fft["peak_smear_oct"]),
         fft_tilt_db_per_oct: f(&fft["tilt_db_per_oct"]),
         onset: [onset("low"), onset("mid"), onset("high")],
+        level_tau_s: f(&c["level"]["tau_s"]),
+        level_floor_db: f(&c["level"]["floor_db"]),
+        level_ceiling_db: f(&c["level"]["ceiling_db"]),
     }
 }
 
@@ -199,5 +202,8 @@ pub fn example_params() -> EngineParams {
         fft_peak_smear_oct: 0.3,
         fft_tilt_db_per_oct: 3.5,
         onset: [OnsetParams::default(); 3],
+        level_tau_s: 0.1,
+        level_floor_db: -60.0,
+        level_ceiling_db: 0.0,
     }
 }

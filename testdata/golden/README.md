@@ -36,7 +36,7 @@ Per-case arrays (`cases/<id>/`):
 | `scaled.npy` | f64 (n_blocks, 3) | AutoScaler output (after the strength blend, **before master_gain**) = the onset detector's input |
 | `onsets.npy` | i8 (n_blocks, 3) | per-block onset pulse per band |
 | `bpm.npy` | f64 (n_blocks,) | `OnsetTracker.update` return value |
-| `level.npy` | f64 (n_blocks,) | `LevelMeter.update` return value = the `/audio/level` payload: fixed-scale loudness of the block before the filter bank, in `[0, 1]` |
+| `level.npy` | f64 (n_blocks,) | `LevelMeter.update` return value = the `/audio/level` payload: loudness of the block before the filter bank, mapped from `cfg.level`'s dB range to `[0, 1]` (`set_level` events in the scripted case retune it) |
 | `hops.npy` | i64 (n_hops, 2) | `[window_start_block, processed_after_block]` |
 | `fft_offsets.npy` | i64 (n_hops+1,) | frame k of the two arrays below is `[off[k], off[k+1])`. Frames are variable length because `n_bins` changes mid-script. |
 | `fft_raw_db.npy` | f32 (Σ n_bins,) | wire dB per hop, with `-1000` sentinels in empty log bins |

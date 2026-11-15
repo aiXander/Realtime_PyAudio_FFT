@@ -130,6 +130,7 @@ function setAudioStalled(stalled, notify = true) {
 onMessage("snapshot", (m) => {
   store.low = m.low; store.mid = m.mid; store.high = m.high;
   store.low_raw = m.low_raw; store.mid_raw = m.mid_raw; store.high_raw = m.high_raw;
+  if (typeof m.level === "number") store.level = m.level;
   const now = performance.now();
   if (m.low_onset)  store.low_onset_pulse_t  = now;
   if (m.mid_onset)  store.mid_onset_pulse_t  = now;

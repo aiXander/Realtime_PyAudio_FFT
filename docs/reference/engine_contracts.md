@@ -55,7 +55,7 @@ This is a map. **Exact message shapes** are the captured instances in `testdata/
   | name rule | `^[A-Za-z0-9_\- ]+$`, 1–64 chars after strip; `main` reserved |
   | listing | every `*.yaml` except `main`; `{name, saved_at: "YYYY-MM-DD HH:MM"}` from mtime, newest first |
   | load: merge | deep-merge the preset over **main.yaml as on disk** |
-  | load: sections | applied in this order, each validated alone (a bad one is logged and skipped): bands → filter_order → tau → autoscale → fft.n_bins → fft.window (always reconfigures the FFT, resetting its state) → peak_smear → tilt → onset per band |
+  | load: sections | applied in this order, each validated alone (a bad one is logged and skipped): bands → filter_order → tau → autoscale → fft.n_bins → fft.window (always reconfigures the FFT, resetting its state) → peak_smear → tilt → onset per band → level |
   | load: failure | error if no section applied |
 
 ## WebSocket (`server/io/ws_server.py`, `server/control/dispatcher.py`)
@@ -69,7 +69,7 @@ This is a map. **Exact message shapes** are the captured instances in `testdata/
   3. **stream** — snapshots + binary FFT; drop-oldest, max 4.
 - **Broadcast loop** at `snapshot_hz`, with deadline scheduling (resync if more than one period late):
   - **meta:** at most one coalesced meta per tick, to every client, when dirty.
-  - **snapshot:** only when the FeatureStore `seq` changed. Fields `low/mid/high` = scaled × master_gain; `*_raw` = smoother values (no gain); `*_onset` = 1 if that band's monotonic onset counter changed since the last snapshot; `bpm`; `t` = server ms since WS start.
+  - **snapshot:** only when the FeatureStore `seq` changed. Fields `low/mid/high` = scaled × master_gain; `*_raw` = smoother values (no gain); `*_onset` = 1 if that band's monotonic onset counter changed since the last snapshot; `bpm`; `level` = the same value as `/audio/level`; `t` = server ms since WS start.
   - **binary FFT:** only when the FFTStore seq changed and FFT is enabled. It carries processed × master_gain, or raw dB untouched if `send_raw_db`.
 - **Status loop:** `server_status` at 5 Hz to streaming clients only.
 - **Idle:** with no client streaming, the broadcast loop sleeps until a client resumes or meta goes dirty. On resume the onset counters are re-baselined, so stale onsets don't flash.
@@ -93,6 +93,7 @@ Every state change marks meta dirty, so a coalesced broadcast goes out next tick
 | `set_fft_tilt` | tilt_db_per_oct, commit | AutoScaler tilt + post-proc tilt | commit? |
 | `set_filter_order` | order (1..8), commit | redesign all three bandpasses (state reset) | commit? |
 | `set_onset` | band + any of sensitivity (>1), refractory_s, slow_tau_s, abs_floor; commit | `OnsetTracker.set_params` | commit? |
+| `set_level` | any of tau_s (>0), floor_db, ceiling_db (ceiling ≥ floor + 1 dB, checked against the end not being set); commit | `LevelMeter.set_params` (all three current values in one call) | commit? |
 | `set_ws_snapshot_hz` | hz, commit | broadcast rate | commit? |
 | `set_peak_decay` / `set_show_onsets` / `set_fft_view` / `set_fft3d_style` / `set_palette` / `set_ui_layout` | UI-only values | cfg only | commit (`set_peak_decay` / `set_ui_layout` take `commit`) |
 | `list_devices` | probe | re-init audio + reopen the input (~150 ms gap), list inputs; probe opens each for 0.2 s | targeted `devices` |
@@ -106,7 +107,7 @@ Every state change marks meta dirty, so a coalesced broadcast goes out next tick
 
 Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
 
-- **`meta`:** 26 keys, including `sr` as an **int**, a `bands` dict of `{lo_hz, hi_hz}`, the nested `autoscale` / `onset`, the UI fields, and `device` `{index, name}`.
+- **`meta`:** 27 keys, including `sr` as an **int**, a `bands` dict of `{lo_hz, hi_hz}`, the nested `autoscale` / `onset` / `level` (`{tau_s, floor_db, ceiling_db}`), the UI fields, and `device` `{index, name}`.
 - **`devices.items[]`:** `{index, name, hostapi, default_samplerate, max_input_channels}`, plus `probed_signal` / `probed_at` after a probe.
 - **`server_status`:**
   - top level: `audio_stalled`, `cb_overruns`, `dsp_drops`, `fft_drops` (all counted from the current device session);
@@ -118,7 +119,7 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
 ## OSC (`server/io/osc_sender.py`, `server/io/osc_publisher.py`)
 
 - **Transport:** UDP to every `osc.destinations` entry, from one non-blocking socket, IPv4 only. Every packet goes to every destination. Send errors are swallowed and logged at DEBUG. Byte layouts: `testdata/golden/wire/osc_*.bin`.
-- **Destination hosts.** An IPv4 literal is used as-is and never looked up. A host name (**Rust engine only**) is resolved on its own thread (`osc-resolve`), first right after start and then every 5 s: startup never waits for a name or fails on one; until it resolves that destination is skipped; a later failed lookup keeps the last address; an address change is picked up within 5 s. Logged on change only (one warning when a name starts failing, one info line when it resolves or moves). Never resolve on a worker thread or the control loop: an absent `.local` name blocks `getaddrinfo` for 5 s on macOS. Pinned by `osc::tests::late_resolved_destination_starts_receiving`.
+- **Destination hosts.** An IPv4 literal is used as-is and never looked up. A host name (**Rust engine only**) is resolved on its own thread (`osc-resolve`), first right after start, then every 5 s until the name has an address and once a minute after that (no lookup every few seconds during a show): startup never waits for a name or fails on one; until it resolves that destination is skipped; a later failed lookup keeps the last address; an address change is picked up within a minute. Logged on change only (one warning when a name starts failing, one info line when it resolves or moves). Never resolve on a worker thread or the control loop: an absent `.local` name blocks `getaddrinfo` for 5 s on macOS. Pinned by `osc::tests::late_resolved_destination_starts_receiving`.
   - **The Python reference needs literal IPs.** It resolves in the `OscSender` constructor (an unknown name stops the server from starting) and again on every packet on the DSP worker (a host that disappears blocks each send for 5 s).
   - Destinations are set by hand in `configs/main.yaml` while the server is stopped (the persister rewrites the file from memory). No WS message or UI field. `configs/*.yaml` is gitignored except the example, because presets snapshot the destinations too: never write a real host into the example, a doc or a test.
 
@@ -126,15 +127,17 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
   |---|---|---|
   | `/audio/lmh` | `,fff` scaled × master_gain | every DSP block (32 B) |
   | `/audio/bpm` | `,f` | every DSP block (20 B) |
-  | `/audio/level` | `,f` loudness on a fixed scale, `0..1`, no master_gain | every DSP block (24 B, float at offset 20), after `bpm` and before that block's onsets |
+  | `/audio/level` | `,f` loudness, `0..1` over `cfg.level`'s dB range, no master_gain | every DSP block (24 B, float at offset 20), after `bpm` and before that block's onsets |
   | `/audio/onset/{low,mid,high}` | `,i 1` | only on that band's onset blocks (28 B, constant) |
   | `/audio/fft` | `,f×n` processed × gain, or raw dB with sentinels and sub-floor values raised to `db_floor` | every hop while `osc.send_fft` and FFT is enabled. One datagram; `n ≤ 1024` keeps it under macOS's 9216-byte limit |
   | `/audio/meta` | `,iiiffffff` = sr, blocksize, n_bins, low_lo, low_hi, mid_lo, mid_hi, high_lo, high_hi | at startup, then every 1 s, ≥ 50 ms after a change to sr / bands / n_bins, and right after any stream change |
 
-- **`/audio/level` is a fixed scale, part of the contract** (`LevelMeter` in `server/dsp/features.py` / `engine/dsp/src/features.rs`). Per mono block, before the filter bank: `ms = mean(x²)` in f64 (non-finite → 0); `p += α·(ms − p)` with `α = 1 − exp(−(blocksize/sr)/0.1 s)`, `p` starting at 0 and zeroed when the sample rate changes; `level = 0` when `p ≤ 1e-6`, else `min(1, 1 + 10·log10(p)/60)`. So −60 dBFS RMS reads 0, −30 reads 0.5, a full-scale sine 0.95.
-  - The floor and time constant are constants, not config: consumers write their thresholds in this scale. No config block, WS message, meta key or UI.
+- **`/audio/level`** (`LevelMeter` in `server/dsp/features.py` / `engine/dsp/src/features.rs`). Per mono block, before the filter bank: `ms = mean(x²)` in f64 (non-finite → 0); `p += α·(ms − p)` with `α = 1 − exp(−(blocksize/sr)/tau_s)`, `p` starting at 0 and zeroed when the sample rate changes; `level = 0` when `p ≤ 10^(floor_db/10)`, else `clip((10·log10(p) − floor_db) / (ceiling_db − floor_db), 0, 1)`.
+  - **`cfg.level` = `{tau_s, floor_db, ceiling_db}`**, defaults `0.1 / −60 / 0` (−60 dBFS RMS reads 0, −30 reads 0.5, a full-scale sine 0.95). Set by `set_level` (the UI's *Level* panel), persisted, part of presets. A config without the block loads with the defaults (pinned by `config::tests::corrupt_vs_invalid`): never make it a required key, or an older `main.yaml` is moved aside as corrupt and reseeded.
+  - **Consumers write their thresholds in the `0..1` value**, so moving the range moves what every consumer does. With the defaults the wire value is the scale the LED controller's settings were written against.
   - Never auto-scaled, noise-gated or multiplied by `master_gain`, and always inside `0..1` on the wire. A consumer that min/max-rescales any float leaving `0..1` would turn it back into an auto-gained signal.
   - The power is smoothed, then the log taken (an RMS meter): the reading doesn't depend on the block size. Smoothing the dB value instead reads lower the smaller the block.
+  - A retune keeps `p`: the curve moves, the meter doesn't restart.
 - **Order within a DSP block:** `lmh`, `bpm`, `level`, then the onsets, so a consumer woken by an onset already holds that block's level.
 - **Silence:** `/audio/lmh 0 0 0` + `/audio/bpm 0` + `/audio/level 0` (the zero templates), sent once when the audio watchdog detects a stall.
 - LMH, BPM, level and onsets go out on the DSP worker thread; FFT goes out on the FFT worker thread; meta goes out on the control loop.

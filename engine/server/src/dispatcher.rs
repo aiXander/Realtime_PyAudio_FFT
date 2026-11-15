@@ -70,6 +70,7 @@ impl App {
             "set_fft_peak_smear" => self.h_set_fft_peak_smear(msg),
             "set_fft_tilt" => self.h_set_fft_tilt(msg),
             "set_onset" => self.h_set_onset(msg),
+            "set_level" => self.h_set_level(msg),
             "set_filter_order" => self.h_set_filter_order(msg),
             "set_peak_decay" => self.h_set_peak_decay(msg),
             "set_show_onsets" => self.h_set_show_onsets(msg),
@@ -252,6 +253,18 @@ impl App {
             );
         }
         self.apply_onset(band, &ok);
+        self.persister.request(commit);
+        self.meta_changed()
+    }
+
+    fn h_set_level(&mut self, msg: &Value) -> HRes {
+        let commit = get_bool(msg, "commit", true);
+        let cur = (self.cfg.level.floor_db, self.cfg.level.ceiling_db);
+        let ok = v::validate_level(get(msg, "tau_s"), get(msg, "floor_db"), get(msg, "ceiling_db"), Some(cur))?;
+        if ok.is_empty() {
+            return Err("set_level needs at least one of tau_s / floor_db / ceiling_db".to_string().into());
+        }
+        self.apply_level(&ok);
         self.persister.request(commit);
         self.meta_changed()
     }
@@ -471,6 +484,18 @@ impl App {
             Ok(if any { Section::Applied } else { Section::Skip })
         })();
         section(&mut applied, "onset", r);
+
+        let r = (|| {
+            let Some(lv @ Value::Object(_)) = data.get("level") else { return Ok(Section::Skip) };
+            let cur = (self.cfg.level.floor_db, self.cfg.level.ceiling_db);
+            let ok = v::validate_level(get(lv, "tau_s"), get(lv, "floor_db"), get(lv, "ceiling_db"), Some(cur))?;
+            if ok.is_empty() {
+                return Ok(Section::Skip);
+            }
+            self.apply_level(&ok);
+            Ok(Section::Applied)
+        })();
+        section(&mut applied, "level", r);
 
         if applied.is_empty() {
             return Err(format!("preset {} produced no valid fields", py::repr_str(&name)).into());

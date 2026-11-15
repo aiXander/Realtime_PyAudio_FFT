@@ -50,6 +50,9 @@ pub struct EngineParams {
     pub fft_peak_smear_oct: f64,
     pub fft_tilt_db_per_oct: f64,
     pub onset: [OnsetParams; 3],
+    pub level_tau_s: f64,
+    pub level_floor_db: f64,
+    pub level_ceiling_db: f64,
 }
 
 /// Result of one DSP block.
@@ -61,8 +64,9 @@ pub struct BlockOut {
     pub scaled: [f64; 3],
     pub onsets: [i8; 3],
     pub bpm: f64,
-    /// Fixed-scale loudness of the block before the filter bank, `[0, 1]`
-    /// (`/audio/level`). Never multiplied by master_gain.
+    /// Loudness of the block before the filter bank, mapped from
+    /// `cfg.level`'s dB range to `[0, 1]` (`/audio/level`). Never
+    /// multiplied by master_gain.
     pub level: f64,
 }
 
@@ -99,7 +103,13 @@ impl DspChain {
                 },
             ),
             onset_tracker: OnsetTracker::new(p.sr, p.blocksize, p.onset),
-            level_meter: LevelMeter::new(p.sr, p.blocksize),
+            level_meter: LevelMeter::new(
+                p.sr,
+                p.blocksize,
+                p.level_tau_s,
+                p.level_floor_db,
+                p.level_ceiling_db,
+            ),
         }
     }
 

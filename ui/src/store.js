@@ -13,6 +13,9 @@ export const store = {
   mid_onset_pulse_t:  -Infinity,
   high_onset_pulse_t: -Infinity,
   bpm: 0,
+  // Broadband loudness (`/audio/level`), 0..1 over meta.level's dB range.
+  // Never auto-scaled; drawn as the white curve in the rolling-lines chart.
+  level: 0,
   fft_bins: null, // Float32Array
   fft_db_floor: -60,
   fft_db_ceiling: 0,
@@ -34,6 +37,7 @@ export const store = {
     fft_enabled: false,
     tau: { low: 0.15, mid: 0.06, high: 0.02 },
     autoscale: { tau_attack_s: 0.05, tau_release_s: 60, noise_floor: 0.001, strength: 1.0 },
+    level: { tau_s: 0.1, floor_db: -60, ceiling_db: 0 },
     ws_snapshot_hz: 60,
     device: { index: null, name: null }
   },
@@ -113,6 +117,7 @@ export function clearLive() {
   store.low_raw = store.mid_raw = store.high_raw = 0;
   store.low_onset_pulse_t = store.mid_onset_pulse_t = store.high_onset_pulse_t = -Infinity;
   store.bpm = 0;
+  store.level = 0;
   store.fft_bins = null;
 }
 

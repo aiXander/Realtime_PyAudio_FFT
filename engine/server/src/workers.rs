@@ -53,6 +53,8 @@ pub enum DspCmd {
     SetNFftWindow(usize),
     SetFftGeometry(Option<usize>, Option<f64>),
     SetOnset(usize, OnsetParamsUpdate),
+    /// `/audio/level`: tau_s, floor_db, ceiling_db.
+    SetLevel(f64, f64, f64),
     /// Hot-switch: new filter/smoother/scaler for `sr`; onset reconfigure + reset.
     ReplaceCore(Box<DspCore>, f64),
     /// Rewind the read pointer (the ring was reset).
@@ -92,6 +94,8 @@ pub struct FeatureSnap {
     pub scaled: [f64; 3],
     pub onset_counts: [u64; 3],
     pub bpm: f64,
+    /// `/audio/level` of the same block.
+    pub level: f64,
 }
 
 /// Latest FFT frame pair (FFTStore). Fixed capacity: n_bins changes never
@@ -301,6 +305,7 @@ impl DspWorker {
                 DspCmd::SetNFftWindow(n) => c.auto_scaler.set_n_fft_window(n),
                 DspCmd::SetFftGeometry(n, f) => c.auto_scaler.set_fft_geometry(n, f),
                 DspCmd::SetOnset(band, u) => c.onset_tracker.set_params(band, u),
+                DspCmd::SetLevel(tau, floor, ceil) => c.level_meter.set_params(tau, floor, ceil),
                 DspCmd::ReplaceCore(mut core, sr) => {
                     std::mem::swap(&mut c.filter_bank, &mut core.filter_bank);
                     std::mem::swap(&mut c.smoother, &mut core.smoother);
@@ -362,6 +367,7 @@ impl DspWorker {
                         scaled: out.scaled,
                         onset_counts: self.chain.onset_tracker.onset_count(),
                         bpm: out.bpm,
+                        level: out.level,
                     };
                     self.store.publish();
                     let sh = &*self.shared;

@@ -97,7 +97,7 @@ Off by default — turn on when actively tuning onset parameters or driving the 
         <div class="viz-card" data-card="lines">
           <div class="viz-title"><span title="**L/M/H output — sent over OSC.**
 
-Rolling history of the same three signals as the bar graph. The colored polylines (`low`, `mid`, `high`) are what ships downstream; peak-hold markers on the bars graph are visual only.
+Rolling history of the same three signals as the bar graph, plus the thin white **level** curve (`/audio/level`: overall loudness, never auto-scaled — tune it in the *Level* panel). The colored polylines (`low`, `mid`, `high`) are what ships downstream; peak-hold markers on the bars graph are visual only.
 
 # OSC
 
@@ -111,7 +111,7 @@ Rolling history of the same three signals as the bar graph. The colored polyline
 # WebSocket
 
 Also available in the JSON `snapshot` frames on `ws://127.0.0.1:8765` (fields `low` / `mid` / `high`, master gain applied).">L/M/H rolling lines</span></div>
-          <canvas id="viz-lines" width="640" height="200" role="img" aria-label="Rolling history of low, mid and high band energy"></canvas>
+          <canvas id="viz-lines" width="640" height="200" role="img" aria-label="Rolling history of low, mid and high band energy and the overall level"></canvas>
         </div>
         <div class="viz-card" data-card="scene">
           <div class="viz-title"><span title="**Visual aid only — not an output signal.**
@@ -331,6 +331,32 @@ Falling-edge τ only — onsets are governed by the attack-τ slider above.">mid
 Larger → hat / cymbal sizzle averages into a continuous shimmer. Smaller → each cymbal strike fades fast, individual hi-hat hits remain crisp.
 
 Falling-edge τ only — onsets are governed by the attack-τ slider above.">high <input type="range" id="tau-high" min="5" max="2000" step="1" data-log="1" /> <span id="tau-high-val"></span></label>
+        </fieldset>
+
+        <fieldset id="fieldset-level">
+          <legend title="**Level — overall loudness, never auto-scaled.**
+
+One number for how loud the input is right now, sent as `/audio/level` on every audio block and drawn as the white curve in the *L/M/H rolling lines* chart.
+
+Unlike `low` / `mid` / `high`, nothing rescales it over time: a quiet song stays low, a loud one stays high. Use it downstream for *loud is bright, quiet is dim*.
+
+- Measured on the whole signal (before the band filters), as RMS in `dBFS`
+- Not affected by *master gain*, the noise gate or the auto-scaler
+- The range below maps to `0..1`; anything outside is clipped to `0` or `1`
+
+Whatever reads `/audio/level` reacts to the `0..1` value, so moving the range changes what it does.">Level</legend>
+          <label title="**Smoothing.** Averaging time of the loudness meter.
+
+- **Shorter** (`20–100 ms`) → follows every hit; the curve pulses with the beat
+- **Longer** (`0.5–10 s`) → follows the song's dynamics, not single hits
+
+`100 ms` is the default.">smoothing <input type="range" id="level-tau" min="10" max="10000" step="1" data-log="1" /> <span id="level-tau-val"></span></label>
+          <label title="**Floor.** The loudness that reads `0`. Anything quieter is clipped to `0`.
+
+Raise it until the white curve sits at `0` when nothing is playing (room noise on a microphone is around `-60` to `-50 dBFS`).">floor <input type="range" id="level-floor" min="-90" max="-10" step="1" /> <span id="level-floor-val"></span></label>
+          <label title="**Ceiling.** The loudness that reads `1`. Anything louder is clipped to `1`.
+
+Lower it until the loudest passages just reach the top of the chart.">ceiling <input type="range" id="level-ceiling" min="-60" max="0" step="1" /> <span id="level-ceiling-val"></span></label>
         </fieldset>
 
         <fieldset id="fieldset-onset">

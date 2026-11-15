@@ -42,15 +42,17 @@ class FeatureStore:
         self._seq = 0
         self._t_recv_ns = 0  # perf_counter_ns of the audio block this snapshot was derived from
         self._bpm = 0.0
+        self._level = 0.0  # /audio/level of the same block
 
     def publish(self, raw, scaled, onsets, onset_counts, bpm: float,
-                t_recv_ns: int = 0) -> None:
+                t_recv_ns: int = 0, level: float = 0.0) -> None:
         with self._lock:
             np.copyto(self._raw, raw, casting="unsafe")
             np.copyto(self._scaled, scaled, casting="unsafe")
             np.copyto(self._onsets, onsets, casting="unsafe")
             np.copyto(self._onset_counts, onset_counts, casting="unsafe")
             self._bpm = float(bpm)
+            self._level = float(level)
             self._t_recv_ns = int(t_recv_ns)
             self._seq += 1
 
@@ -62,7 +64,8 @@ class FeatureStore:
                     self._t_recv_ns,
                     (int(self._onsets[0]), int(self._onsets[1]), int(self._onsets[2])),
                     (int(self._onset_counts[0]), int(self._onset_counts[1]), int(self._onset_counts[2])),
-                    self._bpm)
+                    self._bpm,
+                    self._level)
 
     def read_scaled_into(self, out: np.ndarray):
         """Copy the scaled triple into `out` (length-3 float64). Returns

@@ -24,32 +24,41 @@ def block_rms(x: np.ndarray) -> float:
     return math.sqrt(float(np.dot(x, x)) / x.size)
 
 
-# `/audio/level` scale. Constants, not config: consumers write their own
-# thresholds in this scale, so it is part of the wire contract. Mirrored in
-# engine/dsp/src/features.rs.
-LEVEL_TAU_S = 0.1
-LEVEL_FLOOR_DB = -60.0
-_LEVEL_FLOOR_POWER = 10.0 ** (LEVEL_FLOOR_DB / 10.0)  # 1e-6
-
-
 class LevelMeter:
-    """Broadband loudness on a fixed scale, never auto-gained (`/audio/level`).
+    """Broadband loudness that is never auto-gained (`/audio/level`).
 
     An RMS meter over the mono block BEFORE the filter bank: one-pole smooth
-    the mean square (0.1 s), then map dBFS linearly so -60 dB reads 0 and
-    0 dB reads 1. Smoothing power (not dB) keeps the reading independent of
-    the block size. Not scaled by master_gain, not noise-gated.
+    the mean square (`tau_s`), then map dBFS linearly so `floor_db` reads 0
+    and `ceiling_db` reads 1, clipped to [0, 1]. Smoothing power (not dB)
+    keeps the reading independent of the block size. Not scaled by
+    master_gain, not noise-gated. The three params are `cfg.level` (UI
+    knobs); mirrored in engine/dsp/src/features.rs.
     """
 
-    def __init__(self, sr: float, blocksize: int):
+    def __init__(self, sr: float, blocksize: int, tau_s: float, floor_db: float,
+                 ceiling_db: float):
         self._scratch = np.zeros(int(blocksize), dtype=np.float64)
-        self.reconfigure(sr, blocksize)
+        self._dt = int(blocksize) / float(sr)
+        self._p = 0.0
+        self.set_params(tau_s, floor_db, ceiling_db)
+
+    def set_params(self, tau_s: float, floor_db: float, ceiling_db: float) -> None:
+        """All three params at once (asyncio loop). The dB map is swapped in
+        as one tuple, so the worker never pairs a new floor with an old
+        ceiling. `p` (the smoothed power) is kept: the curve moves, the
+        meter doesn't restart."""
+        self._tau_s = float(tau_s)
+        self._alpha = tau_to_alpha(self._dt, self._tau_s)
+        floor_db, ceiling_db = float(floor_db), float(ceiling_db)
+        # (floor_db, 1 / span, power at the floor — also guards log10(0))
+        self._map = (floor_db, 1.0 / (ceiling_db - floor_db), 10.0 ** (floor_db / 10.0))
 
     def reconfigure(self, sr: float, blocksize: int) -> None:
         """New sr / blocksize (device hot-switch): re-derive alpha, zero p."""
         if self._scratch.size != int(blocksize):
             self._scratch = np.zeros(int(blocksize), dtype=np.float64)
-        self._alpha = tau_to_alpha(int(blocksize) / float(sr), LEVEL_TAU_S)
+        self._dt = int(blocksize) / float(sr)
+        self._alpha = tau_to_alpha(self._dt, self._tau_s)
         self._p = 0.0
 
     def update(self, x: np.ndarray) -> float:
@@ -63,9 +72,10 @@ class LevelMeter:
             ms = 0.0
         p = self._p + self._alpha * (ms - self._p)
         self._p = p
-        if p <= _LEVEL_FLOOR_POWER:  # also guards log10(0)
+        floor_db, inv_span, floor_power = self._map
+        if p <= floor_power:
             return 0.0
-        return min(1.0, max(0.0, 1.0 + 10.0 * math.log10(p) / -LEVEL_FLOOR_DB))
+        return min(1.0, max(0.0, (10.0 * math.log10(p) - floor_db) * inv_span))
 
 
 class ExpSmoother:

@@ -135,7 +135,7 @@ class DSPWorker(threading.Thread):
                         self.features_store.publish(
                             self.smoother.values, self.scaled_buf,
                             self.onsets_buf, self.onset_tracker.onset_count, bpm,
-                            t_recv_ns,
+                            t_recv_ns, self.level,
                         )
                         # Direct OSC dispatch on this thread — replaces the old
                         # asyncio sender task. ~100 µs faster typical, much

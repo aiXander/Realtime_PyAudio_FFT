@@ -283,6 +283,56 @@ pub fn validate_onset(
     })
 }
 
+/// Narrowest `/audio/level` range: keeps the dB → 0..1 map's divisor away
+/// from 0.
+pub const MIN_LEVEL_SPAN_DB: f64 = 1.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LevelOk {
+    pub tau_s: Option<f64>,
+    pub floor_db: Option<f64>,
+    pub ceiling_db: Option<f64>,
+}
+
+impl LevelOk {
+    pub fn is_empty(&self) -> bool {
+        *self == LevelOk::default()
+    }
+}
+
+/// `validate_level`: only the provided keys come back. The ceiling must sit
+/// at least `MIN_LEVEL_SPAN_DB` above the floor, checked against the
+/// current value (`cur`) of the end not being set.
+pub fn validate_level(
+    tau_s: Option<&Value>,
+    floor_db: Option<&Value>,
+    ceiling_db: Option<&Value>,
+    cur: Option<(f64, f64)>,
+) -> VResult<LevelOk> {
+    let opt = |v: Option<&Value>, name: &str, gt: Option<f64>| -> VResult<Option<f64>> {
+        match v.filter(|v| !v.is_null()) {
+            None => Ok(None),
+            Some(v) => finite_float(Some(v), name, gt, None).map(Some),
+        }
+    };
+    let ok = LevelOk {
+        tau_s: opt(tau_s, "tau_s", Some(0.0))?,
+        floor_db: opt(floor_db, "floor_db", None)?,
+        ceiling_db: opt(ceiling_db, "ceiling_db", None)?,
+    };
+    let lo = ok.floor_db.or(cur.map(|c| c.0));
+    let hi = ok.ceiling_db.or(cur.map(|c| c.1));
+    if let (Some(lo), Some(hi)) = (lo, hi)
+        && hi - lo < MIN_LEVEL_SPAN_DB
+    {
+        return Err(format!(
+            "ceiling_db must be at least {} dB above floor_db",
+            fmt_g(MIN_LEVEL_SPAN_DB)
+        ));
+    }
+    Ok(ok)
+}
+
 pub fn validate_onset_band(band: Option<&Value>) -> VResult<usize> {
     match band {
         Some(Value::String(s)) if band_index(s).is_some() => Ok(band_index(s).unwrap_or(0)),

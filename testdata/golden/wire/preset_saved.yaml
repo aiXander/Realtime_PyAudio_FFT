@@ -56,6 +56,10 @@ onset:
     refractory_s: 0.12
     slow_tau_s: 0.15
     abs_floor: 0.1
+level:
+  tau_s: 0.1
+  floor_db: -60.0
+  ceiling_db: 0.0
 osc:
   destinations:
   - host: 127.0.0.1

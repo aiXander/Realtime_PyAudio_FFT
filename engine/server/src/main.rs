@@ -36,6 +36,9 @@ struct Cli {
     /// disable the WebSocket server (headless OSC)
     #[arg(long)]
     no_ws: bool,
+    /// start with the FFT worker off, whatever the config says (not saved; the UI can turn it on)
+    #[arg(long)]
+    no_fft: bool,
     /// open the bundled UI in the default browser
     #[arg(long)]
     open: bool,
@@ -182,7 +185,7 @@ fn real_main() -> i32 {
         // anything persisted during this run).
         cfg.ws.enabled = false;
     }
-    let args = app::Args { no_ws: cli.no_ws, open: cli.open, device: cli.device };
+    let args = app::Args { no_ws: cli.no_ws, no_fft: cli.no_fft, open: cli.open, device: cli.device };
 
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,

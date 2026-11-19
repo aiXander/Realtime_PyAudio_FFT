@@ -36,6 +36,7 @@ const STATUS_PERIOD: Duration = Duration::from_millis(200);
 #[derive(Clone, Debug)]
 pub struct Args {
     pub no_ws: bool,
+    pub no_fft: bool,
     pub open: bool,
     pub device: Option<i64>,
 }
@@ -237,6 +238,10 @@ impl App {
         let ring = SlotRing::new(ring_slots_for(bs), bs);
         let osc = OscSender::new(&cfg.osc.destinations);
         let shared = Arc::new(Shared::new(ring, osc, &cfg));
+        if args.no_fft {
+            // Runtime only: cfg.fft.enabled stays as loaded, so a save keeps it.
+            shared.fft_enabled.store(false, Ordering::Relaxed);
+        }
         let wake: WakeTargets = Arc::new(std::sync::OnceLock::new());
 
         let cli_dev = match args.device {

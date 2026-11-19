@@ -6,7 +6,8 @@ This is a map. **Exact message shapes** are the captured instances in `testdata/
 
 ## CLI (`server/main.py:_parse_args`, `main`)
 
-- **Flags:** `--config PATH`, `--no-ws`, `--open`, `--device N`, `--log-level L`.
+- **Flags:** `--config PATH`, `--no-ws`, `--no-fft`, `--open`, `--device N`, `--log-level L`.
+- **`--no-fft`** starts with the FFT worker off whatever `fft.enabled` says. Unlike `--no-ws` it is not written to the config; the UI's FFT toggle still turns it on.
 - **Exit:** 0 on SIGINT/SIGTERM. On expected startup failures (bind error, no device, invalid config) it exits 1 after two stderr lines: `audio-server: error: …` and `audio-server: hint: …`, with no traceback.
 - **Config path** (`_resolve_config_path`):
   - no `--config` → `<repo>/configs/main.yaml`;

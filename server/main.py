@@ -92,6 +92,8 @@ def _parse_args(argv):
     p.add_argument("--config", default=None,
                    help="path to main config file (default: <repo>/configs/main.yaml)")
     p.add_argument("--no-ws", action="store_true", help="disable the WebSocket server (headless OSC)")
+    p.add_argument("--no-fft", action="store_true",
+                   help="start with the FFT worker off, whatever the config says (not saved; the UI can turn it on)")
     p.add_argument("--open", action="store_true", help="open the bundled UI in the default browser")
     p.add_argument("--device", type=int, default=None, help="override input device index")
     p.add_argument("--log-level", default="INFO", help="logging level")
@@ -111,7 +113,7 @@ class App:
         self.dsp_event = threading.Event()
         self.fft_event = threading.Event()
         self.fft_enabled = threading.Event()
-        if cfg.fft.enabled:
+        if cfg.fft.enabled and not args.no_fft:
             self.fft_enabled.set()
         self.stop_flag = threading.Event()
 

@@ -2,7 +2,9 @@
 
 Python twin of `engine/dsp/src/spectro.rs` + `engine/server/src/spectro.rs`:
 same analysis, same `set_spectro` control message, same binary wire. Nothing
-downstream (OSC, L/M/H, LEDs) reads it, and it has no parity goldens.
+downstream (OSC, L/M/H, LEDs) reads it. `Spectro.process` is the source of
+the spectro parity goldens (tools/parity/make_goldens.py) that the Rust twin
+is tested against.
 
 Every hop runs a ladder of Hann windows (×2 sizes, 512 … 8192 samples at
 48 kHz) centred on the same instant; each log bin reads the window whose

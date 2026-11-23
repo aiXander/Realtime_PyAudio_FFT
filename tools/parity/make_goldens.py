@@ -36,6 +36,8 @@ from signals import generate  # noqa: E402
 
 from server.config import config_to_dict, write_yaml_atomic  # noqa: E402
 from server.dsp.filters import FilterBank  # noqa: E402
+from server.dsp import spectro as S  # noqa: E402
+from server.control import validate as V  # noqa: E402
 
 GOLDEN = REPO / "testdata" / "golden"
 FORMAT_VERSION = 1
@@ -51,6 +53,10 @@ TOLERANCES = {
     "fft_processed": {"max_abs": 1e-6},
     "filter_design_sos": {"max_abs": 1e-12},
     "derived": {"max_rel": 1e-12},
+    # Rust computes the spectro in f32 (Python f64): the difference grows as a
+    # bin's level drops toward the f32 rounding floor, so loud bins are held
+    # tight and quiet ones only loosely. The UI quantises to 0.5 dB steps.
+    "spectro_db": {"loud_min_db": -80.0, "loud_max_abs": 0.01, "quiet_max_abs": 3.0},
 }
 
 # ---------------------------------------------------------------------------
@@ -339,9 +345,43 @@ def filter_design_table(out: Path) -> dict:
             "rows": rows}
 
 
+# The 3D view's spectro stream (server/dsp/spectro.py). Stateless per frame, so
+# the golden is frames at evenly spaced points of each signal, per resolution
+# mode, with the params the live service would build at this sr.
+SPECTRO_SIGNALS = ("sweep", "drums")
+SPECTRO_FRAMES = 48
+
+
+def spectro_table(out: Path, sig_data: dict[str, np.ndarray]) -> dict:
+    res_names = list(S.REL_RES)
+    params = [dict(sr=float(SR), n_bins=S.DEFAULT_BINS, f_min=S.F_MIN, f_max=min(S.F_MAX, 0.49 * SR),
+                   rel_res=S.REL_RES[r], max_window=V.MAX_FFT_WINDOW) for r in res_names]
+    sps = [S.Spectro(**p) for p in params]
+    span = sps[0].span
+    assert all(sp.span == span for sp in sps)
+    entries = []
+    for name in SPECTRO_SIGNALS:
+        key = f"{name}_{SR}"
+        sig = sig_data[key].astype(np.float64)
+        ends = np.linspace(span, sig.size, SPECTRO_FRAMES).astype(np.int64)
+        db = np.stack([np.stack([sp.process(sig[e - span:e]) for e in ends]) for sp in sps]).astype(np.float32)
+        f = f"spectro/{key}.npy"
+        _save(out / f, db)
+        _save(out / f"spectro/{key}_ends.npy", ends)
+        entries.append({"signal": key, "file": f, "ends_file": f"spectro/{key}_ends.npy"})
+    return {
+        "shape": "(n_res, n_frames, n_bins) f32 dB; frame k = Spectro.process(signal[ends[k] - span : ends[k]]) in f64",
+        "span": int(span),
+        "windows": sps[0].sizes,
+        "res": res_names,
+        "params": params,
+        "cases": entries,
+    }
+
+
 # What this script owns inside the golden dir. Everything else there
 # (README.md, wire/ from record_wire.py) is left alone.
-OWNED = ("manifest.json", "filter_design_sos.npy", "signals", "cases")
+OWNED = ("manifest.json", "filter_design_sos.npy", "signals", "cases", "spectro")
 
 
 def generate_all(out: Path) -> None:
@@ -411,6 +451,7 @@ def generate_all(out: Path) -> None:
         "tolerances": TOLERANCES,
         "signals": signals,
         "filter_design": filter_design_table(out),
+        "spectro": spectro_table(out, sig_data),
         "cases": manifest_cases,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1, sort_keys=False) + "\n")

@@ -2,9 +2,9 @@
 
 What the Rust engine is tested against. Generated from the Python engine, the DSP reference of the two permanent engines ([`docs/reference/dual_engine.md`](../../docs/reference/dual_engine.md)). Don't hand-edit anything here.
 
-**Only this README and `wire/` are in git.** The DSP goldens (`manifest.json`, `signals/`, `cases/`, `filter_design_sos.npy`, ~20 MB) are gitignored. On a fresh clone, generate them with `uv run python tools/parity/make_goldens.py`. Rust parity tests skip when `manifest.json` is missing. `make check` regenerates them and runs the Rust replay.
+**Only this README and `wire/` are in git.** The DSP goldens (`manifest.json`, `signals/`, `cases/`, `filter_design_sos.npy`, `spectro/`, ~21 MB) are gitignored. On a fresh clone, generate them with `uv run python tools/parity/make_goldens.py`. Rust parity tests skip when `manifest.json` is missing. `make check` regenerates them and runs the Rust replay.
 
-- `manifest.json`, `signals/`, `cases/`, `filter_design_sos.npy`: DSP goldens, written by `uv run python tools/parity/make_goldens.py`. `--check` regenerates into a temp dir and asserts the result is byte-identical. It is, run to run, on numpy 2.4 / scipy 1.17. Regenerate after a deliberate DSP change that lands in both engines in the same commit; never to make a Rust diff go away.
+- `manifest.json`, `signals/`, `cases/`, `filter_design_sos.npy`, `spectro/`: DSP goldens, written by `uv run python tools/parity/make_goldens.py`. `--check` regenerates into a temp dir and asserts the result is byte-identical. It is, run to run, on numpy 2.4 / scipy 1.17. Regenerate after a deliberate DSP change that lands in both engines in the same commit; never to make a Rust diff go away.
 - `wire/`: one captured instance of every WS message, both binary FFT flavours, every OSC packet, and the YAML the persister and the preset writer produce. Written by `uv run tools/parity/record_wire.py` from a live server fed the BlackHole drum loop. The values are run-specific. The **shape** is the contract: JSON key sets and value types, the OSC address / type-tag / payload layout, the binary header. To check another engine, run `uv run tools/parity/record_wire.py --out <dir> --server-cmd <engine>` and then `--compare testdata/golden/wire <dir>`.
 
 ## File format
@@ -55,8 +55,13 @@ The filter retunes (`set_band`) are applied immediately at the event. The live s
 
 ## Tolerances
 
-These live in `manifest.tolerances`: L/M/H raw and scaled, BPM and level ≤ 1e-9 abs. Onsets are exact; any exception must be documented as a threshold-edge case. FFT raw dB ≤ 1e-4 dB, with identical sentinel positions. FFT processed ≤ 1e-6 abs. Filter-design SOS ≤ 1e-12.
+These live in `manifest.tolerances`: L/M/H raw and scaled, BPM and level ≤ 1e-9 abs. Onsets are exact; any exception must be documented as a threshold-edge case. FFT raw dB ≤ 1e-4 dB, with identical sentinel positions. FFT processed ≤ 1e-6 abs. Filter-design SOS ≤ 1e-12. Spectro ≤ 0.01 dB where either side is ≥ −80 dB, ≤ 3 dB below (Rust runs it in f32).
 
 ## Filter design table
 
 `filter_design_sos.npy` is f64 `(rows, 8, 6)`, zero-padded past `n_sections`. `manifest.filter_design.rows[i]` = `{sr, order, lo_hz, hi_hz, lo_clamped, hi_clamped, n_sections, row}`. The grid covers sr 16/44.1/48/96 kHz, orders 1–8, and 9 band-edge pairs, including ones that need clamping (`[1, 30000]`, `[2944, 13952]` at 16 kHz). Each entry is `FilterBank._design_one` = `clamp_band_edges` + `scipy.signal.iirfilter(order, [lo/nyq, hi/nyq], btype="bandpass", ftype="butter", output="sos")`.
+
+## Spectro (the 3D view's analysis)
+
+`manifest.spectro` = `{span, windows, res, params[], cases[]}`. `spectro/<signal>.npy` is f32 `(n_res, n_frames, n_bins)` dB; `spectro/<signal>_ends.npy` is i64 `(n_frames,)`. Frame `k` of resolution mode `r` = `Spectro(params[r]).process(signal[ends[k] − span : ends[k]])`, the signal cast f32 → f64. `Spectro` is stateless per frame, so frames replay in any order. `params[r]` are what the live service builds at 48 kHz for mode `res[r]`; build the Rust `Spectro` from them, not from the server's mode table.
+

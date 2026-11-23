@@ -380,3 +380,60 @@ fn replay_matrix_within_tolerance() {
     }
     assert!(bad.is_empty(), "parity failures:\n{}", bad.join("\n"));
 }
+
+/// The 3D view's spectro stream: Rust's f32 `Spectro` against Python's f64
+/// one, every resolution mode, frames along a sweep and a drum loop. Loud
+/// bins are held tight; quiet ones only loosely, because f32 rounding there
+/// is a large fraction of the bin's power.
+#[test]
+fn spectro_matches_python() {
+    use dsp::spectro::{Spectro, SpectroParams};
+    let m = require_goldens!();
+    let sp = &m["spectro"];
+    let t = &m["tolerances"]["spectro_db"];
+    let (loud_min, loud_tol, quiet_tol) = (f(&t["loud_min_db"]), f(&t["loud_max_abs"]), f(&t["quiet_max_abs"]));
+    let span = u(&sp["span"]);
+    let mut specs: Vec<Spectro> = sp["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            Spectro::new(SpectroParams {
+                sr: f(&p["sr"]),
+                n_bins: u(&p["n_bins"]),
+                f_min: f(&p["f_min"]),
+                f_max: f(&p["f_max"]),
+                rel_res: f(&p["rel_res"]),
+                max_window: u(&p["max_window"]),
+            })
+        })
+        .collect();
+    let windows: Vec<usize> = sp["windows"].as_array().unwrap().iter().map(u).collect();
+    for s in &specs {
+        assert_eq!(s.span(), span, "span");
+        assert_eq!(s.window_sizes().collect::<Vec<_>>(), windows, "window ladder");
+    }
+    for case in sp["cases"].as_array().unwrap() {
+        let key = case["signal"].as_str().unwrap();
+        let sig = load_npy::<f32>(m["signals"][key]["file"].as_str().unwrap()).data;
+        let ends = load_npy::<i64>(case["ends_file"].as_str().unwrap()).data;
+        let want = load_npy::<f32>(case["file"].as_str().unwrap());
+        let n_bins = want.shape[2];
+        let (mut loud, mut quiet) = (0.0f64, 0.0f64);
+        for (r, s) in specs.iter_mut().enumerate() {
+            for (k, &e) in ends.iter().enumerate() {
+                let x: Vec<f64> = sig[e as usize - span..e as usize].iter().map(|&v| v as f64).collect();
+                let got = s.process(&x);
+                let row = &want.data[(r * ends.len() + k) * n_bins..][..n_bins];
+                for (j, (&g, &w)) in got.iter().zip(row).enumerate() {
+                    let err = (g as f64 - w as f64).abs();
+                    let is_loud = (w as f64).max(g as f64) >= loud_min;
+                    let (worst, lim) = if is_loud { (&mut loud, loud_tol) } else { (&mut quiet, quiet_tol) };
+                    *worst = worst.max(err);
+                    assert!(err <= lim, "{key} res {r} frame {k} bin {j}: rust {g} dB, python {w} dB");
+                }
+            }
+        }
+        eprintln!("spectro {key}: worst |Δ| loud {loud:.2e} dB, quiet {quiet:.2e} dB");
+    }
+}

@@ -29,7 +29,7 @@ Wire format and message fields: [`engine_contracts.md`](engine_contracts.md) →
 - **`res`** picks `rel_res`: `time` 0.08, `balanced` 0.045, `pitch` 0.02. Hann's main lobe is ~2.5 bins, so `pitch` splits a semitone above ~200 Hz (pinned by `resolves_a_semitone_at_440` in `spectro.rs`). One analysis serves every subscriber; the last request wins.
 - **Hop** = the whole number of blocks nearest 5 ms (256 samples at 48 kHz / 256-block).
 - **Cost** (M2, live): Rust ≈ 0.1–0.3 ms per hop (2–5 % of a core); Python ≈ 1 ms per hop (~20 %, mostly GIL contention), no dropped blocks. Only while a 3D view is subscribed; the thread idles otherwise.
-- **Not realtime, not parity-tested.** The worker polls the slot ring every 4 ms at normal priority (the ring keeps ≥ 2 × 16384 samples), so the callback doesn't know it exists and the LED path (DSP, FFT, OSC, goldens) is untouched. It is deliberately outside `server_status` and `meta` (their key shapes are compared by the wire-parity tool); its cost goes out as a separate `spectro_perf` message.
+- **Not realtime; the analysis is parity-tested, the service isn't.** `Spectro` (the per-frame analysis) has a DSP golden in both engines ([`dual_engine.md`](dual_engine.md)); the worker loop, `set_spectro` and the binary wire don't. The worker polls the slot ring every 4 ms at normal priority (the ring keeps ≥ 2 × 16384 samples), so the callback doesn't know it exists and the LED path (DSP, FFT, OSC, goldens) is untouched. It is deliberately outside `server_status` and `meta` (their key shapes are compared by the wire-parity tool); its cost goes out as a separate `spectro_perf` message.
 
 ## The UI core
 

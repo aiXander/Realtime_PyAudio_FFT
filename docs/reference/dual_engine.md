@@ -24,11 +24,11 @@ The repo ships two permanent audio-server engines with the same outward behaviou
 
 ## What `make check` proves, and what it doesn't
 
-1. `make_goldens.py` regenerates the DSP goldens from current Python: 27 cases (signals × config matrix + a scripted run of real WS messages) of per-block L/M/H raw/scaled/onsets/BPM/level, per-hop FFT raw dB/processed, derived internal state and a filter-design table.
-2. `cargo test` replays them in Rust: FFT bit-identical, L/M/H within 1e-9 (actual ≤ 6.4e-13), onsets and BPM identical. It also runs the Rust unit tests.
+1. `make_goldens.py` regenerates the DSP goldens from current Python: 27 cases (signals × config matrix + a scripted run of real WS messages) of per-block L/M/H raw/scaled/onsets/BPM/level, per-hop FFT raw dB/processed, derived internal state, a filter-design table and spectro frames.
+2. `cargo test` replays them in Rust: FFT bit-identical, L/M/H within 1e-9 (actual ≤ 6.4e-13), onsets and BPM identical, spectro within the tolerance below. It also runs the Rust unit tests.
 3. `record_wire.py --engines` starts each engine on the BlackHole loopback (ports 18765/18766/19000, so a dev server on 8765 doesn't collide), plays a drum loop, captures every WS message type, both FFT binary flavours, all OSC packets and the persisted YAML, then compares **shapes**: JSON key sets and types, OSC address/type-tag/payload layout, binary headers. Values aren't compared (live audio differs run to run). Without the `BlackHole 2ch` device the step prints `SKIP` and passes.
 
-**Not covered:** the **spectro stream** (the 3D view's STFT, `server/dsp/spectro.py` / `engine/dsp/src/spectro.rs` + `engine/server/src/spectro.rs`). It is opt-in (`set_spectro`) and not in the DSP goldens or wire captures, so its numbers can drift between engines with nothing failing. Also uncovered: device hot-plug, the audio watchdog, ALSA/Linux, and timing (latency, drops — that is `tools/bench/live_bench.py`, see [`perf_baseline.md`](perf_baseline.md)).
+**The spectro stream** (the 3D view's STFT) is covered for its analysis only: the goldens hold `Spectro.process` frames along a sweep and a drum loop for all three resolution modes, and Rust (f32) must match Python (f64) within 0.01 dB on bins above −80 dB and 3 dB below that (measured: 0.0011 / 0.64 dB). Not covered: its service side (`set_spectro`, the mode → resolution table, hop timing, the u8 wire quantisation), because it is opt-in and absent from the wire captures. Also uncovered: device hot-plug, the audio watchdog, ALSA/Linux, and timing (latency, drops — that is `tools/bench/live_bench.py`, see [`perf_baseline.md`](perf_baseline.md)).
 
 ## Parity traps
 

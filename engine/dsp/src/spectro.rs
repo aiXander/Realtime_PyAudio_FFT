@@ -1,6 +1,7 @@
 //! Multi-resolution spectrogram for *looking at* sound (the UI's 3D FFT
-//! view). Not part of the Python reference and not parity-tested: nothing
-//! downstream (OSC, L/M/H, LEDs) reads it.
+//! view). Twin of `server/dsp/spectro.py`; `process` is parity-tested against
+//! its goldens (`tests/parity.rs`, f32 here vs f64 there, so within a tolerance).
+//! Nothing downstream (OSC, L/M/H, LEDs) reads it.
 //!
 //! One STFT can't resolve both a bass note and a hi-hat: a long window
 //! smears time, a short one smears frequency. So every hop runs a ladder of

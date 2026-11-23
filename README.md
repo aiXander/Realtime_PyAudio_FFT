@@ -6,7 +6,8 @@
 </p>
 
 <p align="center">
-  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white">
+  <img alt="Rust engine" src="https://img.shields.io/badge/engine-Rust-DEA584?logo=rust&logoColor=white">
+  <img alt="Python 3.10+ engine" src="https://img.shields.io/badge/engine-Python%203.10%2B-3776AB?logo=python&logoColor=white">
   <img alt="OSC + WebSocket" src="https://img.shields.io/badge/output-OSC%20%7C%20WebSocket-8A2BE2">
   <img alt="Latency" src="https://img.shields.io/badge/latency-8%E2%80%9315%20ms-2ea44f">
   <img alt="Runs on Raspberry Pi" src="https://img.shields.io/badge/runs%20on-Raspberry%20Pi-C51A4A?logo=raspberrypi&logoColor=white">
@@ -24,7 +25,8 @@ https://github.com/user-attachments/assets/83547924-0b8d-4667-ba55-5cb813fdc09d
 | **Onsets and tempo** | Per-band onset triggers for kick, snare and hi-hat style transients, plus a BPM estimate from the low band. |
 | **OSC output** | UDP at audio-block rate (~187 Hz) for TouchDesigner, Max/MSP, Unity, p5.js or custom clients. A WebSocket handles live control. |
 | **Browser UI** | Tune every parameter live. The UI does no signal processing: the FFT graph renders the exact bytes sent on `/audio/fft`. |
-| **Realtime-safe** | The audio callback never allocates, locks or logs. All DSP runs in worker threads on vectorized NumPy / SciPy, light enough for a Raspberry Pi. |
+| **Two engines** | The same server in Rust (the default: ~4× less CPU, real-time worker threads) and in Python (NumPy / SciPy, easy to hack). Same UI, configs, CLI and OSC / WebSocket messages; tests check that they agree. |
+| **Realtime-safe** | The audio callback never allocates, locks or logs. All DSP runs in worker threads, light enough for a Raspberry Pi. |
 | **Persistence** | Every setting is saved to `configs/main.yaml`. Named presets can be saved and loaded. |
 
 ## The UI
@@ -35,7 +37,17 @@ https://github.com/user-attachments/assets/83547924-0b8d-4667-ba55-5cb813fdc09d
 
 ## Quick start
 
-You need Python 3.10+, [uv](https://docs.astral.sh/uv/) and PortAudio.
+There are two engines with identical behaviour; install whichever you like. **Rust is the default** and the faster one. Python is the reference implementation and the easier one to hack on.
+
+**Rust engine.** You need [rustup](https://rustup.rs/); the pinned toolchain installs itself on the first build. No Python or PortAudio needed (on Linux, install the ALSA headers: `sudo apt install libasound2-dev`).
+
+```bash
+git clone https://github.com/aiXander/Realtime_PyAudio_FFT.git
+cd Realtime_PyAudio_FFT
+make start                                           # release build, then server + UI in your browser
+```
+
+**Python engine.** You need Python 3.10+, [uv](https://docs.astral.sh/uv/) and PortAudio.
 
 ```bash
 brew install portaudio                               # macOS
@@ -44,10 +56,22 @@ sudo apt install libportaudio2 portaudio19-dev       # Ubuntu / Debian / Raspber
 git clone https://github.com/aiXander/Realtime_PyAudio_FFT.git
 cd Realtime_PyAudio_FFT
 uv sync
-uv run audio-server --open                           # server + UI in your browser (or: make start ENGINE=python)
+make start-python                                    # = uv run audio-server --open
 ```
 
+Both read and write the same `configs/main.yaml`, so you can switch engines at any time. `make start CONFIG=name` (or `make start-python CONFIG=name`) runs on `configs/name.yaml` instead. Measured on an M2 MacBook (48 kHz, 256-sample blocks, default settings, UI open):
+
+| | Python | Rust |
+|---|---|---|
+| CPU | 12.1% of one core | **3.0%** |
+| Memory | 111 MB | **20 MB** |
+| Audio block → OSC packet | 622 µs avg | **79 µs avg** |
+| Dropped blocks, 10-minute run | 45 | **0** |
+| Kick drum → `/audio/onset/low` | 18.3 ms | **15.4 ms** |
+
 The UI lives at **http://127.0.0.1:8766**. OSC goes to `127.0.0.1:9000` by default.
+
+Both engines take the same flags (`engine/target/release/audio-server …` or `uv run audio-server …`):
 
 | Flag | What it does |
 |---|---|
@@ -200,7 +224,7 @@ Sliders can send `commit: false` while dragging and `commit: true` on release. T
 - **The audio callback does almost nothing.** It mixes to mono, copies the block into a lock-free ring buffer and wakes two workers. It never allocates, locks, logs or sends a packet, so heavy load can't cause dropouts.
 - **DSP worker** (once per 256-sample block): bandpass filter bank → RMS → smoothing → auto-scaler (peak follower + noise gate + tanh) → onset detection → OSC.
 - **FFT worker** (once per hop): windowed FFT → log-spaced bins → the same per-bin auto-scaler → OSC + WebSocket.
-- **The asyncio loop** runs the WebSocket server, the UI's static HTTP server, the command dispatcher and the debounced config writer.
+- **The control loop** (asyncio in Python, tokio in Rust) runs the WebSocket server, the UI's static HTTP server, the command dispatcher and the debounced config writer.
 - **The audio watchdog** sends silence to OSC and keeps trying to reopen the device when the input dies (e.g. an unplugged USB mic).
 
 The full design rationale is in [`realtime_audio_server_plan.md`](realtime_audio_server_plan.md).
@@ -211,6 +235,10 @@ The full design rationale is in [`realtime_audio_server_plan.md`](realtime_audio
 - Presets are saved next to it as `configs/<name>.yaml`.
 - The input device is remembered **by name**, so it survives devices being re-ordered.
 - Running headless (`--no-ws`)? Tune with the UI first, then restart without it; the settings stay.
+
+## Contributing
+
+A change to the signal processing, a setting or a message goes into **both** engines (`server/` is Python, `engine/` is Rust); the browser UI in `ui/` is shared. Then run `make check` (needs both toolchains), which regenerates the reference outputs from Python, replays them in Rust, and runs both servers live to compare every message (that last step needs the [BlackHole](https://github.com/ExistentialAudio/BlackHole) loopback device on macOS and is skipped without it).
 
 ## License
 

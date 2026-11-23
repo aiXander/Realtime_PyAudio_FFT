@@ -1,19 +1,24 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+A realtime audio-analysis server for live visuals: it turns an audio input into L/M/H band levels, per-band onsets, BPM, loudness and a log-spaced FFT, sent over OSC (to WZRD, the Pi LED controller) and WebSocket (to the bundled browser UI, which is also the control panel).
 
-## Repository layout
+## Two engines, one interface
 
-**In flight: full port of `server/` to Rust**, planned in `docs/TODO/rust_port.md` (the plan lives in `docs/TODO/`). Until cutover the Python server is a **frozen reference**: bug fixes only. Any DSP-semantics change must land in both engines **and** be followed by regenerating the goldens (read the plan before touching `server/dsp/`).
+The repo has **two permanent engines**: `server/` (Python) and `engine/` (Rust, the default, `make start`). They share one `ui/`, one `configs/`, one CLI and one WS/OSC protocol; only the core differs. Python is the **DSP reference**: the parity goldens are generated from it and Rust is tested against them. **A behaviour change (DSP, a knob, a WS/OSC message, config schema) lands in both engines in the same commit, followed by `make check`.** UI and wire contracts exist once. Rule, what `make check` covers and the parity traps: `docs/reference/dual_engine.md`. Open work (Pi validation, distribution): `docs/TODO/`.
+
+**Definition of done** for a behaviour change: both engines changed, `make check` green, `cd engine && cargo clippy --all-targets` clean, no new `uv run ruff check server tools` errors (the existing E701/E702 one-liners are the house style), docs pass done.
 
 | Reference doc | Open it when |
 |---|---|
 | `docs/reference/engine_contracts.md` | changing or porting anything outward-facing: CLI, config load/persist, a WS message or handler, OSC packets, HTTP, devices, timing/backlog constants |
 | `docs/reference/perf_baseline.md` | measuring load/latency, comparing engines, or judging a perf change |
 | `docs/reference/fft_3d_styles.md` | touching the 3D FFT view, its spectro stream (`set_spectro`, `*/spectro.{rs,py}`) or the palette |
+| `docs/reference/dual_engine.md` | making any behaviour change (it must reach both engines), running `make check`, or porting a DSP stage: the rule, parity coverage gaps, parity traps |
 | `testdata/golden/README.md` | writing/reading parity tests or regenerating goldens |
 | `docs/reference/rust_dsp.md` | working in `engine/dsp` (the Rust DSP crate): crate map, parity/no-alloc tests, benches, toolchain |
 | `docs/reference/rust_server.md` | working in `engine/server` (the Rust `audio-server` binary): threading/command model, module map, how it was verified against Python, ported reference quirks |
+
+## Repository layout
 
 The design is documented in detail in `realtime_audio_server_plan.md`; if behavior in code seems surprising, the plan is the authoritative source for *why*. **Note:** the plan predates the FFT post-processor — for FFT processing semantics, the code (`server/dsp/fft_postprocess.py`) is the source of truth.
 
@@ -29,8 +34,8 @@ server/      # Python audio-server package (entry point: server.main:main)
              # FeatureStore/FFTStore, static HTTP
   config.py  # Dataclass schema, YAML load, debounced atomic Persister
   main.py    # App orchestrator: builds and wires everything together
-engine/      # Rust port: Cargo workspace, dsp lib + server bin (audio-server),
-             # both at parity. Maps: docs/reference/rust_dsp.md, rust_server.md
+engine/      # Rust engine: Cargo workspace, dsp lib + server bin (audio-server),
+             # at parity with server/. Maps: docs/reference/rust_dsp.md, rust_server.md
 ui/          # Vanilla-JS browser UI (ES modules, no build step). Pure viz —
              # no DSP. What you see in the FFT graph is byte-identical to the
              # OSC payload.
@@ -40,23 +45,25 @@ tools/       # signals.py (deterministic test signals); parity/ (golden generato
              # offline App driver, wire recorder/compare); bench/ (engine-agnostic
              # live bench, Python stage bench, results/ = committed baseline JSON)
 testdata/golden/  # parity goldens the Rust engine is tested against. DSP .npy +
-             # manifest are gitignored (~20 MB; regenerate with make_goldens.py);
+             # manifest are gitignored (~20 MB; `make check` regenerates them);
              # README.md + wire/ captures are tracked. Never hand-edit.
 ```
 
 ## Commands
 
 ```bash
-# ⭐ RUN THE SERVER (this repo uses uv + a .venv — no activation needed)
+# ⭐ RUN THE SERVER
 make start                            # Rust engine: release build + --open, on configs/main.yaml
-make start CONFIG=pi                  # same on configs/pi.yaml (local-only; the Pi gig config)
-make start ENGINE=python              # the Python reference instead (= uv run audio-server --open)
+make start-python                     # Python engine (= uv run audio-server --open)
+make start CONFIG=pi                  # either target on configs/pi.yaml (local-only; the Pi gig config)
+make check                            # prove both engines agree: goldens + cargo test + live wire compare
 
 # Setup (only needed once, or after dependency changes)
 uv sync                               # create/update .venv from uv.lock
 uv sync --extra dev                   # include dev extras (pytest)
 
-# Run the server (reads <repo>/configs/main.yaml; opens WS on 8765, UI HTTP on 8766)
+# Python engine directly (reads <repo>/configs/main.yaml; WS on 8765, UI HTTP on 8766).
+# The Rust binary engine/target/release/audio-server takes the same flags.
 uv run audio-server                   # entry point from pyproject [project.scripts]
 uv run python -m server.main          # equivalent
 uv run audio-server --open            # also launches the bundled UI in default browser
@@ -70,9 +77,10 @@ uv run audio-server --config /path/cfg.yaml --log-level DEBUG
 uv run pytest tests/
 uv run pytest tests/unit/test_foo.py::test_bar    # single test
 
-# Rust-port harness (see testdata/golden/README.md, docs/reference/perf_baseline.md)
+# Parity harness pieces (make check = make_goldens + cargo test + record_wire --engines; docs/reference/dual_engine.md)
 uv run python tools/parity/make_goldens.py [--check]   # DSP goldens; --check = byte-identical regen
-uv run tools/parity/record_wire.py [--server-cmd CMD --out DIR] [--compare A B]  # wire goldens
+uv run tools/parity/record_wire.py --engines           # capture both engines live, compare shapes
+uv run tools/parity/record_wire.py [--server-cmd CMD --out DIR] [--compare A B]  # one capture / compare
 uv run tools/bench/live_bench.py [--server-cmd CMD] [--set k=v]  # live load/latency (BlackHole input)
 uv run python tools/bench/stage_bench.py [--quick]     # Python per-stage µs
 cd engine && cargo test && cargo clippy --all-targets  # Rust engine (rustup 1.99.1, pinned)
@@ -83,6 +91,8 @@ cd engine && cargo test && cargo clippy --all-targets  # Rust engine (rustup 1.9
 The `configs/` directory *must* be writable — the Persister atomically rewrites `configs/main.yaml` on every UI control change, and presets are saved alongside as `configs/<name>.yaml`. (A legacy `./config.yaml` + `presets/` layout is auto-migrated into `configs/` at startup.)
 
 ## Architecture: the threading contract is the design
+
+This section describes the Python engine; the Rust engine keeps the same shape with Rust-native plumbing (command queues instead of locks, triple buffers instead of the double-buffer trick): `docs/reference/rust_server.md`.
 
 This is a realtime audio system. The single most important invariant: **the PortAudio callback never allocates, never logs, never locks, never sends a packet, never calls SciPy.** Its job is mono-mix → ring write → set two events. All DSP runs in worker threads. Violating this — e.g. doing a `sosfilt` call or a `print` from the callback — will cause audio dropouts under load. See `realtime_audio_server_plan.md` §3.
 
@@ -200,9 +210,7 @@ User-facing knobs (`sensitivity`, `refractory_s`, `slow_tau_s`, `abs_floor`, per
 
 ### Wire formats
 
-- **WS JSON**: `meta`, `snapshot` (L/M/H raw + scaled, plus `low_onset` / `mid_onset` / `high_onset` ∈ {0,1}, `bpm` and `level` = the `/audio/level` value), `devices`, `presets`, `server_status`, `error`. Inbound types are listed in `Dispatcher._handlers`, except the per-connection `set_stream` (pause/resume this client's snapshot/FFT/status stream; resume re-sends meta), handled in `WSServer._on_message`. `server_status.audio_stalled` mirrors the audio watchdog. `meta.onset` carries `{low: {sensitivity, refractory_s, slow_tau_s}, mid: {...}, high: {...}}`; `meta.level` carries `{tau_s, floor_db, ceiling_db}`.
-- **WS binary** (FFT): `[type=1:u8][reserved:u8][n_bins:u16 LE][float32 * n_bins LE]` — see `WSServer._encode_fft_binary` (server) / `decodeFftBinary` in `ui/src/ws.js`. **Float interpretation depends on `meta.fft_send_raw_db`**: `false` (default) → post-processed `[0..1]`; `true` → raw wire dB with `-1000` sentinels for empty log bins.
-- **OSC**: `/audio/meta [sr, blocksize, n_fft_bins, low_lo, low_hi, mid_lo, mid_hi, high_lo, high_hi]` — three independent bandpasses, edges in Hz. `/audio/lmh [low, mid, high]` (scaled, per audio block). `/audio/bpm [bpm:f]` (per audio block; `0.0` while not yet locked or after long silence; derived from the low onset stream). `/audio/level [level:f]` (per audio block, after `bpm` and before that block's onsets; broadband loudness, never auto-scaled, gated or multiplied by master gain; `0..1` over `cfg.level`'s dB range (`floor_db..ceiling_db`, default −60..0 dBFS RMS, clipped outside), power-smoothed over `level.tau_s` (default 0.1 s). Tuned by `set_level` → `App.apply_level` → `LevelMeter.set_params` from the UI's *Level* panel; consumers write thresholds in the `0..1` value, so moving the range moves them — definition in `docs/reference/engine_contracts.md`). `/audio/onset/low [1:i]`, `/audio/onset/mid [1:i]`, `/audio/onset/high [1:i]` (each sent only on that band's onset blocks — absence is silence on the address; constant pre-encoded packet per band, no per-send packing). `/audio/fft [...bins]` (only when `osc.send_fft` is true and FFT is enabled). **Same `send_raw_db` flag controls FFT semantics here**: `false` → `[0..1]` post-processed (matches L/M/H semantics on OSC); `true` → raw dB (sentinels rewritten to `db_floor` so consumers see in-range values).
+Every WS message, the binary FFT frame, every OSC address and its byte layout are specified once, for both engines, in `docs/reference/engine_contracts.md` (captured shapes: `testdata/golden/wire/`). The one that bites most: **`fft.send_raw_db` flips FFT semantics on both wires at once**: `false` → post-processed `[0..1]`; `true` → raw dB (WS keeps `-1000` sentinels for empty log bins, OSC rewrites them to `db_floor`).
 
 ### Config / validation
 

@@ -1,6 +1,6 @@
 # Engine contracts: what any audio-server engine must honour
 
-This doc covers the outward-facing behaviour of the engine: CLI, config files, the WebSocket API, OSC, static HTTP, device handling, and the timing and backlog policies. The browser UI, downstream OSC consumers and saved configs all depend on it. Today the Python package `server/` implements it, and the Rust port (`docs/TODO/rust_port.md`) must reproduce it unchanged.
+This doc covers the outward-facing behaviour both engines implement: CLI, config files, the WebSocket API, OSC, static HTTP, device handling, and the timing and backlog policies. The browser UI, downstream OSC consumers and saved configs all depend on it. The Python engine (`server/`) and the Rust engine (`engine/`) both implement it; a difference between them is either marked **Rust engine only** here or a bug. How agreement is checked: [`dual_engine.md`](dual_engine.md).
 
 This is a map. **Exact message shapes** are the captured instances in `testdata/golden/wire/` (see its README). **DSP numerics** are the goldens in `testdata/golden/` plus the parity traps in the port plan. Where this doc and the code disagree, the code wins: fix this doc.
 

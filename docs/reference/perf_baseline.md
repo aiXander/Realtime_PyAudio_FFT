@@ -1,6 +1,6 @@
 # Performance baseline + how to measure an engine
 
-These are the measured load and latency of the Python engine on the M2. The same tools rerun unchanged against the Rust engine (`docs/TODO/rust_port.md`), so the two can be compared number for number. Raw JSON for every run is in `tools/bench/results/`.
+These are the measured load and latency of the Python engine on the M2. The same tools rerun unchanged against the Rust engine (`--server-cmd`), so the two can be compared number for number. Raw JSON for every run is in `tools/bench/results/`.
 
 ## Tools
 
@@ -90,4 +90,4 @@ Re-run on 2026-10-24 for the comparison (`compare_2026-10-24/stages_{python,rust
 - **Contention is the expensive part.** The live server spends ~10× that per stage (264 / 403 µs average) and 8.5–12% of a core in total. The extra goes to GIL hand-offs between the CoreAudio callback thread, the two workers and the asyncio thread; to the 0.5 ms switch interval; and to thread wake-ups. It also produces the rare 50–75 ms stalls that cause drops.
 - **What Rust should fix.** The Rust engine's main win is real parallelism and no GIL, which should remove both the contention and those stalls. The per-stage speedup is secondary.
 - **Targets (M2, default config, UI phase):** CPU 3.0% vs Python's 12.1% (interleaved medians): met. DSP p95 live is ~100 µs rather than single-digit because it includes the OSC sends and the thread wake-up; the pure DSP is 9.4 µs (criterion, above). **Zero drops over a 10-minute soak: met with real-time worker scheduling** (4 soaks, 0 drops; the pure port's QoS policy dropped in every soak, above).
-- **Pi.** The Pi 4 has no baseline yet. It's measured in phase 4 of the plan.
+- **Pi.** The Pi 4 has no baseline yet. It's measured in the Pi validation step of [`../TODO/rust_port.md`](../TODO/rust_port.md).

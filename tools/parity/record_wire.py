@@ -9,6 +9,7 @@ preset writer produce.
     uv run tools/parity/record_wire.py                      # Python engine -> testdata/golden/wire/
     uv run tools/parity/record_wire.py --out /tmp/rust_wire \\
         --server-cmd engine/target/release/audio-server     # same capture from the Rust engine
+    uv run tools/parity/record_wire.py --engines            # capture both engines, compare (make check)
 
 Values (levels, device names, timings) differ run to run; what the Rust
 engine must match is the *shape*: JSON key sets + value types per message,
@@ -190,7 +191,10 @@ def record(args) -> int:
         server.send_signal(signal.SIGINT)
         server.wait(timeout=10)
         osc.stop = True
+        osc.join()
+        osc.sock.close()  # free OSC_PORT so a second capture in this process can bind it
         player.stream.stop()
+        player.stream.close()
     for addr, data in sorted(osc.packets.items()):
         name = "osc" + addr.replace("/", "_") + ".bin"
         (out / name).write_bytes(data)
@@ -265,14 +269,38 @@ def compare(a: Path, b: Path) -> int:
     return 1 if bad else 0
 
 
+PYTHON_CMD = f"{REPO}/.venv/bin/python -m server.main"
+RUST_CMD = str(REPO / "engine" / "target" / "release" / "audio-server")
+
+
+def engines() -> int:
+    """Capture the wire from both engines into temp dirs and compare their shapes.
+    Skips (exit 0) when the BlackHole loopback device isn't installed."""
+    import sounddevice as sd
+    if not any(d["name"] == BLACKHOLE for d in sd.query_devices()):
+        print(f"SKIP wire compare: audio device '{BLACKHOLE}' not found (brew install blackhole-2ch)")
+        return 0
+    tmp = Path(tempfile.mkdtemp(prefix="wire_engines_"))
+    for name, cmd in (("python", PYTHON_CMD), ("rust", RUST_CMD)):
+        print(f"recording {name}: {cmd}")
+        if record(argparse.Namespace(out=str(tmp / name), server_cmd=cmd)):
+            print(f"FAIL: {name} capture incomplete (see above)")
+            return 1
+    return compare(tmp / "python", tmp / "rust")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--server-cmd", default=f"{REPO}/.venv/bin/python -m server.main")
+    ap.add_argument("--server-cmd", default=PYTHON_CMD)
     ap.add_argument("--out", default=str(OUT))
     ap.add_argument("--compare", nargs=2, metavar=("A", "B"))
+    ap.add_argument("--engines", action="store_true",
+                    help="capture Python and Rust (release build) live and compare them")
     args = ap.parse_args(argv)
     if args.compare:
         return compare(Path(args.compare[0]), Path(args.compare[1]))
+    if args.engines:
+        return engines()
     return record(args)
 
 

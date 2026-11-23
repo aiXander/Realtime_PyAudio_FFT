@@ -3,12 +3,13 @@
 // ochre → rock → snow), iso-height contour lines (every 5th an index
 // contour), classic top-left hill shading, and a faint graticule — meridians
 // at every octave, parallels every second of history (labelled at the right
-// edge). The front edge is cut open like a block diagram, showing strata.
-// No audio reactivity: this is the calm one.
+// edge). Notes are white trails along their ridges. The front edge is cut
+// open like a block diagram, showing strata. This is the calm one.
 // Palette: sea = low, lowlands = mid, highlands = high, then rock and snow.
+// With the Color picker the tint keeps its brightness and takes the moment's hue.
 
 import {
-  glf, SURF_VS, SPEC_FS, PAL_UNIFORMS, palBg, FLAT_VS, program, setCommonUniforms, makeStrips, fillCurtain, fillRim, disposeAll,
+  glf, SURF_VS, SPEC_FS, PAL_UNIFORMS, MOMENT_FN, palBg, FLAT_VS, program, setCommonUniforms, makeStrips, fillCurtain, fillRim, disposeAll,
   drawSecondLabels,
 } from "./common.js";
 
@@ -18,6 +19,7 @@ const INDEX_EVERY = 5;         // every Nth contour is an index contour (thicker
 const LINE_PX = 0.9;           // contour half-width, device px
 const INDEX_PX = 1.5;
 const GRID_ALPHA = 0.16;       // graticule strength
+const TRAIL_PX = 1.0;          // half width of a note's trail, CSS px
 // Hypsometric tint stops (height, GLSL color from the palette's uC0/uC1/uC2 = low/mid/high).
 const TINT = [
   [0.00, "uC0 * 0.22"], [0.05, "uC0 * 0.42"], [0.09, "uC1 * 0.42"], [0.28, "uC1 * 0.68"],
@@ -36,10 +38,11 @@ const SURF_FS = `#version 300 es
 precision highp float;
 in float vU, vZ, vT;
 uniform vec3 uBg;
-uniform float uOct0, uOctSpan, uDepthS;
+uniform float uOct0, uOctSpan, uDpr;
 out vec4 o;
 ${SPEC_FS}
 ${TINT_FN}
+${MOMENT_FN}
 /** Antialiased line coverage at integer values of q, halfPx wide on screen; fades out where lines crowd. */
 float lineAt(float q, float halfPx) {
   float w = fwidth(q);
@@ -50,7 +53,7 @@ void main() {
   // Height + normal per pixel from the history texture (data resolution).
   float h; vec3 n;
   specSurface(vU, vT, h, n);
-  vec3 col = tint(h);
+  vec3 col = momentMix(tint(h), vT, fwidth(vT));
   // Hill shading: light from the top-left (low frequencies, far away).
   n = normalize(n);
   float lit = dot(n, normalize(vec3(-0.75, 1.0, 0.6)));
@@ -67,6 +70,8 @@ void main() {
   float oct = uOct0 + vU * uOctSpan;
   float g = max(lineAt(oct, 0.6), lineAt(vZ * uDepthS, 0.6));
   col = mix(col, vec3(0.85, 0.93, 1.0), g * ${glf(GRID_ALPHA)});
+  // Notes: a white trail along the crest of every tonal ridge (the same mark in every style).
+  col = mix(col, vec3(1.0), specThread(vU, vT, ${glf(TRAIL_PX)} * uDpr));
   // Map edge: fade into the table toward the horizon.
   col = mix(col, uBg, smoothstep(0.82, 1.0, vZ));
   o = vec4(col, 1.0);
@@ -118,7 +123,6 @@ export default {
           setCommonUniforms(gl, surf.u, f);
           gl.uniform1f(surf.u.uOct0, Math.log2(f.fMin / 1000));
           gl.uniform1f(surf.u.uOctSpan, Math.log2(f.fMax / f.fMin));
-          gl.uniform1f(surf.u.uDepthS, f.depthS);
           gl.bindVertexArray(f.surfVao);
           gl.drawElements(gl.TRIANGLES, f.triCount, gl.UNSIGNED_INT, 0);
           gl.disable(gl.DEPTH_TEST);

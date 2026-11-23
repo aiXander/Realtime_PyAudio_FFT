@@ -42,6 +42,7 @@ const handlers = {};
 const errSinks = [];
 const statusSinks = [];
 const spectroSinks = [];
+const fftSinks = [];
 
 export function onMessage(type, fn) {
   handlers[type] = fn;
@@ -54,6 +55,11 @@ export function onError(fn) {
 /** fn(ArrayBuffer) on every spectro message (binary type 2, the 3D view's stream). */
 export function onSpectro(fn) {
   spectroSinks.push(fn);
+}
+
+/** fn(Float32Array) on every /audio/fft frame (binary type 1) while FFT is enabled. */
+export function onFft(fn) {
+  fftSinks.push(fn);
 }
 
 /** fn(state) on every connection-state change: "connecting" | "connected" | "reconnecting". */
@@ -189,6 +195,7 @@ function onMsg(ev) {
       // side panel reflect the disabled state.
       if (f32 && store.meta?.fft_enabled !== false) {
         store.fft_bins = f32;
+        for (const fn of fftSinks) fn(f32);
       }
     }
     return;

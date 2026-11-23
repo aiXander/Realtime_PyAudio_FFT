@@ -94,13 +94,20 @@ ui:
   peak_decay_per_s: 0.5
   show_onsets: false
   fft_view: 2d    # FFT card: 2d spectrum or 3d history ("ocean")
-  fft3d_style: cloud   # 3D look: cloud | topo | spectrogram | partials
+  fft3d_style: cloud   # 3D look: cloud | topo | spectrogram
   palette: classic     # UI colors: classic | neon | ember | ocean | sunset | mono | okabe
   fft3d:                 # 3D view look (all optional; set from the FFT card's 3D controls)
     res: balanced          # analysis: time | balanced | pitch
-    smooth_ms: 40.0        # power average per frame, 0–200 ms
+    source: spectro        # what 3D draws: spectro (its own analysis) | fft (the /audio/fft frames, as in 2D)
+    smooth_ms: 40.0        # power average over time, 0–200 ms
+    blur_oct: 0.17         # power blur across frequency (width in octaves), 0–1; 0 = every bin
     range_db: 60.0         # dB below the top shown above the floor, 20–120
+    gamma: 2.0             # height curve: 1 = linear in dB, 2–3 = closer to loudness, 1–4
+    tonal: 0.5             # lift + light for tonal content (notes, held partials), 0–1; 0 = off
+    moment: 0.0            # hue by which bands sound in each moment, 0–1; 0 = the style's own colors
     tilt_db_per_oct: 3.0   # display tilt around 1 kHz, −6–12
+    glow: 0.5              # cloud: 0 = lit matte terrain … 1 = a dark body that emits by level
+    bloom: 0.5             # cloud: bloom gain, 0–1.5; 0 = off
     overscan: 0.05         # front row past each card edge (× width), 0–0.3
     perspective: 1.0       # × the style's narrowing toward the horizon, 0–3
     skew: 0.0              # horizon shift, −1 (left) … 1 (right)

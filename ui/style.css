@@ -142,7 +142,7 @@ body.col-resizing, body.col-resizing * { cursor: ew-resize !important; user-sele
   text-transform: none;
 }
 .topbar-fps input[type="range"] { width: 90px; vertical-align: middle; }
-select.title-select { padding: 2px 5px; font-size: 11px; line-height: 1.2; }
+select.title-select { padding: 2px 3px; font-size: 11px; line-height: 1.2; }
 
 /* Palette picker: a button + listbox, so each palette can show its colors. */
 .palette-picker { position: relative; }
@@ -445,15 +445,21 @@ button.badge:active { transform: none; }
   gap: 8px;
   min-width: 0;
 }
-.viz-title { flex-wrap: wrap; row-gap: 5px; }
+/* One line: title and tools never wrap apart (that left the FFT card's 3D
+   pickers on a second line under a lone title). The card name keeps its width;
+   the mode subtitle only fills leftover room and ellipsizes away first, then
+   the tools wrap inside their own box. */
 .viz-title > span:first-child {
-  flex: 1 1 auto;
+  flex: 1 1000 auto;
+  display: flex;
+  align-items: baseline;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 64px;
 }
 .viz-title-mode {
+  flex: 1 1 0;
+  width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   margin-left: 6px;
   font-weight: 500;
   letter-spacing: 0.3px;
@@ -463,8 +469,13 @@ button.badge:active { transform: none; }
 .viz-tools {
   display: inline-flex;
   align-items: center;
-  gap: 12px;
-  flex: 0 0 auto;
+  gap: 8px;
+  /* May shrink and wrap: the FFT card's 3D pickers are wider than a narrow card. */
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: 5px;
+  min-width: 0;
   margin-left: auto;
   text-transform: none;
   letter-spacing: 0.2px;
@@ -472,6 +483,7 @@ button.badge:active { transform: none; }
   font-size: 11px;
 }
 .viz-tools label.inline { color: var(--text-3); font-size: 11px; gap: 6px; white-space: nowrap; }
+#fft3d-tools { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 5px 4px; min-width: 0; }
 .viz-tools input[type="range"].title-slider { width: 76px; }
 .viz-tools label.inline > span { min-width: 34px; font-size: 10.5px; color: var(--text-3); }
 
@@ -1058,6 +1070,8 @@ input[type="checkbox"]:focus-visible { box-shadow: none; outline: 2px solid var(
 .cam-head > span { margin-right: auto; }
 .cam-head > button:not(.icon-btn) { padding: 1px 7px; font-size: 11px; }
 .cam-panel label { grid-template-columns: 74px 1fr 64px; }
+.cam-sub { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-2); color: var(--text-3); font-size: 11px; }
+.cam-sub > span { opacity: 0.6; margin-left: 4px; }
 
 /* ---- A viz card in browser full screen (FFT). The UA stylesheet already
    pins it to the viewport; this just drops the card chrome. ---- */

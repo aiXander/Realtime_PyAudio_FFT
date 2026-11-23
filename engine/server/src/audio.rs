@@ -2,11 +2,14 @@
 //! (`server/audio/{devices,stream,callback}.py`).
 //!
 //! Device indices are positions in cpal's full device list (inputs and
-//! outputs), which on CoreAudio is the same numbering PortAudio used. Names
-//! are what's matched on reopen, since indices shift as devices come and go.
-//! cpal enumerates live, so PortAudio's re-init hack isn't needed.
+//! outputs, minus our own hidden tap devices), which on CoreAudio is the same
+//! numbering PortAudio used. Names are what's matched on reopen, since indices
+//! shift as devices come and go. cpal enumerates live, so PortAudio's re-init
+//! hack isn't needed. "System audio" (macOS 14.2+, `system_tap.rs`) is the
+//! entry one past the last device: a tap on the current default output.
 
 use crate::shared::{Shared, now_ns};
+use crate::system_tap::{self, SYSTEM_AUDIO_NAME, SystemTap, TAP_DEVICE_PREFIX, TAP_UID_PREFIX};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use serde_json::{Value, json};
@@ -47,8 +50,14 @@ fn hostapi_name(host: &cpal::Host) -> String {
     }
 }
 
+/// The device's name, else its id. Never cpal's `Display`: for a device
+/// whose description can't be read (a half-torn-down aggregate) it returns
+/// a fmt error, and `to_string()` then panics.
 fn device_name(d: &cpal::Device) -> String {
-    d.description().map(|x| x.name().to_string()).unwrap_or_else(|_| d.to_string())
+    d.description()
+        .map(|x| x.name().to_string())
+        .or_else(|_| d.id().map(|i| i.id().to_string()))
+        .unwrap_or_else(|_| "unknown device".into())
 }
 
 fn max_input_channels(d: &cpal::Device) -> u16 {
@@ -57,13 +66,26 @@ fn max_input_channels(d: &cpal::Device) -> u16 {
         .unwrap_or(0)
 }
 
-/// All devices with ≥ 1 input channel.
+fn is_tap_device(d: &cpal::Device) -> bool {
+    d.id().is_ok_and(|i| i.id().starts_with(TAP_UID_PREFIX)) || device_name(d).starts_with(TAP_DEVICE_PREFIX)
+}
+
+/// cpal's full device list without our tap devices, so indices don't shift
+/// while System audio is open.
+fn devices(host: &cpal::Host) -> Vec<cpal::Device> {
+    host.devices()
+        .map(|it| it.filter(|d| !is_tap_device(d)).collect())
+        .unwrap_or_default()
+}
+
+/// All devices with ≥ 1 input channel, plus "System audio" on macOS 14.2+.
 pub fn list_input_devices() -> Vec<DeviceInfo> {
     let host = cpal::default_host();
     let api = hostapi_name(&host);
-    let Ok(devs) = host.devices() else { return Vec::new() };
+    let devs = devices(&host);
+    let system_index = devs.len();
     let mut out = Vec::new();
-    for (i, d) in devs.enumerate() {
+    for (i, d) in devs.into_iter().enumerate() {
         if !d.supports_input() {
             continue;
         }
@@ -80,14 +102,46 @@ pub fn list_input_devices() -> Vec<DeviceInfo> {
             max_input_channels: ch,
         });
     }
+    if system_tap::available()
+        && let Some(def) = host.default_output_device()
+    {
+        out.push(DeviceInfo {
+            index: system_index,
+            name: SYSTEM_AUDIO_NAME.into(),
+            hostapi: api,
+            default_samplerate: def.default_output_config().map(|c| c.sample_rate() as f64).unwrap_or(0.0),
+            max_input_channels: 2,
+        });
+    }
     out
 }
 
-/// The device at position `index` of the full list (if it's an input).
+/// The device at position `index` of the list (if it's an input).
 fn device_at(index: usize) -> Option<cpal::Device> {
-    let host = cpal::default_host();
-    let d = host.devices().ok()?.nth(index)?;
-    d.supports_input().then_some(d)
+    devices(&cpal::default_host()).into_iter().nth(index).filter(|d| d.supports_input())
+}
+
+/// Index of the "System audio" entry (one past the last device), if taps exist.
+fn system_audio_index() -> Option<usize> {
+    system_tap::available().then(|| devices(&cpal::default_host()).len())
+}
+
+/// A tap on the current default output, and the hidden input device to open.
+fn open_system_tap() -> Result<(SystemTap, cpal::Device), String> {
+    let uid = system_tap::default_output_uid().ok_or("System audio: no default output device")?;
+    let tap = SystemTap::new(&uid)?;
+    let t0 = std::time::Instant::now();
+    loop {
+        let found = cpal::default_host().devices().ok().and_then(|mut it| it.find(|d| device_name(d) == tap.name));
+        if let Some(dev) = found {
+            tracing::info!("System audio: tap device listed after {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
+            return Ok((tap, dev));
+        }
+        if t0.elapsed() > std::time::Duration::from_secs(1) {
+            return Err("System audio: the tap device did not appear".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 pub fn find_input_by_name(name: Option<&str>) -> Option<usize> {
@@ -101,9 +155,8 @@ pub fn default_input() -> Option<usize> {
     let def = host.default_input_device()?;
     let id = def.id().ok();
     let name = device_name(&def);
-    let devs = host.devices().ok()?;
     let mut by_name = None;
-    for (i, d) in devs.enumerate() {
+    for (i, d) in devices(&host).into_iter().enumerate() {
         if id.is_some() && d.id().ok() == id {
             return Some(i);
         }
@@ -112,10 +165,6 @@ pub fn default_input() -> Option<usize> {
         }
     }
     by_name
-}
-
-pub fn device_info(index: usize) -> Option<DeviceInfo> {
-    list_input_devices().into_iter().find(|d| d.index == index)
 }
 
 /// `resolve_initial_device`: CLI → cfg name → cfg index → system default.
@@ -144,9 +193,18 @@ pub struct StreamHandle {
     pub samplerate: f64,
     pub device: usize,
     pub device_name: String,
+    /// System audio's tap; declared after `stream` so it's dropped after it.
+    tap: Option<SystemTap>,
 }
 
 impl StreamHandle {
+    /// True when this is System audio and the default output changed since
+    /// the tap was made (it keeps recording the old device).
+    pub fn output_moved(&self) -> bool {
+        self.tap.as_ref().is_some_and(|t| {
+            system_tap::default_output_uid().is_some_and(|uid| uid != t.output_uid)
+        })
+    }
     pub fn start(&self) -> Result<(), String> {
         self.stream.play().map_err(|e| e.to_string())
     }
@@ -290,8 +348,14 @@ pub fn open_input_stream(
         Some(i) => i,
         None => default_input().ok_or("no default input device")?,
     };
-    let dev = device_at(index).ok_or_else(|| format!("Invalid device {index} (not an input device)"))?;
-    let name = device_name(&dev);
+    let (dev, name, tap) = if Some(index) == system_audio_index() {
+        let (tap, dev) = open_system_tap()?;
+        (dev, SYSTEM_AUDIO_NAME.to_string(), Some(tap))
+    } else {
+        let dev = device_at(index).ok_or_else(|| format!("Invalid device {index} (not an input device)"))?;
+        let name = device_name(&dev);
+        (dev, name, None)
+    };
     let def = dev.default_input_config().map_err(|e| e.to_string())?;
     let max_in = max_input_channels(&dev).max(1) as i64;
     let mut want = channels;
@@ -337,7 +401,7 @@ pub fn open_input_stream(
                     tracing::info!(
                         "stream open: device={index} ({name}) sr={sr} blocksize={blocksize} channels={want} format={fmt}"
                     );
-                    return Ok(StreamHandle { stream, samplerate: sr as f64, device: index, device_name: name });
+                    return Ok(StreamHandle { stream, samplerate: sr as f64, device: index, device_name: name, tap });
                 }
                 Err(e) => last_err = e.to_string(),
             }
@@ -377,6 +441,11 @@ where
 }
 
 fn probe_one(d: &DeviceInfo, duration: f64) -> Option<bool> {
+    if d.name == SYSTEM_AUDIO_NAME {
+        // Same answer as the Python engine (which can't open a second tap
+        // without cutting its live stream): is any other app playing?
+        return Some(system_tap::output_playing_elsewhere());
+    }
     let dev = device_at(d.index)?;
     let def = dev.default_input_config().ok()?;
     let sr = def.sample_rate();

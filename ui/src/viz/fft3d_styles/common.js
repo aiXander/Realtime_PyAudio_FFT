@@ -29,6 +29,13 @@ export const WORLD_HEIGHT = 0.5, WORLD_DEPTH = 3.0;
 /** Vertex shader: data rows pooled per grid row (cap). */
 export const MAX_POOL = 6;
 
+// Where a sound begins: the level rise over ONSET_BACK_S that counts as none … full.
+const ONSET_BACK_S = 0.03, ONSET_DB = [4, 14];
+// The moment's hue: share of the activity common to all three bands that is left out (see momentHue).
+const MOMENT_COMMON = 0.8;
+// Half the baseline the crest of a tonal ridge is found over, octaves (see specThread).
+const THREAD_STEP_OCT = 0.06;
+
 export const glf = (x) => (Number.isInteger(x) ? x.toFixed(1) : String(x));
 export const hex01 = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
 
@@ -89,9 +96,21 @@ float hash01(uint x) { return float(hash(x) & 0xFFFFu) / 65535.0; }`;
 /**
  * SPEC_FN: read the history texture. Rows are absolute data rows mod the
  * ring (REPEAT wrap, so any float row works); u is 0..1 across frequency.
- *   specH(u, row)            height 0..1 (dB → range, tilt, level)
+ *   specDb(u, row)           level 0..1, linear in dB (range, tilt, level), tonal bins lifted
+ *                            (toneLift in fft3d_data.js is the CPU twin)
+ *   specH(u, row)            height 0..1 = specDb ^ uGamma (the loudness curve: at 1 a
+ *                            sound 20 dB under the top stands half as tall on a 40 dB
+ *                            range, though it is heard about a quarter as loud)
+ *   specTone(u, row)         how tonal the bin is, 0..1, × the user's strength (a note or
+ *                            a held partial, as opposed to a hit or noise)
+ *   specOnset(u, row)        how much the level rose in the ~30 ms before this row, 0..1: lit
+ *                            where a sound begins (a streak across frequency for a hit, a dot
+ *                            for a note)
  *   specPeak(u, row, r, b)   pooled height over a footprint of r rows (older from row) × b bins
  *   specSurface(u, row, h, n) per-pixel height (pooled over the pixel's footprint) + normal (SPEC_FS)
+ *   (the row's hue, by which bands are sounding: MOMENT_FN below)
+ *   specThread(u, row, px)   coverage of a line px device px wide along the crest of a tonal
+ *                            ridge: a note drawn as a thread through time (SPEC_FS)
  * setCommonUniforms sets every uniform from f.spec.
  *
  * Pooling is halfway between the mean and the max of the taps (poolMix).
@@ -101,12 +120,23 @@ float hash01(uint x) { return float(hash(x) & 0xFFFFu) / 65535.0; }`;
  */
 export const SPEC_FN = `
 uniform sampler2D uSpec;
-uniform float uNBins, uTexRows, uDbScale, uDb0, uFloorDb, uInvRange, uTilt, uLogOct, uLog2FminK, uNView;
+uniform float uNBins, uTexRows, uDbScale, uDb0, uFloorDb, uInvRange, uTilt, uLogOct, uLog2FminK, uNView, uGamma, uTonal, uToneLift;
+uniform float uDepthS;   // seconds of history across the depth (uNView rows)
 float poolMix(float mx, float mean) { return 0.5 * (mx + mean); }
-float specH(float u, float row) {
+float specDb(float u, float row) {
   vec2 tc = vec2((u * (uNBins - 1.0) + 0.5) / uNBins, (row + 0.5) / uTexRows);
-  float db = texture(uSpec, tc).r * uDbScale + uDb0 + uTilt * (uLog2FminK + u * uLogOct);
-  return clamp((db - uFloorDb) * uInvRange, 0.0, 1.0);
+  vec2 s = texture(uSpec, tc).rg;
+  float db = s.r * uDbScale + uDb0 + uTilt * (uLog2FminK + u * uLogOct);
+  float d = clamp((db - uFloorDb) * uInvRange, 0.0, 1.0);
+  return d + s.g * uToneLift * (1.0 - d) * smoothstep(0.0, 0.3, d);
+}
+float specH(float u, float row) { return pow(specDb(u, row), uGamma); }
+float specTone(float u, float row) {
+  return texture(uSpec, vec2((u * (uNBins - 1.0) + 0.5) / uNBins, (row + 0.5) / uTexRows)).g * uTonal;
+}
+float specOnset(float u, float row) {
+  float riseDb = (specDb(u, row) - specDb(u, row - ${glf(ONSET_BACK_S)} * uNView / uDepthS)) / uInvRange;
+  return smoothstep(${glf(ONSET_DB[0])}, ${glf(ONSET_DB[1])}, riseDb);
 }
 float specPeak(float u, float row, float rows, float bins) {
   int nr = int(clamp(ceil(rows), 1.0, 6.0));
@@ -135,6 +165,55 @@ void specSurface(float u, float row, out float h, out vec3 n) {
   float sx = ${glf(WORLD_HEIGHT)} * (specH(u + du, row) - specH(u - du, row)) / (4.0 * du);
   float sz = ${glf(WORLD_HEIGHT)} * (specH(u, row - rows) - specH(u, row + rows)) / (2.0 * rows / uNView * ${glf(WORLD_DEPTH)});
   n = vec3(-sx, 1.0, -sz);
+}
+float specThread(float u, float row, float halfPx) {
+  float pxU = max(fwidth(u), 1e-6);                // u per pixel (taken outside the branches)
+  float tone = specTone(u, row);
+  if (tone < 0.02) return 0.0;
+  // The crest is the vertex of the parabola through the level here and a
+  // fixed step either side. The step has to span a few dB of the (blurred)
+  // peak: one bin either side is under the texture's 0.5 dB quantisation.
+  float du = ${glf(THREAD_STEP_OCT)} / uLogOct;
+  float dc = specDb(u, row), dl = specDb(u - du, row), dr = specDb(u + du, row);
+  float curv = dl + dr - 2.0 * dc;                 // < 0 on a crest
+  if (curv > -0.006) return 0.0;
+  float distPx = abs(0.5 * (dl - dr) / curv) * du / pxU;
+  // Only clearly tonal ridges get one: on a half-tonal swell the crest wanders and reads as a crack.
+  return smoothstep(0.2, 0.55, tone) * smoothstep(0.04, 0.25, dc) * (1.0 - smoothstep(halfPx - 0.6, halfPx + 0.6, distPx));
+}`;
+
+/**
+ * MOMENT_FN: the moment's colour (the Color picker, uMoment 0..1). The core
+ * keeps one texel per data row on unit 1: how active the low / mid / high
+ * band was in that frame, each against its own recent peak (makeMoment in
+ * fft3d_data.js). Mixed with the palette's band colours that is the row's
+ * hue: a kick, a snare and a hat differ in colour across the whole row, so
+ * rhythm reads as a colour pattern along time.
+ *   momentHue(row, rows)        rgb = the hue (largest channel 1), a = how much is sounding
+ *   momentMix(base, row, rows)  base moved toward that hue by uMoment, keeping base's brightness
+ * `rows` = data rows under the pixel (fwidth of the row; 1.0 in a vertex
+ * stage). Needs SPEC_FN and the palette uniforms (PAL_UNIFORMS or bandFn)
+ * before it.
+ */
+export const MOMENT_FN = `
+uniform sampler2D uRowTint;
+uniform float uMoment;
+vec4 momentHue(float row, float rows) {
+  float d = max(rows, 1.0) / 3.0;                  // taps go back in time only: rows past the newest are stale
+  vec3 a = vec3(0.0);
+  for (int i = 0; i < 3; i++) a += texture(uRowTint, vec2(0.5, (row - float(i) * d + 0.5) / uTexRows)).rgb;
+  a /= 3.0;
+  // What the bands have in common carries no hue (in a dense mix all three
+  // are near their peaks and the sum is grey), so most of it is taken out:
+  // the hue is what sets this moment apart.
+  vec3 w = a - ${glf(MOMENT_COMMON)} * min(a.r, min(a.g, a.b));
+  vec3 c = w.r * uC0 + w.g * uC1 + w.b * uC2;
+  return vec4(c / max(max(c.r, max(c.g, c.b)), 1e-3), max(a.r, max(a.g, a.b)));
+}
+vec3 momentMix(vec3 base, float row, float rows) {
+  if (uMoment <= 0.0) return base;
+  vec4 m = momentHue(row, rows);
+  return mix(base, m.rgb * max(base.r, max(base.g, base.b)) * (0.35 + 0.65 * m.a), uMoment);
 }`;
 
 /**
@@ -172,6 +251,7 @@ float gridHeight(float u, float row, float pool) {
 /** Surface vertex stage: one vertex per grid point, heights from the texture. Fragment
  *  stages shade per pixel from the texture (specSurface), so there's no vertex normal. */
 export const SURF_VS = `#version 300 es
+invariant gl_Position;   // a depth pre-pass (cloud) must land on the exact same depth as the shading pass
 ${PROJ_FN}
 ${SPEC_FN}
 ${GRID_FN}
@@ -345,6 +425,13 @@ export function setCommonUniforms(gl, u, f) {
   if (u.uFloorDb) gl.uniform1f(u.uFloorDb, sp.floorDb);
   if (u.uInvRange) gl.uniform1f(u.uInvRange, sp.invRange);
   if (u.uTilt) gl.uniform1f(u.uTilt, sp.tilt);
+  if (u.uGamma) gl.uniform1f(u.uGamma, sp.gamma);
+  if (u.uTonal) gl.uniform1f(u.uTonal, sp.tonal);
+  if (u.uToneLift) gl.uniform1f(u.uToneLift, sp.toneLift);
+  if (u.uRowTint) gl.uniform1i(u.uRowTint, 1);
+  if (u.uMoment) gl.uniform1f(u.uMoment, sp.moment);
+  if (u.uGlow) gl.uniform1f(u.uGlow, sp.glow);
+  if (u.uDepthS) gl.uniform1f(u.uDepthS, f.depthS);
   if (u.uLogOct) gl.uniform1f(u.uLogOct, sp.logOct);
   if (u.uLog2FminK) gl.uniform1f(u.uLog2FminK, sp.log2FminK);
   if (u.uNView) gl.uniform1f(u.uNView, sp.nView);
@@ -379,6 +466,12 @@ export function makeStrips(gl, maxVerts) {
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, floats);
     },
   };
+}
+
+/** Stand the front edge `ampPx` device px tall at full scale instead of the camera's height
+ *  (a style whose sheet is flat still shows the live spectrum as a curve). Call before fillCurtain / fillRim. */
+export function setEdgeAmp(f, ampPx) {
+  for (let m = 0; m < f.mc; m++) f.edgeY[m] = f.yBaseF - Math.min(1, f.frontH[m]) * ampPx;
 }
 
 /** Curtain under the front edge: 2·mc verts, uv = (u, height 0..1 at the edge, 0 at the baseline). Returns the new offset. */

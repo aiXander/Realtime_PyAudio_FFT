@@ -225,7 +225,7 @@ def validate_fft_view(v):
 
 # Keep in sync with the style modules in ui/src/viz/fft3d_styles/ and the
 # palettes in ui/src/colors.js (the UI only offers these names).
-FFT3D_STYLES = ("cloud", "topo", "spectrogram", "partials")
+FFT3D_STYLES = ("cloud", "topo", "spectrogram")
 PALETTES = ("classic", "neon", "ember", "ocean", "sunset", "mono", "okabe")
 
 
@@ -247,10 +247,20 @@ def validate_palette(v):
 # engine/server/src/validate.rs). Numbers clamp to these ranges, which the UI
 # controls stay inside. Defaults live in config.FFT3D_DEFAULTS.
 FFT3D_RES = ("time", "balanced", "pitch")
+# What the 3D view draws: its own spectro stream, or the /audio/fft frames the
+# 2D view and the LEDs get.
+FFT3D_SOURCES = ("spectro", "fft")
+FFT3D_ENUMS = {"res": FFT3D_RES, "source": FFT3D_SOURCES}
 FFT3D_RANGES = {
-    "smooth_ms": (0.0, 200.0),          # power average before the ring
+    "smooth_ms": (0.0, 200.0),          # power average over time, before the ring
+    "blur_oct": (0.0, 1.0),             # power blur across frequency (FWHM, octaves), same step
     "range_db": (20.0, 120.0),          # dB below the top shown above the floor
+    "gamma": (1.0, 4.0),                # height = (dB-linear 0..1) ^ gamma; 1 = dB-linear
+    "tonal": (0.0, 1.0),                # lift + light for tonal bins (notes); 0 = off
+    "moment": (0.0, 1.0),               # hue by which bands sound in each moment; 0 = the style's own colors
     "tilt_db_per_oct": (-6.0, 12.0),    # display tilt around 1 kHz
+    "glow": (0.0, 1.0),                 # cloud: 0 = lit matte terrain … 1 = a dark body that emits by level
+    "bloom": (0.0, 1.5),                # cloud: bloom gain; 0 = off
     "overscan": (0.0, 0.3),             # front row past each card edge, × plot width
     "perspective": (0.0, 3.0),          # × the style's narrowing toward the back
     "skew": (-1.0, 1.0),                # horizon shift, × half the plot width
@@ -264,14 +274,14 @@ def validate_fft3d(src, lenient=False):
     (WS) raises on a bad value; lenient (YAML load) skips it so the default
     stays, like an unknown style name."""
     out = {}
-    for key in ("res", *FFT3D_RANGES):
+    for key in (*FFT3D_ENUMS, *FFT3D_RANGES):
         v = src.get(key)
         if v is None:
             continue
         try:
-            if key == "res":
-                if v not in FFT3D_RES:
-                    raise ValueError(f"res must be one of {list(FFT3D_RES)}")
+            if key in FFT3D_ENUMS:
+                if v not in FFT3D_ENUMS[key]:
+                    raise ValueError(f"{key} must be one of {list(FFT3D_ENUMS[key])}")
                 out[key] = v
             else:
                 out[key] = _clamp(_finite_float(v, key), FFT3D_RANGES[key])

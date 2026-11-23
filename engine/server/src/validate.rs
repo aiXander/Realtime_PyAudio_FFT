@@ -222,7 +222,7 @@ pub fn validate_peak_decay_per_s(v: Option<&Value>) -> VResult<f64> {
 }
 
 pub const FFT_VIEWS: [&str; 2] = ["2d", "3d"];
-pub const FFT3D_STYLES: [&str; 4] = ["cloud", "topo", "spectrogram", "partials"];
+pub const FFT3D_STYLES: [&str; 3] = ["cloud", "topo", "spectrogram"];
 pub const PALETTES: [&str; 7] = ["classic", "neon", "ember", "ocean", "sunset", "mono", "okabe"];
 
 fn py_list(items: &[&str]) -> String {
@@ -252,10 +252,16 @@ pub fn validate_palette(v: Option<&Value>) -> VResult<String> {
 /// 3D view display + camera (`ui.fft3d`, UI-only). Numbers clamp to these
 /// ranges (`FFT3D_RANGES` in validate.py); defaults: `config::Fft3dCfg::default`.
 pub const FFT3D_RES: [&str; 3] = ["time", "balanced", "pitch"];
-pub const FFT3D_RANGES: [(&str, (f64, f64)); 8] = [
+pub const FFT3D_RANGES: [(&str, (f64, f64)); 14] = [
     ("smooth_ms", (0.0, 200.0)),
+    ("blur_oct", (0.0, 1.0)),
     ("range_db", (20.0, 120.0)),
+    ("gamma", (1.0, 4.0)),
+    ("tonal", (0.0, 1.0)),
+    ("moment", (0.0, 1.0)),
     ("tilt_db_per_oct", (-6.0, 12.0)),
+    ("glow", (0.0, 1.0)),
+    ("bloom", (0.0, 1.5)),
     ("overscan", (0.0, 0.3)),
     ("perspective", (0.0, 3.0)),
     ("skew", (-1.0, 1.0)),
@@ -265,6 +271,14 @@ pub const FFT3D_RANGES: [(&str, (f64, f64)); 8] = [
 
 pub fn validate_fft3d_res(v: Option<&Value>) -> VResult<String> {
     one_of(v, &FFT3D_RES, "res")
+}
+
+/// What the 3D view draws: its own spectro stream, or the /audio/fft frames
+/// the 2D view and the LEDs get (`FFT3D_SOURCES` in validate.py).
+pub const FFT3D_SOURCES: [&str; 2] = ["spectro", "fft"];
+
+pub fn validate_fft3d_source(v: Option<&Value>) -> VResult<String> {
+    one_of(v, &FFT3D_SOURCES, "source")
 }
 
 /// One numeric `ui.fft3d` key, clamped to its `FFT3D_RANGES` entry.

@@ -13,6 +13,7 @@ mod py;
 mod ring;
 mod shared;
 mod spectro;
+mod system_tap;
 mod validate;
 mod workers;
 mod ws;

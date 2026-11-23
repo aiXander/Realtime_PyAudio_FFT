@@ -7,7 +7,9 @@ the spectro parity goldens (tools/parity/make_goldens.py) that the Rust twin
 is tested against.
 
 Every hop runs a ladder of Hann windows (×2 sizes, 512 … 8192 samples at
-48 kHz) centred on the same instant; each log bin reads the window whose
+48 kHz) that all peak at one instant, ~21 ms behind the newest sample; the
+long ones are lopsided so they can (`ladder_window`). Each log bin reads the
+window whose
 resolution suits its frequency (wanted window = sr / (f · rel_res), constant
 Q, clamped to the ladder), crossfading in dB between neighbouring windows.
 Amplitude-normalised (a sine reads its dBFS level), zero-padded 2×; a log bin
@@ -62,6 +64,28 @@ def window_sizes(sr: float, max_window: int) -> list[int]:
     return out
 
 
+def ladder_window(w: int, sizes: list[int]) -> tuple[np.ndarray, int]:
+    """Window `w` of the ladder: (weights, first sample within the newest
+    `sizes[-1]` samples).
+
+    The picture has to keep up with the sound, so every window peaks at the
+    same instant, `delay` = half of the third window (1024 samples, ~21 ms at
+    48 kHz) behind the newest sample. A window up to twice that long is a
+    plain Hann centred there. A longer one cannot be centred that late, so it
+    is lopsided: a long half-Hann rise out of the past and a short half-Hann
+    fall of `delay` samples, ending at the newest sample. Next to a centred
+    Hann of the same length, a kick shows in the 8192 window ~30 ms sooner
+    (−12 dB after 32 ms instead of 63) and the peak is as narrow at −6 dB;
+    the price is wider skirts (−20 dB at ±2.8 rfft bins instead of ±1.7).
+    """
+    delay = min(sizes[-1], sizes[0] * 4) // 2
+    fall = min(w // 2, delay)
+    rise = w - fall
+    i = np.arange(w)
+    phase = np.where(i < rise, (i + 0.5) / (2 * rise), 0.5 + (i - rise + 0.5) / (2 * fall))
+    return 0.5 - 0.5 * np.cos(2 * np.pi * phase), sizes[-1] - delay - rise
+
+
 def hop_blocks(sr: float, blocksize: int) -> int:
     return max(1, int(round(sr * 0.005 / blocksize)))
 
@@ -76,13 +100,15 @@ class Spectro:
         self.sr, self.n_bins, self.f_min, self.f_max = sr, n_bins, f_min, f_max
         self.sizes = window_sizes(sr, max_window)
         self.span = self.sizes[-1]
+        self.starts = []
         self.hann = []
         self.norm2 = []
         self.offsets = []          # each window's start in the flat mag² array
         off = 0
         for w in self.sizes:
-            h = 0.5 - 0.5 * np.cos(2 * np.pi * (np.arange(w) + 0.5) / w)
+            h, start = ladder_window(w, self.sizes)
             self.hann.append(h)
+            self.starts.append(start)
             self.norm2.append((2.0 / h.sum()) ** 2)
             self.offsets.append(off)
             off += w + 1           # rfft of 2w → w + 1 bins
@@ -124,8 +150,7 @@ class Spectro:
         """One frame from the newest `span` samples → n_bins dB values (amplitude dBFS)."""
         x = samples[-self.span:]
         flat = self._flat
-        for w, h, n2, off in zip(self.sizes, self.hann, self.norm2, self.offsets):
-            o = (self.span - w) // 2
+        for w, h, n2, off, o in zip(self.sizes, self.hann, self.norm2, self.offsets, self.starts):
             spec = np.fft.rfft(x[o:o + w] * h, n=2 * w)
             flat[off:off + w + 1] = (spec.real ** 2 + spec.imag ** 2) * n2
         out = []

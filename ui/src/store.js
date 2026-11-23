@@ -90,7 +90,8 @@ export const store = {
   // meta.ui_fft3d, persisted to ui.fft3d in YAML (set_fft3d). These are the
   // defaults until the first meta arrives.
   fft3d: {
-    res: "balanced", smooth_ms: 40, range_db: 60, tilt_db_per_oct: 3,
+    res: "balanced", source: "spectro", smooth_ms: 40, blur_oct: 0.17, range_db: 60, gamma: 2, tonal: 0.5, moment: 0, tilt_db_per_oct: 3,
+    glow: 0.5, bloom: 0.5,
     overscan: 0.05, perspective: 1, skew: 0, height: 1, horizon: 0,
   },
 

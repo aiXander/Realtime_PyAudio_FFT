@@ -433,22 +433,33 @@ export function setupControls({ on3dChange } = {}) {
   // preview locally while dragged. syncMeta mirrors meta.ui_fft3d into
   // store.fft3d; main.js applies it (resolution via set_spectro, the rest
   // via fft3d.setDisplay).
-  const picks3d = { res: $("fft3d-res"), smooth_ms: $("fft3d-smooth"), range_db: $("fft3d-range"), tilt_db_per_oct: $("fft3d-tilt") };
+  const picks3d = {
+    res: $("fft3d-res"), smooth_ms: $("fft3d-smooth"), blur_oct: $("fft3d-blur"),
+    range_db: $("fft3d-range"), gamma: $("fft3d-gamma"), tonal: $("fft3d-tonal"), moment: $("fft3d-moment"),
+    tilt_db_per_oct: $("fft3d-tilt"),
+  };
   for (const [key, el] of Object.entries(picks3d)) {
     el.addEventListener("change", () => {
       send({ type: "set_fft3d", [key]: key === "res" ? el.value : Number(el.value) });
     });
   }
+  // What 3D draws: its own spectro stream, or the /audio/fft frames (radio pair).
+  const src3d = { spectro: $("fft3d-source-spectro"), fft: $("fft3d-source-fft") };
+  for (const el of Object.values(src3d)) {
+    el.addEventListener("change", () => { if (el.checked) send({ type: "set_fft3d", source: el.value }); });
+  }
   const pct = (v) => `${Math.round(v * 100)} %`;
   const times = (v) => `×${v.toFixed(2)}`;
-  const CAM = {   // key → slider readout; sliders hold value × 100
+  const CAM = {   // camera + light sliders: key → readout; sliders hold value × 100
     overscan: pct,
     perspective: times,
     skew: (v) => (Math.abs(v) < 0.005 ? "centre" : `${Math.round(Math.abs(v) * 100)} % ${v < 0 ? "left" : "right"}`),
     height: times,
     horizon: pct,
+    glow: pct,
+    bloom: pct,
   };
-  const CAM_DEFAULTS = { overscan: 0.05, perspective: 1, skew: 0, height: 1, horizon: 0 };
+  const CAM_DEFAULTS = { overscan: 0.05, perspective: 1, skew: 0, height: 1, horizon: 0, glow: 0.5, bloom: 0.5 };
   const camCtls = {};
   for (const [key, fmt] of Object.entries(CAM)) {
     camCtls[key] = bindSlider($(`fft3d-cam-${key}`), $(`fft3d-cam-${key}-val`), {
@@ -584,7 +595,7 @@ export function setupControls({ on3dChange } = {}) {
   // Everything that needs a live server: disabled while offline / unsynced.
   const aside = document.querySelector(".controls");
   const liveInputs = ["ws-hz", "peak-decay", "show-onsets", "fft-toggle", "fft-raw-db", "fft-view-2d", "fft-view-3d", "fft-bins",
-    "fft3d-style", "fft3d-res", "fft3d-smooth", "fft3d-range", "fft3d-tilt", "fft3d-cam-reset",
+    "fft3d-style", "fft3d-source-spectro", "fft3d-source-fft", "fft3d-res", "fft3d-smooth", "fft3d-blur", "fft3d-range", "fft3d-gamma", "fft3d-tonal", "fft3d-moment", "fft3d-tilt", "fft3d-cam-reset",
     ...Object.keys(CAM).map((k) => `fft3d-cam-${k}`), "palette-select"].map($);
 
   function syncMeta(force = false) {
@@ -642,6 +653,7 @@ export function setupControls({ on3dChange } = {}) {
         }
         if (store.fft3d[key] !== v) { store.fft3d[key] = v; changed = true; }
         if (picks3d[key]) setSelect(picks3d[key], String(v));
+        if (key === "source") for (const [name, el] of Object.entries(src3d)) setChecked(el, v === name);
       }
       if (changed) on3dChange?.();
     }

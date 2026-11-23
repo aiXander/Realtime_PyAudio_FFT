@@ -845,6 +845,7 @@ impl App {
             "fft_db_ceiling": c.fft.db_ceiling,
             "fft_f_min": c.fft.f_min,
             "fft_window_size": c.fft.window_size,
+            "fft_hop": c.fft.hop,
             "fft_send_raw_db": c.fft.send_raw_db,
             "fft_peak_smear_oct": c.fft.peak_smear_oct,
             "fft_tilt_db_per_oct": c.fft.tilt_db_per_oct,
@@ -1336,9 +1337,10 @@ impl App {
             self.after_stream_change();
             return Err(format!("could not switch to device {new_idx}: {e}"));
         }
-        let info = audio::device_info(new_idx);
-        self.cfg.audio.device.index = Some(new_idx as i64);
-        self.cfg.audio.device.name = info.map(|d| d.name);
+        if let Some(s) = &self.stream {
+            self.cfg.audio.device.index = Some(s.device as i64);
+            self.cfg.audio.device.name = Some(s.device_name.clone());
+        }
         self.after_stream_change();
         Ok(())
     }
@@ -1348,6 +1350,17 @@ impl App {
     fn watchdog_tick(&mut self, now: Instant) {
         if self.switch_busy {
             self.wd.last_change = now;
+            return;
+        }
+        if self.stream.as_ref().is_some_and(|s| s.output_moved()) {
+            // System audio follows the default output: re-tap.
+            tracing::info!("default output changed: re-tapping System audio");
+            if let Err(e) = self.reopen_input() {
+                tracing::warn!("re-tapping System audio failed: {e}");
+            }
+            self.after_stream_change();
+            self.wd.last_wi = self.shared.ring.write_idx();
+            self.wd.last_change = Instant::now();
             return;
         }
         let wi = self.shared.ring.write_idx();

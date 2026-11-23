@@ -7,25 +7,53 @@ from typing import Any
 import numpy as np
 import sounddevice as sd
 
+from . import system_tap
+
 log = logging.getLogger(__name__)
 
 
+def system_audio_index() -> int:
+    """Index of the "System audio" entry: one past the last PortAudio device,
+    so it never collides with a real device (a duplex interface's index
+    already means its inputs). Always taps the current default output."""
+    return len(sd.query_devices())
+
+
 def list_input_devices() -> list[dict[str, Any]]:
-    """Return all devices with at least one input channel."""
+    """All devices with at least one input channel, plus "System audio" on
+    macOS 14.2+. Our own tap devices are hidden."""
     devs = sd.query_devices()
     hostapis = sd.query_hostapis()
     out = []
+
+    def api(d) -> str:
+        return hostapis[d["hostapi"]]["name"] if d.get("hostapi") is not None else ""
+
     for i, d in enumerate(devs):
-        if d.get("max_input_channels", 0) >= 1:
+        if d.get("max_input_channels", 0) >= 1 and not d["name"].startswith(system_tap.TAP_DEVICE_PREFIX):
             out.append(
                 {
                     "index": i,
                     "name": d["name"],
-                    "hostapi": hostapis[d["hostapi"]]["name"] if d.get("hostapi") is not None else "",
+                    "hostapi": api(d),
                     "default_samplerate": float(d.get("default_samplerate") or 0.0),
                     "max_input_channels": int(d.get("max_input_channels", 0)),
                 }
             )
+    if system_tap.available():
+        try:
+            out_dev = sd.query_devices(kind="output")
+            out.append(
+                {
+                    "index": system_audio_index(),
+                    "name": system_tap.SYSTEM_AUDIO_NAME,
+                    "hostapi": api(out_dev),
+                    "default_samplerate": float(out_dev.get("default_samplerate") or 0.0),
+                    "max_input_channels": 2,
+                }
+            )
+        except Exception as e:  # no output device at all
+            log.debug("no default output for System audio: %s", e)
     return out
 
 
@@ -80,6 +108,9 @@ def signal_active_probe(devices: list[dict], duration: float = 0.2, threshold: f
     results: dict[int, bool] = {}
     for d in devices:
         idx = d["index"]
+        if d["name"] == system_tap.SYSTEM_AUDIO_NAME:
+            results[idx] = system_tap.output_playing_elsewhere()
+            continue
         try:
             sr = int(d.get("default_samplerate") or 48000)
             ch = min(2, d.get("max_input_channels", 1))
@@ -108,11 +139,3 @@ def resolve_initial_device(cfg_device, cli_device) -> int | None:
                 return cfg_device.index
         log.warning("configured device index %d not found; falling back", cfg_device.index)
     return default_input()
-
-
-def device_info(idx: int) -> dict | None:
-    try:
-        d = sd.query_devices(idx)
-        return dict(d)
-    except Exception:
-        return None

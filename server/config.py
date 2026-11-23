@@ -28,7 +28,9 @@ LEVEL_DEFAULTS = {"tau_s": 0.1, "floor_db": -60.0, "ceiling_db": 0.0}
 # `ui.fft3d` (3D view look; validate.FFT3D_RANGES has the ranges). Same values
 # in engine/server/src/config.rs FFT3D_DEFAULTS.
 FFT3D_DEFAULTS = {
-    "res": "balanced", "smooth_ms": 40.0, "range_db": 60.0, "tilt_db_per_oct": 3.0,
+    "res": "balanced", "source": "spectro", "smooth_ms": 40.0, "blur_oct": 0.17, "range_db": 60.0, "gamma": 2.0,
+    "tonal": 0.5, "moment": 0.0, "tilt_db_per_oct": 3.0,
+    "glow": 0.5, "bloom": 0.5,
     "overscan": 0.05, "perspective": 1.0, "skew": 0.0, "height": 1.0, "horizon": 0.0,
 }
 
@@ -124,9 +126,16 @@ class OscCfg:
 @dataclass
 class Fft3dCfg:
     res: str                # spectro resolution: time | balanced | pitch
+    source: str             # what 3D draws: spectro | fft (the /audio/fft frames)
     smooth_ms: float
+    blur_oct: float
     range_db: float
+    gamma: float
+    tonal: float
+    moment: float
     tilt_db_per_oct: float
+    glow: float
+    bloom: float
     overscan: float
     perspective: float
     skew: float

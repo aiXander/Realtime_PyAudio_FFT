@@ -255,6 +255,17 @@ class App:
                     # A switch / refresh owns the stream: fresh window after.
                     last_change = now
                     continue
+                if self.stream is not None and self.stream.output_moved():
+                    # System audio follows the default output: re-tap.
+                    log.info("default output changed: re-tapping System audio")
+                    async with self._device_switch_lock:
+                        try:
+                            self._reopen_input()
+                        except Exception as e:
+                            log.warning("re-tapping System audio failed: %s", e)
+                        self._after_stream_change()
+                    last_wi, last_change = self.ring.write_idx, loop.time()
+                    continue
                 wi = self.ring.write_idx
                 if wi != last_wi:
                     last_wi, last_change = wi, now
@@ -604,7 +615,7 @@ class App:
                 "plug in / enable a microphone, or pick another input with --device N "
                 "(list them with `uv run python -m sounddevice`)",
             ) from e
-        self.active_device_name = self._stream_device_name(self.stream)
+        self.active_device_name = self.stream.device_name
 
         bands_clamped = self._build_pipeline_for_sr(self.stream.samplerate)
 
@@ -721,13 +732,8 @@ class App:
     def snapshot_meta(self) -> dict:
         cfg = self.cfg
         device = {"index": None, "name": None}
-        if self.stream is not None:
-            try:
-                info = devmod.device_info(int(self.stream.device)) if isinstance(self.stream.device, int) else None
-                if info:
-                    device = {"index": int(self.stream.device), "name": info.get("name")}
-            except Exception:
-                pass
+        if self.stream is not None and isinstance(self.stream.device, int):
+            device = {"index": self.stream.device, "name": self.stream.device_name}
         return {
             "sr": int(self.current_sr()),
             "blocksize": cfg.audio.blocksize,
@@ -738,6 +744,7 @@ class App:
             "fft_db_ceiling": cfg.fft.db_ceiling,
             "fft_f_min": cfg.fft.f_min,
             "fft_window_size": cfg.fft.window_size,
+            "fft_hop": cfg.fft.hop,
             "fft_send_raw_db": cfg.fft.send_raw_db,
             "fft_peak_smear_oct": cfg.fft.peak_smear_oct,
             "fft_tilt_db_per_oct": cfg.fft.tilt_db_per_oct,
@@ -917,11 +924,6 @@ class App:
             "fft": int(self.fft_worker.fft_drops) if self.fft_worker else 0,
         }
 
-    @staticmethod
-    def _stream_device_name(stream: StreamHandle) -> str | None:
-        info = devmod.device_info(int(stream.device)) if isinstance(stream.device, int) else None
-        return info.get("name") if info else None
-
     def _teardown_stream(self, abort: bool = False) -> None:
         if self.stream is not None:
             if abort:
@@ -980,7 +982,7 @@ class App:
                 self.fft_postprocessor.reset()
             self.stream = stream
             stream.start()
-            self.active_device_name = self._stream_device_name(stream)
+            self.active_device_name = stream.device_name
         except Exception:
             self.stream = None
             stream.stop()
@@ -1067,10 +1069,10 @@ class App:
                 self._after_stream_change()
                 raise ValueError(f"could not switch to device {new_idx}: {e}") from e
 
-            # Update cfg with the device choice
-            info = devmod.device_info(new_idx) or {}
-            self.cfg.audio.device.index = new_idx
-            self.cfg.audio.device.name = info.get("name")
+            # Update cfg with the device choice (from the stream: opening
+            # System audio re-inits PortAudio, which can shift indices)
+            self.cfg.audio.device.index = self.stream.device
+            self.cfg.audio.device.name = self.stream.device_name
             self._after_stream_change()
 
     def _after_stream_change(self) -> None:

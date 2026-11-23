@@ -4,8 +4,10 @@
 import cloud from "./cloud.js";
 import topo from "./topo.js";
 import spectrogram from "./spectrogram.js";
-import partials from "./partials.js";
 
-export const STYLE_ORDER = [cloud, topo, spectrogram, partials];
+export const STYLE_ORDER = [cloud, topo, spectrogram];
 export const STYLES = Object.fromEntries(STYLE_ORDER.map((s) => [s.name, s]));
 export const DEFAULT_STYLE = "cloud";
+
+/** The style to draw for a saved style name. */
+export const styleFor = (name) => STYLES[name] || STYLES[DEFAULT_STYLE];

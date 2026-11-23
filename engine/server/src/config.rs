@@ -181,9 +181,16 @@ pub struct UiCfg {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Fft3dCfg {
     pub res: String,
+    pub source: String,
     pub smooth_ms: f64,
+    pub blur_oct: f64,
     pub range_db: f64,
+    pub gamma: f64,
+    pub tonal: f64,
+    pub moment: f64,
     pub tilt_db_per_oct: f64,
+    pub glow: f64,
+    pub bloom: f64,
     pub overscan: f64,
     pub perspective: f64,
     pub skew: f64,
@@ -196,9 +203,16 @@ impl Default for Fft3dCfg {
     fn default() -> Self {
         Fft3dCfg {
             res: "balanced".into(),
+            source: "spectro".into(),
             smooth_ms: 40.0,
+            blur_oct: 0.17,
             range_db: 60.0,
+            gamma: 2.0,
+            tonal: 0.5,
+            moment: 0.0,
             tilt_db_per_oct: 3.0,
+            glow: 0.5,
+            bloom: 0.5,
             overscan: 0.05,
             perspective: 1.0,
             skew: 0.0,
@@ -212,8 +226,14 @@ impl Fft3dCfg {
     fn num_mut(&mut self, key: &str) -> &mut f64 {
         match key {
             "smooth_ms" => &mut self.smooth_ms,
+            "blur_oct" => &mut self.blur_oct,
             "range_db" => &mut self.range_db,
+            "gamma" => &mut self.gamma,
+            "tonal" => &mut self.tonal,
+            "moment" => &mut self.moment,
             "tilt_db_per_oct" => &mut self.tilt_db_per_oct,
+            "glow" => &mut self.glow,
+            "bloom" => &mut self.bloom,
             "overscan" => &mut self.overscan,
             "perspective" => &mut self.perspective,
             "skew" => &mut self.skew,
@@ -229,9 +249,13 @@ impl Fft3dCfg {
     pub fn apply(&mut self, src: &Value, lenient: bool) -> v::VResult<()> {
         let mut next = self.clone();
         let present = |k: &str| src.get(k).filter(|x| !x.is_null());
-        if let Some(x) = present("res") {
-            match v::validate_fft3d_res(Some(x)) {
-                Ok(r) => next.res = r,
+        for (key, validate, field) in [
+            ("res", v::validate_fft3d_res as fn(Option<&Value>) -> v::VResult<String>, &mut next.res),
+            ("source", v::validate_fft3d_source, &mut next.source),
+        ] {
+            let Some(x) = present(key) else { continue };
+            match validate(Some(x)) {
+                Ok(r) => *field = r,
                 Err(e) if !lenient => return Err(e),
                 Err(_) => {}
             }

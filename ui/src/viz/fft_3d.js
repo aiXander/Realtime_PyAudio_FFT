@@ -1,17 +1,26 @@
 // FFT "ocean" — 3D view of the recent spectrogram, drawn in a pluggable style.
 //
-// Data: the server's spectro stream (`set_spectro`; see server/dsp/spectro.py
-// or engine/server/src/spectro.rs), NOT the LED-oriented FFT the 2D view
-// shows. It is a multi-resolution STFT made for looking: a frame every ~5 ms,
-// ~1024 log bins from 20 Hz to 20 kHz, long windows in the bass and short
-// ones in the treble, raw dB, no smoothing or per-bin autoscale. Frames
-// arrive in batches (one WS message per broadcast tick), u8-quantised.
+// Data (`ui.fft3d.source`), one of two:
+//   - "spectro" (default): the server's spectro stream (`set_spectro`; see
+//     server/dsp/spectro.py or engine/server/src/spectro.rs), NOT the
+//     LED-oriented FFT the 2D view shows. It is a multi-resolution STFT made
+//     for looking: a frame every ~5 ms, ~1024 log bins from 20 Hz to 20 kHz,
+//     long windows in the bass and short ones in the treble, raw dB, no
+//     smoothing or per-bin autoscale. Frames arrive in batches (one WS
+//     message per broadcast tick), u8-quantised.
+//   - "fft": the /audio/fft frames the 2D view draws (makeFftRows), one row
+//     per frame holding the 2D graph's own height. These rows are "linear":
+//     no averaging, blur, tonal lift, tilt or dB range, so the history is the
+//     2D picture over time, byte for byte what the LEDs got.
 //
 // Everything stays on the GPU at full resolution:
-//   - History: one R8 texture, n_bins wide, TEX_ROWS tall, used as a ring
+//   - History: one RG8 texture (R = level in dB, G = how tonal the bin is;
+//     see makeIntegrator), n_bins wide, TEX_ROWS tall, used as a ring
 //     (row = seq mod TEX_ROWS, REPEAT wrap). Each frame uploads only the new
 //     rows. The dB → height mapping (range, tilt, level) is uniforms, so
-//     changing it re-maps the whole history at once.
+//     changing it re-maps the whole history at once. A second texture, one
+//     RGBA texel per row, holds which bands were sounding in that frame
+//     (makeMoment): the styles turn it into the row's hue (Color picker).
 //   - Geometry: a grid of (rows × cols) vertices whose heights the vertex
 //     shader reads from the texture (pooled over the data rows each grid row
 //     stands for). Grid rows are anchored to data rows and glide with the
@@ -38,8 +47,8 @@ import { store, recordVizPerf } from "../store.js";
 import { LMH, LMH_ORDER, theme } from "../colors.js";
 import { makeSurface, makeLayer, FONT_UI } from "./surface.js";
 import { hex01, MAX_POOL } from "./fft3d_styles/common.js";
-import { STYLES, DEFAULT_STYLE } from "./fft3d_styles/index.js";
-import { makeIntegrator, makePlayhead, makeLevel } from "./fft3d_data.js";
+import { styleFor } from "./fft3d_styles/index.js";
+import { makeIntegrator, makeMoment, makePlayhead, makeLevel, toneLift } from "./fft3d_data.js";
 
 export const TEX_ROWS = 8192;          // history ring rows (≥ 30 s at ~190 frames/s)
 const MAX_COLS = 2048;                 // grid columns cap (= server MAX_BINS)
@@ -53,6 +62,11 @@ const MAX_GRID_ROWS = 1024;
 // settings scale them: perspective × the narrowing, height × the amplitude).
 const BACK_SCALE = 0.3;                // width/height of the oldest row vs the front one
 const AMP_FRONT = 0.4;                 // front edge full-scale height, fraction of plot height
+
+// Crossovers between low / mid / high for the moment's colour when the bands don't give one, Hz.
+const MOMENT_SPLITS = [200, 1500];
+
+const TONE_LIFT = 0.7;                 // tonal strength 1 lifts a tonal bin this far toward the top
 
 const X_TICK_CANDIDATES = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 
@@ -68,59 +82,94 @@ export function makeFft3d(canvas) {
 
   // ---- display mapping + camera (server-persisted `ui.fft3d`, set by main.js via setDisplay) ----
   const disp = {
-    rangeDb: 60, tiltDbOct: 0, integrateMs: 40,
+    rangeDb: 60, tiltDbOct: 0, integrateMs: 40, blurOct: 0, gamma: 1, tonal: 0, moment: 0, glow: 0.5, bloom: 0,
     camera: { overscan: 0.05, perspective: 1, skew: 0, height: 1, horizon: 0 },
   };
   let camKey = "";
 
   // ---- history ring: integrated frames (CPU mirror of the texture: the front edge reads it) ----
   let nBins = 0, hopS = 0.005, fMin = 20, fMax = 20000, db0 = -127.5, dbStep = 0.5;
-  let ring = null;                       // Uint8Array(TEX_ROWS * nBins)
+  let kind = "spectro";                  // which encoding the ring holds (a change reconfigures)
+  let linear = false;                    // level byte = height 0..1 (source "fft"), not dB
+  let ring = null;                       // Uint8Array(TEX_ROWS * nBins * 2): [level, tonalness] per bin
   let lastSeq = -1;                      // newest frame stored (absolute seq)
   let firstSeq = -1;                     // oldest seq still valid in the ring
   let dirtyLo = Infinity;                // oldest seq not yet uploaded
   let fullUpload = false;
   let tiltLut = null;                    // Float32Array(nBins): tilt in dB per bin
   let tiltKey = "";
+  const tintRing = new Uint8Array(TEX_ROWS * 4);   // per row: [low, mid, high activity, 255] (makeMoment)
+  let splitKey = "";
+  const moment = makeMoment();
   const integ = makeIntegrator();
   const playhead = makePlayhead();
   const level = makeLevel();
 
   function reset() {
     if (ring) ring.fill(0);
+    tintRing.fill(0);
+    moment.reset();
     lastSeq = -1; firstSeq = -1; dirtyLo = Infinity; fullUpload = true;
     integ.clear(); playhead.reset(); level.reset();
   }
 
-  const syncIntegrate = () => integ.setRows(disp.integrateMs / 1000 / hopS);
+  // Linear rows pass through the integrator untouched (one row, no blur, no tonal).
+  const syncIntegrate = () => {
+    integ.setRows(linear ? 1 : disp.integrateMs / 1000 / hopS);
+    // blurOct is the Gaussian's full width at half maximum, in octaves.
+    integ.setBlur(linear ? 0 : (disp.blurOct * nBins) / Math.log2(fMax / fMin) / 2.355);
+    integ.setTonal(!linear && disp.tonal > 0);
+  };
+  const tiltOf = () => (linear ? 0 : disp.tiltDbOct);
 
   function configure(m) {
     nBins = m.nBins; hopS = m.hopS; fMin = m.fMin; fMax = m.fMax; db0 = m.db0; dbStep = m.dbStep;
-    ring = new Uint8Array(TEX_ROWS * nBins);
-    integ.configure(nBins, dbStep);
+    kind = m.kind ?? "spectro"; linear = !!m.linear;
+    ring = new Uint8Array(TEX_ROWS * nBins * 2);
+    integ.configure(nBins, dbStep, nBins / Math.log2(fMax / fMin), hopS);
     syncIntegrate();
+    const qDb = m.qDb ?? Float64Array.from({ length: 256 }, (_, q) => db0 + q * dbStep);
+    moment.configure(nBins, qDb, fMin, fMax, hopS);
+    splitKey = "";
     texW = 0;                            // reallocate the texture
     tiltKey = "";
     reset();
   }
 
   function syncTilt() {
-    const key = `${nBins}|${fMin}|${fMax}|${disp.tiltDbOct}`;
+    const tilt = tiltOf();
+    const key = `${nBins}|${fMin}|${fMax}|${tilt}`;
     if (key === tiltKey) return;
     tiltKey = key;
     tiltLut = new Float32Array(nBins);
     const oct = Math.log2(fMax / fMin);
     for (let b = 0; b < nBins; b++) {
       const f = fMin * Math.pow(2, ((b + 0.5) / nBins) * oct);
-      tiltLut[b] = disp.tiltDbOct * Math.log2(f / 1000);
+      tiltLut[b] = tilt * Math.log2(f / 1000);
     }
     level.reset();                       // re-find the top under the new tilt
   }
 
-  /** One spectro message (called on arrival, from ws.js via main.js). */
+  /** The moment's colour splits the spectrum where the user's L/M/H bands meet. */
+  function syncSplits() {
+    const b = store.meta?.bands;
+    let f1 = MOMENT_SPLITS[0], f2 = MOMENT_SPLITS[1];
+    if (b?.low && b.mid && b.high) {
+      f1 = Math.sqrt(b.low.hi_hz * b.mid.lo_hz);
+      f2 = Math.sqrt(b.mid.hi_hz * b.high.lo_hz);
+    }
+    const key = `${f1}|${f2}`;
+    if (key === splitKey) return;
+    splitKey = key;
+    if (f1 < f2) moment.setSplits(f1, f2); else moment.setSplits(...MOMENT_SPLITS);
+  }
+
+  /** One spectro message, or one makeFftRows row (called on arrival, from ws.js via main.js). */
   function push(m) {
-    if (m.nBins !== nBins || m.hopS !== hopS || m.fMin !== fMin || m.fMax !== fMax || !ring) configure(m);
+    if (m.nBins !== nBins || m.hopS !== hopS || m.fMin !== fMin || m.fMax !== fMax
+        || (m.kind ?? "spectro") !== kind || !ring) configure(m);
     syncTilt();
+    syncSplits();
     const n = nBins;
     const s0 = m.firstSeq;
     // A seq far behind what we hold = the server restarted its count.
@@ -128,7 +177,10 @@ export function makeFft3d(canvas) {
     // Gap (frames dropped on the way): clear the rows we never got.
     if (lastSeq >= 0 && s0 > lastSeq + 1) {
       const from = Math.max(lastSeq + 1, s0 - TEX_ROWS);
-      for (let s = from; s < s0; s++) ring.fill(0, (s % TEX_ROWS) * n, (s % TEX_ROWS) * n + n);
+      for (let s = from; s < s0; s++) {
+        ring.fill(0, (s % TEX_ROWS) * n * 2, (s % TEX_ROWS + 1) * n * 2);
+        tintRing.fill(0, (s % TEX_ROWS) * 4, (s % TEX_ROWS + 1) * 4);
+      }
       dirtyLo = Math.min(dirtyLo, from);
       integ.clear();
     }
@@ -137,10 +189,11 @@ export function makeFft3d(canvas) {
     for (let k = 0; k < m.nFrames; k++) {
       const seq = s0 + k;
       if (seq <= lastSeq) continue;      // duplicate
-      const o = (seq % TEX_ROWS) * n;
+      const o = (seq % TEX_ROWS) * n * 2;
       integ.push(m.data.subarray(k * n, k * n + n), ring, o);
+      moment.push(ring, o, tintRing, (seq % TEX_ROWS) * 4);
       for (let b = 0; b < n; b++) {
-        const v = ring[o + b] * dbStep + db0 + tiltLut[b];
+        const v = ring[o + 2 * b] * dbStep + db0 + tiltLut[b];
         if (v > peak) peak = v;
       }
       if (firstSeq < 0) firstSeq = seq;
@@ -154,7 +207,7 @@ export function makeFft3d(canvas) {
     playhead.arrive(now, prevSeq, lastSeq, hopS * 1000, lastSeq - Math.max(prevSeq, s0 - 1));
   }
 
-  const styleOf = () => STYLES[store.fft3d_style] || STYLES[DEFAULT_STYLE];
+  const styleOf = () => styleFor(store.fft3d_style);
 
   // ---- WebGL ----
   const glCanvas = document.createElement("canvas");
@@ -165,6 +218,7 @@ export function makeFft3d(canvas) {
   let gl = null, glOk = false;
   let gridVao, gridIbo, iboCols = 0;
   let tex = null, texW = 0;
+  let tintTex = null;                    // 1 × TEX_ROWS RGBA8: the moment's band activity per row (unit 1)
   let active = null, activeName = "";   // the current style's instance (one at a time)
   // GPU time per frame (EXT_disjoint_timer_query_webgl2), recorded as viz perf "fft_gpu".
   let timerExt = null;
@@ -199,6 +253,12 @@ export function makeFft3d(canvas) {
       nView: 1,         // data rows across the full depth
       keyA: 0,          // grid-row key of row A (stable per grid row as it recedes, mod 65536)
       dbScale: 127.5, db0: -127.5, floorDb: -60, invRange: 1 / 60, tilt: 0,
+      gamma: 1,         // height = (dB-linear 0..1) ^ gamma
+      tonal: 0,         // how strongly styles light tonal bins, 0..1
+      toneLift: 0,      // how far a tonal bin is lifted toward the top (toneLift in fft3d_data.js)
+      glow: 0.5,        // cloud: 0 = lit matte terrain … 1 = a dark body that emits by level
+      bloom: 0,         // cloud: bloom gain (0 = no bloom pass)
+      moment: 0,        // how far colour follows the moment's bands instead of the style's own, 0..1
       logOct: 10,       // log2(fMax / fMin)
       log2FminK: 0,     // log2(fMin / 1000)
       gridCols: 1,
@@ -207,7 +267,7 @@ export function makeFft3d(canvas) {
 
   function initGL() {
     glOk = false;
-    iboCols = 0; texW = 0;
+    iboCols = 0; texW = 0; tintTex = null;
     active = null; activeName = "";
     queries.length = 0;
     fullUpload = true;
@@ -271,27 +331,42 @@ export function makeFft3d(canvas) {
     iboCols = mc;
   }
 
-  /** Upload ring rows [a, b] (absolute seqs) to the texture, splitting at the wrap. */
+  /** Upload ring rows [a, b] (absolute seqs) to both textures (level on unit 0, tint on unit 1), splitting at the wrap. */
   function uploadRows(a, b) {
     const n = nBins;
     let s = a;
     while (s <= b) {
       const r = s % TEX_ROWS;
       const len = Math.min(b - s + 1, TEX_ROWS - r);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, r, n, len, gl.RED, gl.UNSIGNED_BYTE, ring, r * n);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, r, n, len, gl.RG, gl.UNSIGNED_BYTE, ring, r * n * 2);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, r, 1, len, gl.RGBA, gl.UNSIGNED_BYTE, tintRing, r * 4);
+      gl.activeTexture(gl.TEXTURE0);
       s += len;
     }
   }
 
   function syncTexture() {
     if (!ring) return;
+    gl.activeTexture(gl.TEXTURE1);
+    if (!tintTex) {
+      tintTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tintTex);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 1, TEX_ROWS);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      fullUpload = true;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, tintTex);
     gl.activeTexture(gl.TEXTURE0);
     if (texW !== nBins || !tex) {
       if (tex) gl.deleteTexture(tex);
       tex = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, nBins, TEX_ROWS);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG8, nBins, TEX_ROWS);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -302,7 +377,10 @@ export function makeFft3d(canvas) {
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     if (fullUpload) {
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, nBins, TEX_ROWS, gl.RED, gl.UNSIGNED_BYTE, ring);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, nBins, TEX_ROWS, gl.RG, gl.UNSIGNED_BYTE, ring);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1, TEX_ROWS, gl.RGBA, gl.UNSIGNED_BYTE, tintRing);
+      gl.activeTexture(gl.TEXTURE0);
       fullUpload = false;
     } else if (dirtyLo <= lastSeq) {
       uploadRows(Math.max(dirtyLo, lastSeq - TEX_ROWS + 1), lastSeq);
@@ -395,9 +473,11 @@ export function makeFft3d(canvas) {
 
   /** Height (0..1) of absolute seq s, bin b, from the CPU ring (same mapping as SPEC_FN). */
   function levelAt(s, b) {
-    const v = ring[(s % TEX_ROWS) * nBins + b] * dbStep + db0 + tiltLut[b];
-    const h = (v - f.spec.floorDb) * f.spec.invRange;
-    return h < 0 ? 0 : h > 1 ? 1 : h;
+    const i = ((s % TEX_ROWS) * nBins + b) * 2;
+    const v = ring[i] * dbStep + db0 + tiltLut[b];
+    const d = (v - f.spec.floorDb) * f.spec.invRange;
+    const h = toneLift(d <= 0 ? 0 : d >= 1 ? 1 : d, ring[i + 1] / 255, f.spec.toneLift);
+    return h <= 0 ? 0 : h >= 1 ? 1 : Math.pow(h, f.spec.gamma);
   }
 
   /** `now`: the animation frame's timestamp (steadier than the time this draw happens to start). */
@@ -411,7 +491,8 @@ export function makeFft3d(canvas) {
     const inst = glOk ? instance(style) : null;
     const empty = !glOk ? "3D view needs WebGL2"
       : !inst ? `3D style "${style.name}" failed to build`
-      : store.spectro_supported === false ? "3D view needs an audio-server with the spectro stream (update it)"
+      : store.fft3d.source === "spectro" && store.spectro_supported === false
+        ? "3D view needs an audio-server with the spectro stream (update it)"
       : !meta.fft_enabled ? "FFT disabled"
       : lastSeq < 1 ? "waiting for data…" : "";
 
@@ -460,9 +541,16 @@ export function makeFft3d(canvas) {
     sp.keyA = (seqA / step) % 65536;
     sp.dbScale = 255 * dbStep;
     sp.db0 = db0;
-    sp.floorDb = topDb - disp.rangeDb;
-    sp.invRange = 1 / disp.rangeDb;
-    sp.tilt = disp.tiltDbOct;
+    // Linear rows: the byte is the height (db0 0, dbStep 1/255), so floor 0, range 1, no curve.
+    sp.floorDb = linear ? 0 : topDb - disp.rangeDb;
+    sp.invRange = linear ? 1 : 1 / disp.rangeDb;
+    sp.tilt = tiltOf();
+    sp.gamma = linear ? 1 : disp.gamma;
+    sp.tonal = linear ? 0 : Math.min(1, 1.5 * disp.tonal);
+    sp.toneLift = linear ? 0 : TONE_LIFT * disp.tonal;
+    sp.moment = disp.moment;
+    sp.glow = disp.glow;
+    sp.bloom = disp.bloom;
     sp.logOct = Math.log2(fMax / fMin);
     sp.log2FminK = Math.log2(fMin / 1000);
     sp.gridCols = mc;
@@ -550,14 +638,26 @@ export function makeFft3d(canvas) {
   }
 
   /**
-   * Display settings: { rangeDb, tiltDbOct, integrateMs, camera: { overscan,
-   * perspective, skew, height, horizon } } (any may be omitted). Integration
-   * applies to new frames; everything else re-maps the whole history.
+   * Display settings: { rangeDb, tiltDbOct, gamma, moment, glow, bloom, integrateMs, blurOct, tonal,
+   * camera: { overscan, perspective, skew, height, horizon } } (any may be
+   * omitted). Integration, blur and tonal apply to new frames; everything else
+   * re-maps the whole history.
    */
   function setDisplay(d) {
     if (d.rangeDb) disp.rangeDb = d.rangeDb;
     if (d.tiltDbOct !== undefined) disp.tiltDbOct = d.tiltDbOct;
-    if (d.integrateMs !== undefined && d.integrateMs !== disp.integrateMs) { disp.integrateMs = d.integrateMs; syncIntegrate(); }
+    if (d.gamma) disp.gamma = d.gamma;
+    if (d.moment !== undefined) disp.moment = d.moment;
+    if (d.glow !== undefined) disp.glow = d.glow;
+    if (d.bloom !== undefined) disp.bloom = d.bloom;
+    if ((d.integrateMs !== undefined && d.integrateMs !== disp.integrateMs)
+        || (d.blurOct !== undefined && d.blurOct !== disp.blurOct)
+        || (d.tonal !== undefined && d.tonal !== disp.tonal)) {
+      disp.integrateMs = d.integrateMs ?? disp.integrateMs;
+      disp.blurOct = d.blurOct ?? disp.blurOct;
+      disp.tonal = d.tonal ?? disp.tonal;
+      if (nBins) syncIntegrate();
+    }
     if (d.camera) {
       Object.assign(disp.camera, d.camera);
       const c = disp.camera;

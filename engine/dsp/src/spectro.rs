@@ -12,9 +12,16 @@
 //! spacing is a fixed fraction `rel_res` of f, i.e. constant Q, clamped to
 //! the ladder at both ends.
 //!
-//! - **Aligned in time.** All windows are centred on the middle of the
-//!   longest one, so an onset lines up vertically across frequency (the
-//!   price is half the longest window of latency, ~85 ms at 48 kHz).
+//! - **Aligned in time, and late by ~21 ms only.** The picture has to keep
+//!   up with the sound, so every window peaks at the same instant, `delay` =
+//!   half of the third window (1024 samples at 48 kHz) behind the newest
+//!   sample. A window up to twice that long is a plain Hann centred there. A
+//!   longer one cannot be centred that late, so it is lopsided: a long
+//!   half-Hann rise out of the past and a short half-Hann fall of `delay`
+//!   samples, ending at the newest sample. Next to a centred Hann of the
+//!   same length, a kick shows in the 8192 window ~30 ms sooner (−12 dB
+//!   after 32 ms instead of 63) and the peak is as narrow at −6 dB; the
+//!   price is wider skirts (−20 dB at ±2.8 rfft bins instead of ±1.7).
 //! - **Amplitude-normalised.** A sine reads its dBFS level (0 dB = full
 //!   scale) whatever window it lands in. With constant-Q windows that also
 //!   makes pink noise (≈ music's long-term spectrum) read flat.
@@ -51,6 +58,8 @@ pub struct SpectroParams {
 
 struct Win {
     size: usize,
+    /// First sample within the newest `span` samples (see the module doc).
+    start: usize,
     hann: Vec<f32>,
     /// Amplitude normalisation, squared: (2 / Σw)².
     norm2: f32,
@@ -107,16 +116,27 @@ impl Spectro {
         let mut planner = RealFftPlanner::<f32>::new();
         let mut wins = Vec::new();
         let mut size = w_min;
+        let delay = w_max.min(w_min * 4) / 2;
         while size <= w_max {
             let nfft = 2 * size;
             let plan = planner.plan_fft_forward(nfft);
+            let fall = (size / 2).min(delay);
+            let rise = size - fall;
             let hann: Vec<f32> = (0..size)
-                .map(|i| (0.5 - 0.5 * (std::f64::consts::TAU * (i as f64 + 0.5) / size as f64).cos()) as f32)
+                .map(|i| {
+                    let phase = if i < rise {
+                        (i as f64 + 0.5) / (2 * rise) as f64
+                    } else {
+                        0.5 + ((i - rise) as f64 + 0.5) / (2 * fall) as f64
+                    };
+                    (0.5 - 0.5 * (std::f64::consts::TAU * phase).cos()) as f32
+                })
                 .collect();
             let sum: f64 = hann.iter().map(|&w| w as f64).sum();
             let norm = (2.0 / sum) as f32;
             wins.push(Win {
                 size,
+                start: w_max - delay - rise,
                 hann,
                 norm2: norm * norm,
                 input: plan.make_input_vec(),
@@ -185,9 +205,7 @@ impl Spectro {
         let span = self.span;
         let x = &samples[samples.len().saturating_sub(span)..];
         for w in &mut self.wins {
-            // Centred on the middle of the longest window.
-            let off = (span - w.size) / 2;
-            let src = &x[off..off + w.size];
+            let src = &x[w.start..w.start + w.size];
             for ((d, &s), &h) in w.input[..w.size].iter_mut().zip(src).zip(&w.hann) {
                 *d = s as f32 * h;
             }
@@ -243,9 +261,11 @@ mod tests {
             let j = bin_of(&p, f);
             let peak = db[j.saturating_sub(3)..(j + 4).min(p.n_bins)].iter().cloned().fold(f32::MIN, f32::max);
             assert!((-2.0..=0.5).contains(&peak), "{f} Hz: peak {peak} dB");
-            // Half an octave away it's far down.
+            // Half an octave away it's far down. Less far in the bass: its long
+            // windows are lopsided (wider skirts), and half an octave is < 4 rfft bins there.
             let off = bin_of(&p, f * 1.41).min(p.n_bins - 1);
-            assert!(db[off] < peak - 30.0, "{f} Hz: {} dB half an octave up", db[off]);
+            let down = if f < 100.0 { 20.0 } else { 30.0 };
+            assert!(db[off] < peak - down, "{f} Hz: {} dB half an octave up", db[off]);
         }
     }
 
@@ -267,6 +287,26 @@ mod tests {
         let peaks = db[j1 - 2..=j1 + 2].iter().cloned().fold(f32::MIN, f32::max)
             .min(db[j2 - 2..=j2 + 2].iter().cloned().fold(f32::MIN, f32::max));
         assert!(dip < peaks - 6.0, "no dip between the notes: peaks {peaks}, dip {dip}");
+    }
+
+    /// The picture keeps up with the sound: a tone that only just began already
+    /// shows. (With every window centred on the middle of the longest one, both
+    /// would still read silence.)
+    #[test]
+    fn a_fresh_onset_already_shows() {
+        let p = params();
+        let mut s = Spectro::new(p);
+        // (frequency, how long ago the tone began in ms, how far under its level it may read)
+        for (f, ago_ms, down) in [(3000.0, 30.0, 2.0), (55.0, 40.0, 14.0)] {
+            let start = s.span() - (ago_ms * p.sr / 1000.0) as usize;
+            let x: Vec<f64> = (0..s.span())
+                .map(|i| if i < start { 0.0 } else { (std::f64::consts::TAU * f * (i - start) as f64 / p.sr).sin() })
+                .collect();
+            let db = s.process(&x).to_vec();
+            let j = bin_of(&p, f);
+            let peak = db[j.saturating_sub(3)..(j + 4).min(p.n_bins)].iter().cloned().fold(f32::MIN, f32::max);
+            assert!(peak > -down, "{f} Hz, begun {ago_ms} ms ago: reads {peak} dB");
+        }
     }
 
     #[test]

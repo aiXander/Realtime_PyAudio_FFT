@@ -95,7 +95,7 @@ Both engines take the same flags (`engine/target/release/audio-server …` or `u
 | `--log-level DEBUG` | More logging |
 
 > [!TIP]
-> To react to what your computer is *playing* rather than a mic, route system audio into a loopback device ([BlackHole](https://github.com/ExistentialAudio/BlackHole) on macOS, a loopback / monitor device on Linux or Windows) and select it as the input.
+> To react to what your computer is *playing* rather than a mic, pick **System audio** as the input (macOS 14.2+). It records whatever plays on your current output, keeps following it when you switch outputs, and isn't affected by the volume keys. Leave your Mac's output on a real device (speakers, headphones), not a Multi-Output Device. On Linux or Windows, route system audio into a loopback / monitor device and select that instead.
 
 <details>
 <summary><b>Upgrading from an older checkout</b></summary>
@@ -109,16 +109,15 @@ Until November 2026, `master` held only the Python engine and the Rust engine li
 
 ## FFT views and palettes
 
-The FFT card has a **2D view**, the exact picture of the OSC payload with the three bandpasses overlaid (drag their edges right on the canvas), and a **3D view** that shows the last few seconds of spectrum as a landscape, in four styles:
+The FFT card has a **2D view**, the exact picture of the OSC payload with the three bandpasses overlaid (drag their edges right on the canvas), and a **3D view** that shows the last few seconds of spectrum as a landscape, in three styles:
 
 <table>
   <tr>
-    <td width="50%"><img src="assets/screenshots/fft3d_cloud.webp" alt="3D FFT, cloud style"><p align="center"><b>Cloud</b>: dust-like point cloud in band colors</p></td>
+    <td width="50%"><img src="assets/screenshots/fft3d_cloud.webp" alt="3D FFT, cloud style"><p align="center"><b>Cloud</b>: relief in band colors; notes are white threads, hits light up</p></td>
     <td width="50%"><img src="assets/screenshots/fft3d_topo.webp" alt="3D FFT, topo style"><p align="center"><b>Topo</b>: survey map with contour lines</p></td>
   </tr>
   <tr>
-    <td width="50%"><img src="assets/screenshots/fft3d_spectrogram.webp" alt="3D FFT, spectrogram style"><p align="center"><b>Spectrogram</b>: magnitude colormap on a time grid</p></td>
-    <td width="50%"><img src="assets/screenshots/fft3d_partials.webp" alt="3D FFT, partials style"><p align="center"><b>Partials</b>: tracks and highlights tonal peaks</p></td>
+    <td colspan="2"><img src="assets/screenshots/fft3d_spectrogram.webp" alt="3D FFT, spectrogram style"><p align="center"><b>Spectrogram</b>: the history laid flat, like a score</p></td>
   </tr>
   <tr>
     <td colspan="2"><img src="assets/screenshots/fft2d.webp" alt="2D FFT view with the low, mid and high bandpasses overlaid"><p align="center"><b>2D</b>: the exact OSC payload, with bandpass overlays and peak-hold markers</p></td>

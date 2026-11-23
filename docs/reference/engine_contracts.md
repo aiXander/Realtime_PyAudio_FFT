@@ -113,7 +113,7 @@ Every state change marks meta dirty, so a coalesced broadcast goes out next tick
 
 Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
 
-- **`meta`:** 27 keys, including `sr` as an **int**, a `bands` dict of `{lo_hz, hi_hz}`, the nested `autoscale` / `onset` / `level` (`{tau_s, floor_db, ceiling_db}`), the UI fields, and `device` `{index, name}`.
+- **`meta`:** 28 keys, including `sr` as an **int**, `fft_hop` (samples; the 3D view's OSC source derives its row period from it), a `bands` dict of `{lo_hz, hi_hz}`, the nested `autoscale` / `onset` / `level` (`{tau_s, floor_db, ceiling_db}`), the UI fields, and `device` `{index, name}`.
 - **`devices.items[]`:** `{index, name, hostapi, default_samplerate, max_input_channels}`, plus `probed_signal` / `probed_at` after a probe.
 - **`server_status`:**
   - top level: `audio_stalled`, `cb_overruns`, `dsp_drops`, `fft_drops` (all counted from the current device session);
@@ -158,7 +158,7 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
 
 ## Devices (`server/audio/devices.py`, `App.*` in `server/main.py`)
 
-- **Indices** are positions in the host's full device list (inputs and outputs): PortAudio's numbering in Python, cpal's in Rust, identical on CoreAudio. They shift as devices come and go; names don't.
+- **Indices** are positions in the host's full device list (inputs and outputs): PortAudio's numbering in Python, cpal's in Rust, identical on CoreAudio as long as no System audio tap is open (below). They shift as devices come and go; names don't.
 - **Initial device:** `--device` → `cfg.audio.device.name` (looked up **by name**) → `cfg.audio.device.index` → the system default.
 - **Stream:** opened with the device's default sr. `channels` is clamped to the device's maximum. Stereo is mixed to mono as `(L+R)/2`. A host latency over 80 ms logs a warning.
 - **Hot-switch** (`hot_switch_device`):
@@ -166,6 +166,7 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
   - the index must be a current input;
   - tear down → reset the ring, read pointers and perf → open the new device → rebuild the DSP for the new sr (clamp bands) → FFT reconfigure + post-proc `update_bands` + `reset`;
   - on failure: restore the bands, reopen the old device, raise → error + snap-back meta.
+  - on success, `cfg.audio.device` = the **stream's** `{device, device_name}` (opening System audio can renumber Python's list).
   - The workers stay alive throughout.
 - **Watchdog** (`_audio_watchdog_loop`):
   - ticks every 0.25 s;
@@ -173,6 +174,17 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
   - then reopens every 3 s: re-init audio → same device **by name** → else the system default.
   - Reopening the same device at the same sr keeps the DSP state (`keep_state=True`).
   - Auto-recovery never rewrites `cfg.audio.device`.
+  - On System audio, a changed default output re-taps at once (same reopen-by-name path), before any stall check.
+- **System audio** (macOS 14.2+; `server/audio/system_tap.py`, `engine/server/src/system_tap.rs`, mirrored call for call). Records what plays on the default output without BlackHole, so the volume keys keep working; the tap takes app audio before the device volume (measured: level unchanged from 100 % to 25 % volume).
+  - **Entry:** name `System audio`, index **one past the last device** (an output's own index can't mean it: a duplex interface's index already means its inputs), `max_input_channels` 2, `default_samplerate` of the default output. Persisted by name like any device.
+  - **What opens:** a process tap on the default output (all processes, unmuted) inside a **private** aggregate device (`audio-server system tap <pid>.<n>`, UID prefix `com.audio-server.system-tap.`), hidden from the list. Rust numbers devices without it, so indices never shift; Python's PortAudio snapshot includes it after the re-init that makes it visible, so there System audio's index is one higher while a tap exists — consistent within each engine, not across them.
+  - **Probe:** `probed_signal` = another process is playing output (CoreAudio process objects), not an RMS probe: Python can't open a second tap without a PortAudio re-init that cuts the live stream, and Rust matches it.
+  - **Traps:**
+    - The aggregate needs the output device as **clock sub-device** and the tap must **not** be auto-started (`tapautostart`). Without the clock, a silent output delivers no blocks at all (watchdog: stall + reopen loop); with auto-start, nothing arrives until the first sound. cpal's built-in loopback has neither, which is why Rust has its own tap.
+    - A new aggregate shows up in a running process's device list a few to ~25 ms after creation: Rust retries the lookup for up to 1 s.
+    - A **Multi-Output Device** as system output: the tap misses whole playback sessions now and then (both engines). Use a real output device; System audio replaces the Multi-Output setup.
+    - A *public* aggregate or tap outlives its process. Keep both private (they die with the process); a leaked one has to be destroyed by its object id.
+    - Probing a Bluetooth headset's mic flips it to call mode (16 kHz); the tapped output's sample-rate change kills the tap stream and the watchdog reopens it within ~1 s.
 - **Drop counters** are re-baselined after every stream change, and again 250 ms later.
 
 ## Threading, backlog and timing policies

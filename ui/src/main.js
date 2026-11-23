@@ -1,6 +1,6 @@
 // Entry point. Wires WS handlers -> store, sets up controls, runs RAF loop.
 
-import { connect, send, onMessage, onError, onStatus, onSpectro, retryNow, snapshotRate, resetSnapshotRate } from "./ws.js";
+import { connect, send, onMessage, onError, onStatus, onSpectro, onFft, retryNow, snapshotRate, resetSnapshotRate } from "./ws.js";
 import { store, avgRing, p95Ring, clearLive } from "./store.js";
 import { setupControls } from "./controls.js";
 import { makeLines } from "./viz/lmh_lines.js";
@@ -8,8 +8,8 @@ import { makeBars }  from "./viz/lmh_bars.js";
 import { makeScene } from "./viz/lmh_scene.js";
 import { makeFft }   from "./viz/fft_2d.js";
 import { makeFft3d } from "./viz/fft_3d.js";
-import { decodeSpectro } from "./viz/fft3d_data.js";
-import { STYLES } from "./viz/fft3d_styles/index.js";
+import { decodeSpectro, makeFftRows } from "./viz/fft3d_data.js";
+import { styleFor } from "./viz/fft3d_styles/index.js";
 import { setupTooltips } from "./tooltips.js";
 import { setupLayout, applyLayout, setupFullscreen } from "./layout.js";
 import { setupSidebar } from "./sidebar.js";
@@ -17,22 +17,38 @@ import { toast } from "./toast.js";
 
 setupSidebar();
 setupLayout();
-const controls = setupControls({ on3dChange: () => { apply3dDisplay(); syncSpectro(); updateFftTitle(); } });
+const controls = setupControls({ on3dChange: () => { apply3dDisplay(); sync3dSource(); syncSpectro(); syncFftTools(); updateFftTitle(); } });
 
 const lines = makeLines(document.getElementById("viz-lines"));
 const bars  = makeBars(document.getElementById("viz-bars"));
 const scene = makeScene(document.getElementById("viz-scene"));
 // The FFT card has one canvas and two renderers; store.fft_view picks which
 // one draws. The 2D one shows the LED-oriented FFT (binary type 1); the 3D
-// one has its own stream (spectro, binary type 2), recorded on arrival.
+// one draws, per store.fft3d.source, either its own stream (spectro, binary
+// type 2) or those same type-1 frames (makeFftRows), recorded on arrival.
 const fftCanvas = document.getElementById("viz-fft");
 const fft   = makeFft(fftCanvas);
 const fft3d = makeFft3d(fftCanvas);
-onSpectro((buf) => { const m = decodeSpectro(buf); if (m) fft3d.push(m); });
+const fftRows = makeFftRows();
+const drawing3d = (source) => store.fft_view === "3d" && store.fft3d.source === source;
+onSpectro((buf) => {
+  if (!drawing3d("spectro")) return;   // in flight across a source switch
+  const m = decodeSpectro(buf);
+  if (m) fft3d.push(m);
+});
+onFft((f32) => { if (drawing3d("fft")) fft3d.push(fftRows.frame(f32, store.meta, performance.now())); });
+// A source switch starts the history afresh (the two streams don't share a clock).
+let last3dSource = store.fft3d.source;
+function sync3dSource() {
+  if (store.fft3d.source === last3dSource) return;
+  last3dSource = store.fft3d.source;
+  fft3d.reset();
+}
 function apply3dDisplay() {
   const c = store.fft3d;
   fft3d.setDisplay({
-    rangeDb: c.range_db, tiltDbOct: c.tilt_db_per_oct, integrateMs: c.smooth_ms,
+    rangeDb: c.range_db, tiltDbOct: c.tilt_db_per_oct, gamma: c.gamma, integrateMs: c.smooth_ms, blurOct: c.blur_oct, tonal: c.tonal, moment: c.moment,
+    glow: c.glow, bloom: c.bloom,
     camera: { overscan: c.overscan, perspective: c.perspective, skew: c.skew, height: c.height, horizon: c.horizon },
   });
 }
@@ -43,7 +59,7 @@ apply3dDisplay();
 // subscriptions on disconnect, so `spectroSent` resets then.
 let spectroSent = "";   // last state sent: "" = nothing (fresh connection), "off", "on|<res>"
 function syncSpectro() {
-  const want = store.conn === "connected" && store.synced && store.fft_view === "3d"
+  const want = store.conn === "connected" && store.synced && drawing3d("spectro")
     && !!store.meta.fft_enabled && !document.hidden && store.spectro_supported !== false;
   const key = want ? `on|${store.fft3d.res}` : "off";
   if (key === spectroSent || (!want && spectroSent === "")) return;
@@ -199,13 +215,8 @@ onMessage("meta", (m) => {
     if (bandpassFs) bandpassFs.hidden = canvasEdits;
   }
   updateFftTitle();
-  // The raw-dB and bin-count controls shape the LED FFT the 2D view shows;
-  // the 3D view has its own analysis and its own controls.
-  if (fft3dStyleWrap) fft3dStyleWrap.hidden = view !== "3d";
-  if (fft3dTools) fft3dTools.hidden = view !== "3d";
+  syncFftTools();
   if (view !== "3d") controls.showCamera(false);
-  if (fftRawDbWrap) fftRawDbWrap.hidden = view === "3d";
-  if (fftBinsWrap) fftBinsWrap.hidden = view === "3d";
   if (view !== lastFftView) {
     lastFftView = view;
     fftCanvas.setAttribute("aria-label", view === "3d" ? "FFT spectrum history, 3D" : "FFT spectrum");
@@ -218,12 +229,27 @@ onMessage("meta", (m) => {
   syncSpectro();
 });
 
+// The raw-dB and bin-count controls shape the LED FFT: they show wherever
+// that FFT is drawn (2D, or 3D on source "fft"). The pickers that shape the
+// spectro stream's picture show only on source "spectro".
+const spectroOnlyPicks = ["fft3d-res", "fft3d-smooth", "fft3d-blur", "fft3d-range", "fft3d-gamma", "fft3d-tonal", "fft3d-tilt"]
+  .map((id) => document.getElementById(id)?.closest("label")).filter(Boolean);
+function syncFftTools() {
+  const is3d = store.fft_view === "3d", ledFft = !is3d || store.fft3d.source === "fft";
+  if (fft3dStyleWrap) fft3dStyleWrap.hidden = !is3d;
+  if (fft3dTools) fft3dTools.hidden = !is3d;
+  if (fftRawDbWrap) fftRawDbWrap.hidden = !ledFft;
+  if (fftBinsWrap) fftBinsWrap.hidden = !ledFft;
+  for (const el of spectroOnlyPicks) el.hidden = ledFft;
+}
+
 let lastTitle = "";
 function updateFftTitle() {
   if (!fftTitleMode) return;
   const scale = store.meta.fft_send_raw_db ? "raw dB" : "scaled 0..1";
-  const label = (STYLES[store.fft3d_style]?.label || store.fft3d_style).toLowerCase();
-  const t = store.fft_view === "3d" ? `3D · ${label} · ${store.fft3d.res}` : `log-x · ${scale}`;
+  const label = styleFor(store.fft3d_style).label.toLowerCase();
+  const src = store.fft3d.source === "fft" ? `OSC · ${scale}` : store.fft3d.res;
+  const t = store.fft_view === "3d" ? `3D · ${label} · ${src}` : `log-x · ${scale}`;
   if (t !== lastTitle) fftTitleMode.textContent = lastTitle = t;
 }
 

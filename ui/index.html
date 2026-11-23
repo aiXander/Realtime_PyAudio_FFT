@@ -159,11 +159,15 @@ The low end can't get finer than the FFT window allows (~47 Hz per linear bin at
 - **Cloud** — dust on a faint sea, in the palette's band colors
 - **Topo** — a survey map with contour lines and hill shading, seen from above
 - **Spectrogram** — a spectrogram sheet in shallow perspective, lightness-ordered colormap
-- **Partials** — every spectral peak traced as a line through time: harmonics, formants, glides
 
 The 3D view has its own analysis (the spectro stream): a frame every ~5 ms, 1024 log bins from 20 Hz to 20 kHz, long windows in the bass and short ones in the treble, in dB, averaged over the **Smooth** time. Every pixel reads that data directly.
 
-*Visual only — does not affect DSP or the OSC payload.*"><select id="fft3d-style" class="title-select" aria-label="3D style"></select></label> <span id="fft3d-tools" hidden><label class="inline" title="**Resolution** — the time ↔ pitch trade-off of the 3D view's analysis.
+*Visual only — does not affect DSP or the OSC payload.*"><select id="fft3d-style" class="title-select" aria-label="3D style"></select></label> <span id="fft3d-tools" hidden><span class="seg" role="radiogroup" aria-label="3D source" title="**3D source** — what the 3D view draws.
+
+- **spectro**: its own analysis, made for looking (~1024 log bins, a frame every ~5 ms). The pickers next to it shape it.
+- **OSC**: the `/audio/fft` frames the 2D view draws and the LEDs get, as received: the 2D picture over time, one row per frame (the UI refresh rate, or the FFT hop rate if slower). The side panel, *raw dB* and the bin count shape it; the resolution, smooth, detail, range, curve, tonal and view-tilt pickers don't apply and hide.
+
+*Visual only — does not affect DSP or the OSC payload.*"><label><input type="radio" name="fft3d-source" id="fft3d-source-spectro" value="spectro" /><span>spectro</span></label><label><input type="radio" name="fft3d-source" id="fft3d-source-fft" value="fft" /><span>OSC</span></label></span> <label class="inline" title="**Resolution** — the time ↔ pitch trade-off of the 3D view's analysis.
 
 Every frequency gets the window length that suits it (long in the bass, short in the treble); this shifts the whole ladder:
 
@@ -180,16 +184,45 @@ The raw analysis re-measures every 5 ms. Anything noise-like (hats, reverb, air,
 - **40 ms**: calm surface, onsets still rise within a frame or two.
 - **80 ms**: calmest; fast rhythms start to merge.
 
-Applies to new frames. *Visual only.*"><select id="fft3d-smooth" class="title-select" aria-label="3D smoothing"><option value="0">raw</option><option value="20">20 ms</option><option value="40">40 ms</option><option value="80">80 ms</option></select></label> <label class="inline" title="**Range** — how many dB below the top still show above the floor. The top is the loudest level of the last 20 s, so it stands still while the music keeps its level and only moves when it gets louder or stays quieter.
+Applies to new frames. *Visual only.*"><select id="fft3d-smooth" class="title-select" aria-label="3D smoothing"><option value="0">raw</option><option value="20">20 ms</option><option value="40">40 ms</option><option value="80">80 ms</option></select></label> <label class="inline" title="**Detail** — how finely the picture resolves frequency.
+
+Hearing pools the energy inside about a third of an octave: it follows a hi-hat as one burst, not as the hundreds of separate frequencies the analysis finds in it. Drawn bin by bin, that fine structure is a field of spikes with nothing audible behind it, and it hides the shapes you do hear.
+
+- **Full**: every bin. Sharpest lines for single notes, spiky treble.
+- **1/12 oct**: a semitone. Light.
+- **1/6 oct**: close to hearing. The low harmonics of a note stay apart, noise becomes a smooth swell.
+- **1/3 oct**: broad shapes only.
+
+Applies to new frames. *Visual only.*"><select id="fft3d-blur" class="title-select" aria-label="3D frequency detail"><option value="0">full</option><option value="0.08">1/12 oct</option><option value="0.17">1/6 oct</option><option value="0.33">1/3 oct</option></select></label> <label class="inline" title="**Range** — how many dB below the top still show above the floor. The top is the loudest level of the last 20 s, so it stands still while the music keeps its level and only moves when it gets louder or stays quieter.
 
 - **Small** (40 dB): only the strong components, high contrast.
 - **Large** (70 dB): quiet detail, reverb tails and noise too.
 
-Re-maps the whole history at once. *Visual only.*"><select id="fft3d-range" class="title-select" aria-label="3D dB range"><option value="40">40 dB</option><option value="50">50 dB</option><option value="60">60 dB</option><option value="70">70 dB</option></select></label> <label class="inline" title="**Tilt** — dB per octave added around 1 kHz.
+Re-maps the whole history at once. *Visual only.*"><select id="fft3d-range" class="title-select" aria-label="3D dB range"><option value="40">40 dB</option><option value="50">50 dB</option><option value="60">60 dB</option><option value="70">70 dB</option></select></label> <label class="inline" title="**Curve** — how level becomes height.
+
+- **dB**: height is linear in dB. Honest, but a sound a quarter as loud as the loudest still stands half as tall (40 dB range), so everything looks about equally present.
+- **Loud**: closer to how loud things sound. Quiet layers sink toward the floor, what you actually hear stands up.
+- **Peaks**: stronger still; only the dominant sounds rise.
+
+Re-maps the whole history at once. *Visual only.*"><select id="fft3d-gamma" class="title-select" aria-label="3D height curve"><option value="1">dB</option><option value="2">loud</option><option value="3">peaks</option></select></label> <label class="inline" title="**Tonal** — brings out notes.
+
+Height shows energy, and a melody sits far under the drums. You still hear it clearly because it is a steady pitch; a hit or a hiss is not. Wherever the sound is tonal (narrow in frequency and held for a moment), the surface is lifted toward the top and lit, so a melodic line is a bright thread running into the depth.
+
+- **Off**: energy only.
+- **Soft**: notes stand out, the drums still lead.
+- **Strong**: notes lead; best for ambient and sparse music.
+
+The loudest sounds are not lifted, and the dB reading behind the picture is unchanged. Applies to new frames. *Visual only.*"><select id="fft3d-tonal" class="title-select" aria-label="3D tonal emphasis"><option value="0">no tonal</option><option value="0.5">tonal</option><option value="1">tonal +</option></select></label> <label class="inline" title="**Color** — what the hue means.
+
+- **By band**: the style's own colors (in Cloud: where a sound sits on the frequency axis).
+- **By moment**: each instant takes the color of the bands sounding in it, across the whole row: the low color on a kick, the high color on a hat, a mix when several play. Rhythm becomes a color pattern along time.
+- **Blend**: halfway.
+
+Each band is judged against its own recent peak, so quiet hats color a moment as strongly as a loud kick. The bands are split where your L/M/H bandpass edges meet. Re-maps the whole history at once. *Visual only.*"><select id="fft3d-moment" class="title-select" aria-label="3D color meaning"><option value="0">by band</option><option value="0.5">blend</option><option value="1">by moment</option></select></label> <label class="inline" title="**View tilt** (3D picture only) — dB per octave added around 1 kHz. Not the side panel's *tilt*, which shapes the LED FFT and L/M/H.
 
 The analysis is constant-Q, so pink noise (about the long-term spectrum of music) reads flat at **0**. A positive tilt brightens the treble: cymbals, sibilance and air.
 
-Re-maps the whole history at once. *Visual only.*"><select id="fft3d-tilt" class="title-select" aria-label="3D tilt"><option value="-3">−3 dB/oct</option><option value="0">0 dB/oct</option><option value="1.5">+1.5 dB/oct</option><option value="3">+3 dB/oct</option><option value="4.5">+4.5 dB/oct</option></select></label> <button type="button" class="title-btn" id="fft3d-cam-btn" aria-expanded="false" aria-controls="fft3d-cam" title="**Camera** — how the 3D view is framed: front-row overscan, perspective, skew, peak height, horizon.
+Re-maps the whole history at once. *Visual only.*"><select id="fft3d-tilt" class="title-select" aria-label="3D view tilt, dB per octave"><option value="-3">view tilt −3</option><option value="0">view tilt 0</option><option value="1.5">view tilt +1.5</option><option value="3">view tilt +3</option><option value="4.5">view tilt +4.5</option></select></label> <button type="button" class="title-btn" id="fft3d-cam-btn" aria-expanded="false" aria-controls="fft3d-cam" title="**Camera** — how the 3D view is framed: front-row overscan, perspective, skew, peak height, horizon.
 
 Saved on the server (`ui.fft3d` in the config), like the pickers next to it. *Visual only.*">camera</button></span> <span class="seg" role="radiogroup" aria-label="FFT view" title="**2D / 3D view.**
 
@@ -200,7 +233,7 @@ Saved on the server (`ui.fft3d` in the config), like the pickers next to it. *Vi
           <div class="viz-stack">
             <canvas id="viz-fft" width="640" height="200" role="img" aria-label="FFT spectrum"></canvas>
             <div id="fft3d-cam" class="cam-panel" role="group" aria-label="3D camera" hidden>
-              <div class="cam-head"><span>Camera</span> <button type="button" id="fft3d-cam-reset" title="Back to the defaults: overscan 5 %, perspective ×1, centred, height ×1, horizon 0 %.">reset</button> <button type="button" class="icon-btn" id="fft3d-cam-close" aria-label="Close camera settings">✕</button></div>
+              <div class="cam-head"><span>Camera</span> <button type="button" id="fft3d-cam-reset" title="Back to the defaults: overscan 5 %, perspective ×1, centred, height ×1, horizon 0 %, glow 50 %, bloom 50 %.">reset</button> <button type="button" class="icon-btn" id="fft3d-cam-close" aria-label="Close camera settings">✕</button></div>
               <label title="**Overscan** — how far the newest (front) row reaches past each side of the card, as a share of its width.
 
 The rows narrow toward the back, so with some overscan the surface fills the card's full width from a moment behind the front, instead of leaving empty corners.">overscan <input type="range" id="fft3d-cam-overscan" min="0" max="30" step="1" /> <span id="fft3d-cam-overscan-val"></span></label>
@@ -211,6 +244,18 @@ The rows narrow toward the back, so with some overscan the surface fills the car
               <label title="**Skew** — slides the far rows left or right, as if seen at an angle. The front row stays put; at 100 % the horizon's centre sits on the card's edge.">skew <input type="range" id="fft3d-cam-skew" min="-100" max="100" step="1" /> <span id="fft3d-cam-skew-val"></span></label>
               <label title="**Height** — peak height, relative to the style's own (×1).">height <input type="range" id="fft3d-cam-height" min="25" max="300" step="5" /> <span id="fft3d-cam-height-val"></span></label>
               <label title="**Horizon** — lowers the far edge toward the front: a lower, flatter camera that packs the history into less height. At 0 % the horizon sits just low enough that a full-height far row still fits.">horizon <input type="range" id="fft3d-cam-horizon" min="0" max="80" step="1" /> <span id="fft3d-cam-horizon-val"></span></label>
+              <div class="cam-sub">Light <span>cloud style</span></div>
+              <label title="**Glow** — how the Cloud surface gets its light.
+
+- **0 %**: matte terrain lit from the front left, with shade in the valleys.
+- **100 %**: a near-black body that emits by level, so the sound itself is the light.
+
+*Cloud style only. Visual only.*">glow <input type="range" id="fft3d-cam-glow" min="0" max="100" step="1" /> <span id="fft3d-cam-glow-val"></span></label>
+              <label title="**Bloom** — a soft halo around the bright parts: peaks, notes, beginnings and the front rim.
+
+At 0 % the bloom pass is skipped entirely (cheapest on the GPU).
+
+*Cloud style only. Visual only.*">bloom <input type="range" id="fft3d-cam-bloom" min="0" max="150" step="1" /> <span id="fft3d-cam-bloom-val"></span></label>
             </div>
           </div>
         </div>
@@ -299,7 +344,12 @@ Typical values:
 - `~3` → pink-noise compensation. Most music feels balanced across the spectrum.
 - higher → push more high-end through the gate
 
-Affects both pipelines: shifts the wire dB on the FFT side; derives a per-band noise floor from each band's geometric center on the L/M/H side, so the same global gate fires uniformly across frequency.">tilt (dB/oct) <input type="range" id="fft-tilt" min="-60" max="120" step="1" /> <span id="fft-tilt-val"></span></label>
+Affects both pipelines, but only their auto-scaled share (the **strength** part): at strength `0`, and on the FFT with **raw dB** on, tilt changes nothing.
+
+- **FFT**: tilts each bin before the per-bin auto-scaler, so it reshapes the processed `/audio/fft` payload and the 2D graph. The raw-dB stream is never tilted.
+- **L/M/H**: derives a per-band noise floor from each band's geometric center, so the same global gate fires uniformly across frequency.
+
+Not the 3D view's *view tilt* picker, which only changes that picture.">tilt (dB/oct) <input type="range" id="fft-tilt" min="-60" max="120" step="1" /> <span id="fft-tilt-val"></span></label>
           <label title="**FFT-only.** Spatial smear of the per-bin auto-scaler (Gaussian, width in **octaves** of frequency).
 
 Without smear, a sustained pure tone (a single bin holding a high value) normalizes *itself* down to nothing — it becomes its own peak and divides itself out, ending up looking smaller than its quiet neighbors.

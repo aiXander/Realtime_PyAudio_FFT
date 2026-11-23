@@ -87,9 +87,16 @@ ui:
   palette: classic
   fft3d:
     res: balanced
+    source: spectro
     smooth_ms: 40.0
+    blur_oct: 0.17
     range_db: 60.0
+    gamma: 2.0
+    tonal: 0.5
+    moment: 0.0
     tilt_db_per_oct: 3.0
+    glow: 0.5
+    bloom: 0.5
     overscan: 0.05
     perspective: 1.0
     skew: 0.0

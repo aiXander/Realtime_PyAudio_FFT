@@ -5,7 +5,7 @@ The Rust binary that replaces the Python server (`server/`) with the same outwar
 ## Run
 
 ```bash
-make start-rust                                 # cargo build --release -p server, then --open
+make start [CONFIG=name]                        # cargo build --release -p server, then --open [--config configs/<name>.yaml]
 engine/target/release/audio-server [--config P] [--no-ws] [--open] [--device N] [--log-level L]
 cd engine && cargo test -p server && cargo clippy --all-targets
 ```
@@ -42,6 +42,7 @@ The binary finds the repo (for `configs/` and `ui/`) by walking up from its own 
 | `workers.rs` | `dsp/worker.py`, `FFTWorker.run` | worker loops, backlog policies, commands, stores |
 | `osc.rs` | `io/osc_sender.py`, `osc_publisher.py` | byte-identical templates; header tests against `testdata/golden/wire/osc_*.bin`. One atomic slot per destination, so `send` stays lock- and allocation-free (the DSP worker runs under `assert_no_alloc`); host names are filled in by the `osc-resolve` thread (below) |
 | `ws.rs` | `io/ws_server.py` (`_Client`, connection handling) | the three lanes, axum upgrade handler, binary FFT encoder |
+| `spectro.rs` | `dsp/spectro.py` (`SpectroService`) | the 3D view's spectro worker: polls the ring at normal priority, queue + type-2 wire encoder; the analysis is `dsp::spectro`. Subscriptions live in `WsHub.spectro_subs` (`App::set_spectro` / `sync_spectro`) |
 | `http.rs` | `io/http_server.py` | `ServeDir` + `Cache-Control: no-cache` + forced MIME types |
 | `shared.rs` | perf arrays, `_errlog.py` | `now_ns` (CLOCK_MONOTONIC, the e2e clock), `PerfRing` + stats, rate-limited worker error log |
 | `priority.rs` | `priority.py` | main thread: QoS USER_INITIATED (macOS) / nice −5 (Linux), as the reference; workers: real-time class (below) |

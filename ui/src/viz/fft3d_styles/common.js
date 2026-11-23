@@ -1,6 +1,7 @@
-// Shared pieces for the 3D FFT styles: shader snippets (projection, band
-// colors, magnitude colormap, AA grid lines, hashing), program building, the
-// surface uniforms and screen-space strips for the front edge.
+// Shared pieces for the 3D FFT styles: shader snippets (projection, the
+// spectro texture + grid, band colors, magnitude colormap, AA grid lines,
+// hashing), program building, the surface uniforms and screen-space strips
+// for the front edge.
 //
 // A style module (see cloud.js for the reference) default-exports:
 //
@@ -10,8 +11,8 @@
 //     background: "#hex" | () => "#hex",       // static-layer fill (+ fog color)
 //     text: { axis, dim },                     // static-layer label colors
 //     drawStatic(g, geo, W, H, dpr, info),     // optional extra static art
-//     smoothing: { freqOct, timePasses },      // optional: lighter display smoothing for detail styles
-//                                              //   (defaults 0.08 oct σ across frequency, 2 time passes)
+//     grid: { cols, rows },                    // optional: geometry density caps (defaults 1024 × 480);
+//                                              //   per-pixel shading (SPEC_FN) is at data resolution anyway
 //     create(gl, core) → { render(f), dispose() }, // compile programs, own GL objects; dispose frees them
 //   }
 //
@@ -23,6 +24,10 @@
 // may allocate: preallocate typed arrays in create().
 
 import { LMH, theme } from "../../colors.js";
+// Lighting-only world scale (surface width = 2): how steep slopes look to the light.
+export const WORLD_HEIGHT = 0.5, WORLD_DEPTH = 3.0;
+/** Vertex shader: data rows pooled per grid row (cap). */
+export const MAX_POOL = 6;
 
 export const glf = (x) => (Number.isInteger(x) ? x.toFixed(1) : String(x));
 export const hex01 = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
@@ -67,26 +72,107 @@ uint hash(uint x) {
 }
 float hash01(uint x) { return float(hash(x) & 0xFFFFu) / 65535.0; }`;
 
-/** Surface vertex stage: one vertex per mesh point, row-major, u from the vertex index. */
-export const SURF_VS = `#version 300 es
-layout(location = 0) in float aH;
-layout(location = 1) in float aZ;
-layout(location = 2) in vec2 aSlope;
-layout(location = 3) in float aKey;
+// ---- the spectro texture (see fft_3d.js) ----
+
+/**
+ * SPEC_FN: read the history texture. Rows are absolute data rows mod the
+ * ring (REPEAT wrap, so any float row works); u is 0..1 across frequency.
+ *   specH(u, row)            height 0..1 (dB → range, tilt, level)
+ *   specPeak(u, row, r, b)   pooled height over a footprint of r rows (older from row) × b bins
+ *   specSurface(u, row, h, n) per-pixel height (pooled over the pixel's footprint) + normal (SPEC_FS)
+ * setCommonUniforms sets every uniform from f.spec.
+ *
+ * Pooling is halfway between the mean and the max of the taps (poolMix).
+ * The mean alone is the steadier picture as it scrolls, but a hat far back,
+ * where one pixel covers many rows, sinks into it; the max alone keeps the
+ * hat and shimmers twice as much there (the taps slide over the rows).
+ */
+export const SPEC_FN = `
+uniform sampler2D uSpec;
+uniform float uNBins, uTexRows, uDbScale, uDb0, uFloorDb, uInvRange, uTilt, uLogOct, uLog2FminK, uNView;
+float poolMix(float mx, float mean) { return 0.5 * (mx + mean); }
+float specH(float u, float row) {
+  vec2 tc = vec2((u * (uNBins - 1.0) + 0.5) / uNBins, (row + 0.5) / uTexRows);
+  float db = texture(uSpec, tc).r * uDbScale + uDb0 + uTilt * (uLog2FminK + u * uLogOct);
+  return clamp((db - uFloorDb) * uInvRange, 0.0, 1.0);
+}
+float specPeak(float u, float row, float rows, float bins) {
+  int nr = int(clamp(ceil(rows), 1.0, 6.0));
+  int nc = int(clamp(ceil(bins), 1.0, 3.0));
+  float dr = rows / float(nr), du = bins / float(nc) / (uNBins - 1.0);
+  float m = 0.0, sum = 0.0;
+  for (int i = 0; i < 6; i++) {
+    if (i >= nr) break;
+    for (int j = 0; j < 3; j++) {
+      if (j >= nc) break;
+      float h = specH(u + (float(j) - 0.5 * float(nc - 1)) * du, row - float(i) * dr);
+      m = max(m, h);
+      sum += h;
+    }
+  }
+  return poolMix(m, sum / float(nr * nc));
+}`;
+
+/** SPEC_FN + specSurface (fragment stage only: it needs fwidth). */
+export const SPEC_FS = SPEC_FN + `
+void specSurface(float u, float row, out float h, out vec3 n) {
+  float rows = max(fwidth(row), 1.0);              // data rows under this pixel
+  float bins = fwidth(u) * (uNBins - 1.0);         // bins under this pixel
+  h = specPeak(u, row, rows, bins);
+  float du = max(bins, 1.0) / (uNBins - 1.0);
+  float sx = ${glf(WORLD_HEIGHT)} * (specH(u + du, row) - specH(u - du, row)) / (4.0 * du);
+  float sz = ${glf(WORLD_HEIGHT)} * (specH(u, row - rows) - specH(u, row + rows)) / (2.0 * rows / uNView * ${glf(WORLD_DEPTH)});
+  n = vec3(-sx, 1.0, -sz);
+}`;
+
+/**
+ * GRID_FN: the grid vertex → (u, texture row, depth z, row key, pool).
+ * Rows 0 … uBodyRows−1 are anchored to data rows uStep apart (the newest,
+ * "row A", at texture row uRowA); row uBodyRows is the live front edge at the
+ * playhead, uFrontOff data rows past row A. Needs SPEC_FN before it.
+ */
+export const GRID_FN = `
 uniform int uCols;
+uniform float uRowA, uFrontOff, uStep, uPool, uBodyRows, uKeyA;
+void gridVertex(int vid, out float u, out float row, out float z, out float key, out float pool) {
+  int c = vid % uCols, r = vid / uCols;
+  u = float(c) / float(uCols - 1);
+  float back = uBodyRows - 1.0 - float(r);         // grid rows behind row A
+  float rel = back < 0.0 ? uFrontOff : -back * uStep;
+  key = mod(back < 0.0 ? uKeyA + 1.0 : uKeyA - back, 65536.0);
+  pool = back < 0.0 ? 1.0 : uPool;
+  rel = max(rel, uFrontOff - uNView);              // the back row sits on the horizon
+  z = clamp((uFrontOff - rel) / uNView, 0.0, 1.0);
+  row = uRowA + rel;
+}
+/** Height pooled over the data rows one grid row stands for (same pooling as specPeak). */
+float gridHeight(float u, float row, float pool) {
+  float m = 0.0, sum = 0.0, d = uStep / pool;
+  for (int i = 0; i < ${MAX_POOL}; i++) {
+    if (float(i) >= pool) break;
+    float h = specH(u, row - float(i) * d);
+    m = max(m, h);
+    sum += h;
+  }
+  return poolMix(m, sum / pool);
+}`;
+
+/** Surface vertex stage: one vertex per grid point, heights from the texture. Fragment
+ *  stages shade per pixel from the texture (specSurface), so there's no vertex normal. */
+export const SURF_VS = `#version 300 es
 ${PROJ_FN}
-uniform float uRow0;   // optional: f.key0 mod a multiple of f.tSub (row-aligned lines; see docs/reference/fft_3d_styles.md)
-out float vU, vH, vZ, vKey, vS, vRow;
-out vec3 vN;
+${SPEC_FN}
+${GRID_FN}
+out float vU, vH, vZ, vKey, vS, vT;
 out vec2 vPx;
 void main() {
-  float u = float(gl_VertexID % uCols) / float(uCols - 1);
+  float u, row, z, key, pool;
+  gridVertex(gl_VertexID, u, row, z, key, pool);
+  float h = gridHeight(u, row, pool);
   float s;
-  vec2 px = toPx(u, aH, aZ, s);
+  vec2 px = toPx(u, h, z, s);
   gl_Position = clipPos(px, s);
-  vU = u; vH = aH; vZ = aZ; vKey = aKey; vS = s; vPx = px;
-  vRow = float(gl_VertexID / uCols) + uRow0;   // mesh row, stable per row as it recedes (wrap-free, unlike vKey)
-  vN = vec3(-aSlope.x, 1.0, -aSlope.y);
+  vU = u; vH = h; vZ = z; vKey = key; vS = s; vPx = px; vT = row;
 }`;
 
 /** The palette's band colors as uniforms (set by setCommonUniforms). Don't combine with bandFn(), which declares them too. */
@@ -239,6 +325,24 @@ export function setCommonUniforms(gl, u, f) {
   if (u.uC0) gl.uniform3fv(u.uC0, f.stopRgb[0]);
   if (u.uC1) gl.uniform3fv(u.uC1, f.stopRgb[1]);
   if (u.uC2) gl.uniform3fv(u.uC2, f.stopRgb[2]);
+  const sp = f.spec;
+  if (u.uSpec) gl.uniform1i(u.uSpec, 0);
+  if (u.uNBins) gl.uniform1f(u.uNBins, sp.nBins);
+  if (u.uTexRows) gl.uniform1f(u.uTexRows, sp.texRows);
+  if (u.uDbScale) gl.uniform1f(u.uDbScale, sp.dbScale);
+  if (u.uDb0) gl.uniform1f(u.uDb0, sp.db0);
+  if (u.uFloorDb) gl.uniform1f(u.uFloorDb, sp.floorDb);
+  if (u.uInvRange) gl.uniform1f(u.uInvRange, sp.invRange);
+  if (u.uTilt) gl.uniform1f(u.uTilt, sp.tilt);
+  if (u.uLogOct) gl.uniform1f(u.uLogOct, sp.logOct);
+  if (u.uLog2FminK) gl.uniform1f(u.uLog2FminK, sp.log2FminK);
+  if (u.uNView) gl.uniform1f(u.uNView, sp.nView);
+  if (u.uRowA) gl.uniform1f(u.uRowA, sp.rowA);
+  if (u.uFrontOff) gl.uniform1f(u.uFrontOff, sp.frontOff);
+  if (u.uStep) gl.uniform1f(u.uStep, sp.step);
+  if (u.uPool) gl.uniform1f(u.uPool, sp.pool);
+  if (u.uBodyRows) gl.uniform1f(u.uBodyRows, sp.bodyRows);
+  if (u.uKeyA) gl.uniform1f(u.uKeyA, sp.keyA);
 }
 
 // ---- screen-space strips ----
@@ -270,7 +374,7 @@ export function makeStrips(gl, maxVerts) {
 export function fillCurtain(f, out, o) {
   const mc = f.mc;
   for (let m = 0; m < mc; m++) {
-    const u = m / (mc - 1), hv = Math.min(1, f.meshH[f.frontOff + m]);
+    const u = m / (mc - 1), hv = Math.min(1, f.frontH[m]);
     out[o++] = f.edgeX[m]; out[o++] = f.edgeY[m]; out[o++] = u; out[o++] = hv;
     out[o++] = f.edgeX[m]; out[o++] = f.yBaseF;   out[o++] = u; out[o++] = 0;
   }

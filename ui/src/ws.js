@@ -41,7 +41,7 @@ let state = "connecting";
 const handlers = {};
 const errSinks = [];
 const statusSinks = [];
-const fftSinks = [];
+const spectroSinks = [];
 
 export function onMessage(type, fn) {
   handlers[type] = fn;
@@ -51,10 +51,9 @@ export function onError(fn) {
   errSinks.push(fn);
 }
 
-/** fn(Float32Array) on every accepted binary FFT frame, at arrival time
- *  (the FFT history for the 3D view must not depend on draw cadence). */
-export function onFftFrame(fn) {
-  fftSinks.push(fn);
+/** fn(ArrayBuffer) on every spectro message (binary type 2, the 3D view's stream). */
+export function onSpectro(fn) {
+  spectroSinks.push(fn);
 }
 
 /** fn(state) on every connection-state change: "connecting" | "connected" | "reconnecting". */
@@ -179,6 +178,10 @@ function onMsg(ev) {
   if (typeof ev.data !== "string") {
     // Binary -> FFT frame
     const buf = ev.data instanceof ArrayBuffer ? ev.data : null;
+    if (buf && buf.byteLength >= 1 && new DataView(buf).getUint8(0) === 2) {
+      for (const fn of spectroSinks) fn(buf);
+      return;
+    }
     if (buf) {
       const f32 = decodeFftBinary(buf);
       // Defensive: ignore stray FFT frames if the server has reported FFT as
@@ -186,7 +189,6 @@ function onMsg(ev) {
       // side panel reflect the disabled state.
       if (f32 && store.meta?.fft_enabled !== false) {
         store.fft_bins = f32;
-        for (const fn of fftSinks) fn(f32);
       }
     }
     return;

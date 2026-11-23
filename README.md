@@ -44,7 +44,7 @@ sudo apt install libportaudio2 portaudio19-dev       # Ubuntu / Debian / Raspber
 git clone https://github.com/aiXander/Realtime_PyAudio_FFT.git
 cd Realtime_PyAudio_FFT
 uv sync
-uv run audio-server --open                           # server + UI in your browser (or: make start)
+uv run audio-server --open                           # server + UI in your browser (or: make start ENGINE=python)
 ```
 
 The UI lives at **http://127.0.0.1:8766**. OSC goes to `127.0.0.1:9000` by default.

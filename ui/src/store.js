@@ -80,6 +80,18 @@ export const store = {
   fft3d_style: "cloud",
   palette: "classic",
 
+  // 3D view's spectro stream (set_spectro). `spectro_supported` is false when
+  // the server answered "unknown type" (an older audio-server); `spectro` is
+  // its last `spectro` reply, `spectro_perf` the worker's cost (5 Hz).
+  spectro_supported: null,
+  spectro: null,
+  spectro_perf: null,
+  // 3D display settings (UI-local, remembered in localStorage by controls.js).
+  fft3d_res: "balanced",
+  fft3d_range_db: 60,
+  fft3d_tilt: 3,
+  fft3d_smooth_ms: 40,
+
   // Connection state mirror ("connecting" | "connected" | "reconnecting")
   // and whether the first meta after (re)connect has arrived. Controls stay
   // disabled until `synced` so they never show stale values as live.

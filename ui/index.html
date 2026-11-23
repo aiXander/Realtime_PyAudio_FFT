@@ -142,12 +142,12 @@ What you see here is **byte-identical** to the wire payload. The white peak-hold
 Same bins are pushed as a binary frame on `ws://127.0.0.1:8765`:
 `[type=1: u8][reserved: u8][n_bins: u16 LE][float32 × n_bins LE]`. The `meta.fft_send_raw_db` flag tells you which interpretation applies.">FFT <span id="fft-title-mode" class="viz-title-mode">log-x · scaled 0..1</span></span> <span class="viz-tools"><label class="inline" title="**Enable / disable the FFT worker.**
 
-Disabling saves CPU when you only need L/M/H."><input type="checkbox" id="fft-toggle" /> enable</label> <label class="inline" title="**What you see is what's sent.** This graph is byte-identical to the `/audio/fft` OSC payload.
+Disabling saves CPU when you only need L/M/H."><input type="checkbox" id="fft-toggle" /> enable</label> <label class="inline" id="fft-raw-db-wrap" title="**What you see is what's sent.** This graph is byte-identical to the `/audio/fft` OSC payload.
 
 - **OFF** (default): server runs the same per-bin pipeline as L/M/H (smoother → asymmetric auto-scaler → soft gate → tanh → strength blend) and sends `[0..1]` post-processed values.
 - **ON**: server sends the raw wire-dB log spectrum (sentinels rendered as gaps).
 
-The server is authoritative — toggling sends `set_fft_send_raw_db`; the OSC payload switches in lockstep with the visualization."><input type="checkbox" id="fft-raw-db" /> raw dB</label> <label class="inline" title="**FFT bins** — how many log-spaced frequency bins the spectrum has (`n_fft_bins`, from `f_min` up to Nyquist).
+The server is authoritative — toggling sends `set_fft_send_raw_db`; the OSC payload switches in lockstep with the visualization."><input type="checkbox" id="fft-raw-db" /> raw dB</label> <label class="inline" id="fft-bins-wrap" title="**FFT bins** — how many log-spaced frequency bins the spectrum has (`n_fft_bins`, from `f_min` up to Nyquist).
 
 - **More bins** → finer frequency detail, bigger `/audio/fft` OSC packets (4 bytes per bin). Range `16`–`1024`.
 - **Fewer bins** → coarser, cheaper, smaller packets.
@@ -157,13 +157,39 @@ The low end can't get finer than the FFT window allows (~47 Hz per linear bin at
 **Changes the OSC payload**: downstream consumers see the new bin count on `/audio/meta`."><input type="range" id="fft-bins" class="title-slider" min="0" max="12" step="1" aria-label="FFT bin count" /> <span id="fft-bins-val"></span></label> <label class="inline" id="fft3d-style-wrap" hidden title="**3D style** — how the history is drawn.
 
 - **Cloud** — dust on a faint sea, in the palette's band colors
-- **Aurora** — curtains of light hanging from each spectrum
-- **Topo** — a survey map with contour lines, seen from above
-- **Synthwave** — neon wireframe rolling toward a striped sun
-- **Engraving** — ink hatching on warm paper
-- **Embers** — peaks throw sparks that drift off into the dark
+- **Topo** — a survey map with contour lines and hill shading, seen from above
+- **Spectrogram** — a spectrogram sheet in shallow perspective, lightness-ordered colormap
+- **Partials** — every spectral peak traced as a line through time: harmonics, formants, glides
 
-*Visual only — does not affect DSP or the OSC payload.*"><select id="fft3d-style" class="title-select" aria-label="3D style"></select></label> <span class="seg" role="radiogroup" aria-label="FFT view" title="**2D / 3D view.**
+The 3D view has its own analysis (the spectro stream): a frame every ~5 ms, 1024 log bins from 20 Hz to 20 kHz, long windows in the bass and short ones in the treble, in dB, averaged over the **Smooth** time. Every pixel reads that data directly.
+
+*Visual only — does not affect DSP or the OSC payload.*"><select id="fft3d-style" class="title-select" aria-label="3D style"></select></label> <span id="fft3d-tools" hidden><label class="inline" title="**Resolution** — the time ↔ pitch trade-off of the 3D view's analysis.
+
+Every frequency gets the window length that suits it (long in the bass, short in the treble); this shifts the whole ladder:
+
+- **Time** — sharpest onsets and rhythm; pitch blurs (≈ 1/5 octave peaks).
+- **Balanced** — harmonics of a note resolve, kicks stay crisp.
+- **Pitch** — splits a semitone above ~200 Hz; onsets smear in the bass and mids.
+
+Server-side, shared by every open 3D view. *Visual only — does not affect DSP or the OSC payload.*"><select id="fft3d-res" class="title-select" aria-label="3D resolution"><option value="time">time</option><option value="balanced">balanced</option><option value="pitch">pitch</option></select></label> <label class="inline" title="**Smooth** — how long each frequency's power is averaged before it is drawn.
+
+The raw analysis re-measures every 5 ms. Anything noise-like (hats, reverb, air, the mic's own hiss) then lands on a new random level each time: speckle, and shimmer as the picture scrolls. Averaging steadies it; a steady tone keeps its level either way.
+
+- **Off**: the raw frames. Sharpest in time, noisiest.
+- **20 ms**: light. Fast hats stay apart.
+- **40 ms**: calm surface, onsets still rise within a frame or two.
+- **80 ms**: calmest; fast rhythms start to merge.
+
+Applies to new frames. *Visual only.*"><select id="fft3d-smooth" class="title-select" aria-label="3D smoothing"><option value="0">raw</option><option value="20">20 ms</option><option value="40">40 ms</option><option value="80">80 ms</option></select></label> <label class="inline" title="**Range** — how many dB below the top still show above the floor. The top is the loudest level of the last 20 s, so it stands still while the music keeps its level and only moves when it gets louder or stays quieter.
+
+- **Small** (40 dB): only the strong components, high contrast.
+- **Large** (80–100 dB): quiet detail, reverb tails and noise too.
+
+Re-maps the whole history at once. *Visual only.*"><select id="fft3d-range" class="title-select" aria-label="3D dB range"><option value="40">40 dB</option><option value="60">60 dB</option><option value="80">80 dB</option><option value="100">100 dB</option></select></label> <label class="inline" title="**Tilt** — dB per octave added around 1 kHz.
+
+The analysis is constant-Q, so pink noise (about the long-term spectrum of music) reads flat at **0**. A positive tilt brightens the treble: cymbals, sibilance and air.
+
+Re-maps the whole history at once. *Visual only.*"><select id="fft3d-tilt" class="title-select" aria-label="3D tilt"><option value="-3">−3 dB/oct</option><option value="0">0 dB/oct</option><option value="1.5">+1.5 dB/oct</option><option value="3">+3 dB/oct</option><option value="4.5">+4.5 dB/oct</option></select></label></span> <span class="seg" role="radiogroup" aria-label="FFT view" title="**2D / 3D view.**
 
 - **2D**: spectrum with peak-hold ticks and the draggable band overlay.
 - **3D**: history "ocean" — the newest spectrum is the front wave; older spectra recede toward the horizon, shrinking and fading. Depth = the **History** slider in the top bar. Band edges are then edited from the side panel.

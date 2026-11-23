@@ -88,9 +88,25 @@ def _build_fft_packet(n_bins: int) -> tuple[bytearray, np.ndarray, int]:
     return buf, payload_view, payload_offset
 
 
+def _resolve(d: OscDest) -> OscDest | None:
+    """`d` with its host as an IPv4 literal, or None if it doesn't resolve."""
+    try:
+        ip = socket.getaddrinfo(d.host, int(d.port), socket.AF_INET, socket.SOCK_DGRAM)[0][4][0]
+    except (OSError, ValueError) as e:
+        log.warning("osc destination %s:%s does not resolve (%s); skipped until restart", d.host, d.port, e)
+        return None
+    if ip != d.host:
+        log.info("osc destination %s:%s resolved to %s", d.host, d.port, ip)
+    return OscDest(host=ip, port=int(d.port))
+
+
 class OscSender:
     def __init__(self, destinations: list[OscDest]):
-        self._dests = list(destinations)
+        # Resolve host names once, here: `sendto` with a name would run
+        # getaddrinfo on every packet on the DSP worker, and an absent
+        # `.local` name blocks ~5 s per lookup. An unresolvable destination
+        # is skipped (until restart) instead of stopping the server.
+        self._dests = [r for r in map(_resolve, destinations) if r is not None]
         self._clients = [SimpleUDPClient(d.host, d.port) for d in self._dests]
         # Per-block hot path: bypass pythonosc (which builds a fresh
         # OscMessage + bytes object per call) by mutating a single

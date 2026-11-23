@@ -14,6 +14,7 @@ pub mod fft_post;
 pub mod filters;
 pub mod math;
 pub mod onset;
+pub mod spectro;
 
 use features::{AutoScaler, AutoScalerParams, ExpSmoother, LevelMeter, block_rms};
 use fft::{FftAnalyzer, FftGeometry};

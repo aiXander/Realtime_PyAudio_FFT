@@ -10,6 +10,7 @@ use crate::osc::OscSender;
 use crate::persist::Persister;
 use crate::ring::{SlotRing, ring_slots_for};
 use crate::shared::Shared;
+use crate::spectro::SpectroCtl;
 use crate::workers::{DspCmd, DspCore, FftCmd, Workers};
 use crate::ws::{Client, Event};
 use axum::extract::ws::{Message, Utf8Bytes};
@@ -135,6 +136,8 @@ pub struct WsHub {
     feat_seq: u64,
     fft_seq: u64,
     onset_counts: [u64; 3],
+    /// Clients subscribed to the spectro stream (`set_spectro`).
+    spectro_subs: std::collections::HashSet<u64>,
 }
 
 impl WsHub {
@@ -149,6 +152,7 @@ impl WsHub {
             feat_seq: 0,
             fft_seq: 0,
             onset_counts: [0; 3],
+            spectro_subs: Default::default(),
         }
     }
 
@@ -190,6 +194,8 @@ pub struct App {
     ui_root: PathBuf,
     pub shared: Arc<Shared>,
     pub workers: Workers,
+    pub spectro: Arc<SpectroCtl>,
+    spectro_join: Option<std::thread::JoinHandle<()>>,
     wake: WakeTargets,
     pub stream: Option<StreamHandle>,
     active_device_name: Option<String>,
@@ -276,6 +282,9 @@ impl App {
             .map_err(|e| StartupError::new(format!("could not start worker threads: {e}"), ""))?;
         let _ = wake.set([workers.dsp_thread.clone(), workers.fft_thread.clone()]);
         workers.collect_garbage();
+        let spectro = Arc::new(SpectroCtl::new(sr, bs));
+        let spectro_join = crate::spectro::spawn(shared.clone(), spectro.clone())
+            .map_err(|e| StartupError::new(format!("could not start the spectro thread: {e}"), ""))?;
         // After the last startup failure point: the thread only ends on
         // `shared.stop`, which the workers' shutdown sets.
         crate::osc::spawn_resolver(shared.clone());
@@ -291,6 +300,8 @@ impl App {
             ui_root,
             shared,
             workers,
+            spectro,
+            spectro_join: Some(spectro_join),
             wake,
             active_device_name: Some(stream.device_name.clone()),
             stream: Some(stream),
@@ -506,8 +517,10 @@ impl App {
             Event::Disconnect(id) => {
                 if let Some(ws) = self.ws.as_mut() {
                     ws.clients.retain(|c| c.id != id);
+                    ws.spectro_subs.remove(&id);
                     tracing::info!("ws client disconnected (n={})", ws.clients.len());
                 }
+                self.sync_spectro();
             }
             Event::Message(id, text) => {
                 let Some(client) = self.ws.as_ref().and_then(|w| w.client(id)) else { return };
@@ -570,6 +583,12 @@ impl App {
                 client.put_control_text(&to_text(&self.meta_message()));
                 self.ws_wake();
             }
+            self.sync_spectro();
+            return false;
+        }
+        if msg.get("type") == Some(&Value::from("set_spectro")) {
+            let reply = self.set_spectro(client.id, &msg);
+            client.put_control_text(&to_text(&reply));
             return false;
         }
         // A handler panic must not take the server down: the reference's
@@ -589,6 +608,51 @@ impl App {
             }
         }
         false
+    }
+
+    /// `set_spectro {enabled, n_bins?, res?}` (per connection, Rust only):
+    /// subscribe / unsubscribe this client to the 3D view's spectro stream.
+    /// n_bins and res are shared by every subscriber (the last request wins).
+    fn set_spectro(&mut self, id: u64, msg: &Value) -> Value {
+        let on = crate::py::get_bool(msg, "enabled", true);
+        let mut req = self.spectro.request();
+        if let Some(n) = msg.get("n_bins").filter(|v| !v.is_null()) {
+            match n.as_u64() {
+                Some(n) => req.n_bins = (n as usize).clamp(crate::spectro::MIN_BINS, crate::spectro::MAX_BINS),
+                None => return json!({"type": "error", "reason": "set_spectro: n_bins must be an int"}),
+            }
+        }
+        if let Some(r) = msg.get("res").filter(|v| !v.is_null()) {
+            match r.as_str().and_then(crate::spectro::Res::parse) {
+                Some(r) => req.res = r,
+                None => return json!({"type": "error", "reason": "set_spectro: res must be time, balanced or pitch"}),
+            }
+        }
+        if let Some(ws) = self.ws.as_mut() {
+            if on {
+                ws.spectro_subs.insert(id);
+            } else {
+                ws.spectro_subs.remove(&id);
+            }
+        }
+        if on {
+            self.spectro.set_request(req);
+        }
+        self.sync_spectro();
+        self.spectro.info(on)
+    }
+
+    /// The spectro thread runs while any streaming client is subscribed.
+    fn sync_spectro(&mut self) {
+        let on = self.ws.as_ref().is_some_and(|ws| {
+            ws.clients.iter().any(|c| c.streaming() && ws.spectro_subs.contains(&c.id))
+        });
+        if on != self.spectro.enabled() {
+            self.spectro.set_enabled(on);
+            if let Some(t) = self.spectro_join.as_ref() {
+                t.thread().unpark();
+            }
+        }
     }
 
     // ------------------------------------------------------------- WS hub
@@ -703,6 +767,13 @@ impl App {
                 }
             }
         }
+        if let Some(bytes) = self.spectro.take_message() {
+            let ws = self.ws.as_ref().unwrap_or_else(|| unreachable!());
+            let payload = bytes_from(bytes);
+            for c in streamers.iter().filter(|c| ws.spectro_subs.contains(&c.id)) {
+                c.put_stream(Message::Binary(payload.clone()));
+            }
+        }
         self.shared.perf.ws.record(crate::shared::now_ns() - t_start);
     }
 
@@ -725,6 +796,15 @@ impl App {
         let text = to_text(&self.server_status());
         for c in &streamers {
             c.put_status(&text);
+        }
+        // The spectro thread's cost, for subscribers' perf panels (a separate
+        // message: server_status keeps the reference's shape).
+        if self.spectro.enabled() {
+            let ws = self.ws.as_ref().unwrap_or_else(|| unreachable!());
+            let text = to_text(&self.spectro.perf_message());
+            for c in streamers.iter().filter(|c| ws.spectro_subs.contains(&c.id)) {
+                c.put_control_text(&text);
+            }
         }
     }
 
@@ -1133,6 +1213,7 @@ impl App {
             self.persister.request(true);
         }
         self.pipeline_sr = sr;
+        self.spectro.set_sr(sr);
         let params = engine_params(&self.cfg, sr);
         let fft = FftChain::new(&params)?;
         let chain = DspChain::new(&params);
@@ -1313,6 +1394,16 @@ impl App {
         self.teardown_stream();
         tracing::info!("shutdown: stopping workers");
         self.workers.stop(&self.shared);
+        if let Some(t) = self.spectro_join.take() {
+            t.thread().unpark();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !t.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if t.is_finished() {
+                let _ = t.join();
+            }
+        }
         if let Some(ws) = &self.ws {
             for c in &ws.clients {
                 c.put_control(Message::Close(None));

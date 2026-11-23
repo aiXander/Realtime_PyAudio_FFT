@@ -38,6 +38,7 @@ from .dsp.fft import FFTWorker
 from .dsp.fft_postprocess import FFTPostProcessor
 from .dsp.filters import FilterBank, clamp_band_edges
 from .dsp.onset import OnsetTracker
+from .dsp.spectro import SpectroService
 from .dsp.worker import DSPWorker
 from .io.http_server import StaticHTTPServer
 from .io.osc_publisher import OscPublisher
@@ -469,6 +470,8 @@ class App:
         cfg = self.cfg
         clamped = self._clamp_cfg_bands_for_sr(sr)
         self._pipeline_sr = sr
+        if getattr(self, "spectro", None) is not None:
+            self.spectro.set_sr(sr)
         self.filter_bank = FilterBank(
             sr=sr,
             bands=self._bands_tuple_dict(),
@@ -637,6 +640,10 @@ class App:
         self._build_fft_pipeline(self.stream.samplerate)
         self.dsp_worker.start()
         self.fft_worker.start()
+        # 3D view's spectrogram: idles until a WS client subscribes (set_spectro).
+        self.spectro = SpectroService(self.ring, self.stream.samplerate, cfg.audio.blocksize,
+                                      V.MAX_FFT_WINDOW)
+        self.spectro.start()
 
         # Send the OSC meta packet now that the sender is wired (resent at
         # 1 Hz + on change by _osc_meta_loop).
@@ -666,6 +673,7 @@ class App:
                 get_master_gain=lambda: self.cfg.autoscale.master_gain,
                 dispatcher_handle=dispatcher,
                 perf_ring=self.perf_ws,
+                spectro=self.spectro,
             )
 
             # Static HTTP server for the UI (ES modules need http://, not file://).
@@ -1095,6 +1103,8 @@ class App:
         for w in (self.dsp_worker, self.fft_worker):
             if w is not None and w.is_alive():
                 w.join(timeout=1.0)
+        if getattr(self, "spectro", None) is not None:
+            self.spectro.stop()
         if self.ws is not None:
             await self.ws.stop()
         if self.http is not None:

@@ -67,7 +67,7 @@ This is a map. **Exact message shapes** are the captured instances in `testdata/
 - **Per-client outbound lanes**, drained in this priority:
   1. **control** — an unbounded FIFO. More than 1024 queued closes the client with code 1008.
   2. **status** — latest-only.
-  3. **stream** — snapshots + binary FFT; drop-oldest, max 4.
+  3. **stream** — snapshots + binary FFT + spectro batches; drop-oldest, max 4.
 - **Broadcast loop** at `snapshot_hz`, with deadline scheduling (resync if more than one period late):
   - **meta:** at most one coalesced meta per tick, to every client, when dirty.
   - **snapshot:** only when the FeatureStore `seq` changed. Fields `low/mid/high` = scaled × master_gain; `*_raw` = smoother values (no gain); `*_onset` = 1 if that band's monotonic onset counter changed since the last snapshot; `bpm`; `level` = the same value as `/audio/level`; `t` = server ms since WS start.
@@ -76,6 +76,10 @@ This is a map. **Exact message shapes** are the captured instances in `testdata/
 - **Idle:** with no client streaming, the broadcast loop sleeps until a client resumes or meta goes dirty. On resume the onset counters are re-baselined, so stale onsets don't flash.
 - **`set_stream {enabled}`** is handled per connection in `WSServer._on_message`, not by the dispatcher. Disable drops the client's queued stream and status. Enable re-sends meta.
 - **Binary FFT frame:** `[1:u8][0:u8][n_bins:u16 LE][f32 LE × n_bins]`.
+- **Spectro stream** (the 3D view's analysis; [`fft_3d_styles.md`](fft_3d_styles.md)), in both engines but outside the reference contract: it isn't in the wire goldens, and `meta` / `server_status` don't mention it, so their key shapes stay comparable.
+  - **`set_spectro {enabled, n_bins?, res?}`**, handled per connection before the dispatcher, like `set_stream`. `n_bins` clamps to 64–2048 (default 1024), `res` ∈ `time` / `balanced` / `pitch`. These are shared by all subscribers, last request wins. Bad values get an `error` only. The reply is a targeted `{type:"spectro", enabled, n_bins, res, hop_s, f_min, f_max, windows, sr}`. The worker runs while any *streaming* client is subscribed. A server without it answers `unknown type 'set_spectro'`, which the UI treats as "unsupported", not an error toast.
+  - **Binary type 2**, one per broadcast tick to subscribers, all frames since the last tick: `[2:u8][1:u8 ver][n_bins:u16][n_frames:u16][0:u16][first_seq:u32][hop_s:f32][f_min:f32][f_max:f32][db0:f32][db_step:f32]` + `u8 × n_bins × n_frames` (frame-major, dB = db0 + q·db_step; −127.5 dBFS + 0.5 dB steps). `seq` counts hops. A gap in `seq` means frames were skipped (a backlog skip or a dropped stream message). Frames are raw, with no smoothing over time; the UI averages them in power before drawing.
+  - **`{type:"spectro_perf", avg_ms, p95_ms, load_pct}`** on the control lane at 5 Hz to subscribers while the worker runs.
 - **Errors** are `{"type":"error","reason":…}`. Malformed JSON, a missing `type`, and an unknown `type` get **only** the error. A handler `ValueError` (validation, failed device switch) gets the error **plus an immediate targeted meta**, so the UI snaps back, and meta is marked dirty.
 
 ### Inbound messages (`Dispatcher._handlers` + `set_stream`)
@@ -103,6 +107,7 @@ Every state change marks meta dirty, so a coalesced broadcast goes out next tick
 | `save_preset` | name | write full snapshot | targeted `presets` |
 | `load_preset` | name | section-by-section apply (above) | commit |
 | `set_stream` | enabled | per-connection pause/resume | none (resume → meta) |
+| `set_spectro` | enabled, n_bins?, res? | per-connection spectro subscription (above) | targeted `spectro` |
 
 ### Outbound messages
 
@@ -121,8 +126,8 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
 
 - **Transport:** UDP to every `osc.destinations` entry, from one non-blocking socket, IPv4 only. Every packet goes to every destination. Send errors are swallowed and logged at DEBUG. Byte layouts: `testdata/golden/wire/osc_*.bin`.
 - **Destination hosts.** An IPv4 literal is used as-is and never looked up. A host name (**Rust engine only**) is resolved on its own thread (`osc-resolve`), first right after start, then every 5 s until the name has an address and once a minute after that (no lookup every few seconds during a show): startup never waits for a name or fails on one; until it resolves that destination is skipped; a later failed lookup keeps the last address; an address change is picked up within a minute. Logged on change only (one warning when a name starts failing, one info line when it resolves or moves). Never resolve on a worker thread or the control loop: an absent `.local` name blocks `getaddrinfo` for 5 s on macOS. Pinned by `osc::tests::late_resolved_destination_starts_receiving`.
-  - **The Python reference needs literal IPs.** It resolves in the `OscSender` constructor (an unknown name stops the server from starting) and again on every packet on the DSP worker (a host that disappears blocks each send for 5 s).
-  - Destinations are set by hand in `configs/main.yaml` while the server is stopped (the persister rewrites the file from memory). No WS message or UI field. `configs/*.yaml` is gitignored except the example, because presets snapshot the destinations too: never write a real host into the example, a doc or a test.
+  - **The Python reference resolves once, at startup.** The `OscSender` constructor turns each name into an IPv4 literal (an absent `.local` name delays startup ~5 s); a name that doesn't resolve is logged as a warning and skipped until restart, and a resolved address is never refreshed. Hot-path sends only ever see literals.
+  - Destinations are set by hand in `configs/main.yaml` while the server is stopped; `main.yaml` stays localhost-only, and a setup with extra hosts (the Pi) is its own file, `configs/pi.yaml`, run with `make start CONFIG=pi`. Presets don't carry destinations into the live config (the persister rewrites the file from memory). No WS message or UI field. `configs/*.yaml` is gitignored except the example, because presets snapshot the destinations too: never write a real host into the example, a doc or a test.
 
   | address | args | when |
   |---|---|---|

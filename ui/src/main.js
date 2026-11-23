@@ -1,6 +1,6 @@
 // Entry point. Wires WS handlers -> store, sets up controls, runs RAF loop.
 
-import { connect, send, onMessage, onError, onStatus, onFftFrame, retryNow, snapshotRate, resetSnapshotRate } from "./ws.js";
+import { connect, send, onMessage, onError, onStatus, onSpectro, retryNow, snapshotRate, resetSnapshotRate } from "./ws.js";
 import { store, avgRing, p95Ring, clearLive } from "./store.js";
 import { setupControls } from "./controls.js";
 import { makeLines } from "./viz/lmh_lines.js";
@@ -8,6 +8,7 @@ import { makeBars }  from "./viz/lmh_bars.js";
 import { makeScene } from "./viz/lmh_scene.js";
 import { makeFft }   from "./viz/fft_2d.js";
 import { makeFft3d } from "./viz/fft_3d.js";
+import { decodeSpectro } from "./viz/fft3d_data.js";
 import { STYLES } from "./viz/fft3d_styles/index.js";
 import { setupTooltips } from "./tooltips.js";
 import { setupLayout, applyLayout, setupFullscreen } from "./layout.js";
@@ -16,23 +17,49 @@ import { toast } from "./toast.js";
 
 setupSidebar();
 setupLayout();
-const controls = setupControls();
+const controls = setupControls({ on3dChange: () => { apply3dDisplay(); syncSpectro(); updateFftTitle(); } });
 
 const lines = makeLines(document.getElementById("viz-lines"));
 const bars  = makeBars(document.getElementById("viz-bars"));
 const scene = makeScene(document.getElementById("viz-scene"));
 // The FFT card has one canvas and two renderers; store.fft_view picks which
-// one draws. The 3D one records history from every frame on arrival.
+// one draws. The 2D one shows the LED-oriented FFT (binary type 1); the 3D
+// one has its own stream (spectro, binary type 2), recorded on arrival.
 const fftCanvas = document.getElementById("viz-fft");
 const fft   = makeFft(fftCanvas);
 const fft3d = makeFft3d(fftCanvas);
-onFftFrame((bins) => fft3d.push(bins));
+onSpectro((buf) => { const m = decodeSpectro(buf); if (m) fft3d.push(m); });
+function apply3dDisplay() {
+  fft3d.setDisplay({ rangeDb: store.fft3d_range_db, tiltDbOct: store.fft3d_tilt, integrateMs: store.fft3d_smooth_ms });
+}
+apply3dDisplay();
+
+// The 3D view's spectro stream runs on the server only while some client
+// subscribes. Subscribe while the 3D view shows live data; the server forgets
+// subscriptions on disconnect, so `spectroSent` resets then.
+let spectroSent = "";   // last state sent: "" = nothing (fresh connection), "off", "on|<res>"
+function syncSpectro() {
+  const want = store.conn === "connected" && store.synced && store.fft_view === "3d"
+    && !!store.meta.fft_enabled && !document.hidden && store.spectro_supported !== false;
+  const key = want ? `on|${store.fft3d_res}` : "off";
+  if (key === spectroSent || (!want && spectroSent === "")) return;
+  if (send({ type: "set_spectro", enabled: want, n_bins: 1024, res: store.fft3d_res })) spectroSent = key;
+}
+onMessage("spectro", (m) => {
+  store.spectro = m;
+  store.spectro_supported = true;
+  if (!m.enabled) store.spectro_perf = null;
+});
+onMessage("spectro_perf", (m) => { store.spectro_perf = { ...m, t: performance.now() }; });
 setupFullscreen("fft", document.getElementById("fft-fullscreen"));
 
 const bpmEl = document.getElementById("bpm-readout");
 const bpmVal = bpmEl ? bpmEl.querySelector(".bpm-value") : null;
 const fftTitleMode = document.getElementById("fft-title-mode");
 const fft3dStyleWrap = document.getElementById("fft3d-style-wrap");
+const fft3dTools = document.getElementById("fft3d-tools");
+const fftRawDbWrap = document.getElementById("fft-raw-db-wrap");
+const fftBinsWrap = document.getElementById("fft-bins-wrap");
 const bandpassFs = document.getElementById("fieldset-bandpass");
 const uiFpsEl = document.getElementById("ui-fps");
 const srvFpsEl = document.getElementById("server-fps");
@@ -74,6 +101,8 @@ onStatus((state) => {
     return;
   }
   clearTimeout(syncFallback);
+  spectroSent = "";
+  store.spectro_perf = null;
   setAudioStalled(false, false);
   const wasSynced = store.synced;
   store.synced = false;
@@ -103,6 +132,7 @@ setLive(false); // until the first meta arrives
 document.addEventListener("visibilitychange", () => {
   send({ type: "set_stream", enabled: !document.hidden });
   if (!document.hidden) { fft.reset(); fft3d.reset(); }
+  syncSpectro();
 });
 
 // Server's audio watchdog: no input blocks (mic unplugged / driver hung).
@@ -141,7 +171,7 @@ onMessage("snapshot", (m) => {
   }
 });
 
-let lastFftEnabled = null, lastRawDb = null, lastFftView = null, lastStyle = null;
+let lastFftEnabled = null, lastFftView = null;
 onMessage("meta", (m) => {
   store.meta = { ...store.meta, ...m };
   if (m.fft_db_floor !== undefined) store.fft_db_floor = m.fft_db_floor;
@@ -164,16 +194,13 @@ onMessage("meta", (m) => {
     fft.setInteractive(canvasEdits);
     if (bandpassFs) bandpassFs.hidden = canvasEdits;
   }
-  const rawDb = !!store.meta.fft_send_raw_db;
-  const style = store.fft3d_style;
-  if ((rawDb !== lastRawDb || view !== lastFftView || style !== lastStyle) && fftTitleMode) {
-    lastRawDb = rawDb;
-    lastStyle = style;
-    const scale = rawDb ? "raw dB" : "scaled 0..1";
-    const label = (STYLES[style]?.label || style).toLowerCase();
-    fftTitleMode.textContent = view === "3d" ? `3D · ${label} · ${scale}` : `log-x · ${scale}`;
-  }
+  updateFftTitle();
+  // The raw-dB and bin-count controls shape the LED FFT the 2D view shows;
+  // the 3D view has its own analysis and its own controls.
   if (fft3dStyleWrap) fft3dStyleWrap.hidden = view !== "3d";
+  if (fft3dTools) fft3dTools.hidden = view !== "3d";
+  if (fftRawDbWrap) fftRawDbWrap.hidden = view === "3d";
+  if (fftBinsWrap) fftBinsWrap.hidden = view === "3d";
   if (view !== lastFftView) {
     lastFftView = view;
     fftCanvas.setAttribute("aria-label", view === "3d" ? "FFT spectrum history, 3D" : "FFT spectrum");
@@ -183,7 +210,17 @@ onMessage("meta", (m) => {
     clearTimeout(syncFallback);
     setLive(true);
   }
+  syncSpectro();
 });
+
+let lastTitle = "";
+function updateFftTitle() {
+  if (!fftTitleMode) return;
+  const scale = store.meta.fft_send_raw_db ? "raw dB" : "scaled 0..1";
+  const label = (STYLES[store.fft3d_style]?.label || store.fft3d_style).toLowerCase();
+  const t = store.fft_view === "3d" ? `3D · ${label} · ${store.fft3d_res}` : `log-x · ${scale}`;
+  if (t !== lastTitle) fftTitleMode.textContent = lastTitle = t;
+}
 
 onMessage("devices", (m) => {
   store.devices = m.items || [];
@@ -215,6 +252,11 @@ function setCounter(el, v) {
 
 const errLog = document.getElementById("err-log");
 onError((reason) => {
+  // An audio-server without the spectro stream: the 3D view says so instead.
+  if (/unknown type .set_spectro/.test(reason)) {
+    store.spectro_supported = false;
+    return;
+  }
   const ts = new Date().toLocaleTimeString();
   errLog.textContent = `[${ts}] ${reason}\n` + errLog.textContent;
   if (errLog.textContent.length > 4000) errLog.textContent = errLog.textContent.slice(0, 4000);
@@ -263,6 +305,13 @@ const PERF_ROWS = [
       "Numbers are `avg / p95 ms`. Bar is scaled against one snapshot interval (`1 / ws_snapshot_hz`).",
     ].join("\n") },
 ];
+// The spectro worker (the 3D view's analysis) reports its own cost in a
+// separate message while a 3D view is subscribed.
+const SPECTRO_ROW = { key: "spectro", label: "spectro", tooltip: [
+    "**Spectro worker cost** (the 3D view's analysis). Time per hop (~5 ms) for the window ladder: read the ring, 5 zero-padded Hann FFTs (512 … 8192 samples), log-bin and quantise.",
+    "",
+    "Runs only while a 3D view is open and the FFT is enabled. Numbers are `avg / p95 ms`. Bar is scaled against one hop period.",
+  ].join("\n") };
 const VIZ_NAMES = ["lines", "bars", "scene", "fft", "fft_gpu"];
 const BROWSER_ROWS = [
   { key: "raf", tooltip: [
@@ -285,6 +334,7 @@ const perfContainer = document.getElementById("perf-rows");
 function ensurePerfRows() {
   if (perfContainer.children.length > 0) return;
   for (const r of PERF_ROWS) addPerfRow(r.key, r.label, r.tooltip);
+  addPerfRow(SPECTRO_ROW.key, SPECTRO_ROW.label, SPECTRO_ROW.tooltip);
   for (const r of BROWSER_ROWS) addPerfRow("b_" + r.key, r.key, r.tooltip);
 }
 
@@ -323,6 +373,9 @@ function renderPerfPanel() {
       setPerfRow(r.key, stage.avg_ms || 0, stage.p95_ms || 0, stage.load_pct || 0, fftDisabled);
     }
   }
+  const sp = store.spectro_perf;
+  const spOn = !!sp && performance.now() - sp.t < 1500;
+  setPerfRow("spectro", spOn ? sp.avg_ms : 0, spOn ? sp.p95_ms : 0, spOn ? sp.load_pct : 0, !spOn);
   // Browser side. raf_ms here is the inter-DRAW interval (we throttle draws
   // to the UI refresh rate). Compare against the target period rather than a
   // fixed 60 fps budget so reducing the refresh rate doesn't light the bar red.
@@ -406,7 +459,7 @@ function frame(now) {
       lines.draw();
       bars.draw();
       scene.draw();
-      if (store.fft_view === "3d") fft3d.draw();
+      if (store.fft_view === "3d") fft3d.draw(now);
       else { fft3d.hide(); fft.draw(); }
     }
   }

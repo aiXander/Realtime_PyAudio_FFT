@@ -9,7 +9,7 @@
 
 import { theme, PALETTES, hexRgb } from "../../colors.js";
 import {
-  glf, PROJ_FN, HASH_FN, SURF_VS, FLAT_VS, bandFn, program, setCommonUniforms,
+  glf, PROJ_FN, HASH_FN, SURF_VS, SPEC_FN, SPEC_FS, GRID_FN, FLAT_VS, bandFn, program, setCommonUniforms,
   makeStrips, fillCurtain, fillRim, disposeAll,
 } from "./common.js";
 
@@ -21,7 +21,8 @@ const SURFACE_ALPHA = 0.5;     // matte surface opacity (the "body" under the po
 const POINT_PX = 1.4;          // point size at the front, CSS px (squares)
 const POINT_GAIN = 0.9;        // point brightness
 const POINT_JITTER = 1.0;      // point position noise, fraction of the grid spacing (frequency and time)
-const POINT_COPIES = 2;        // points per mesh vertex, each jittered independently
+const POINT_COPIES = 2;        // points per grid vertex, each jittered independently
+const GRID = { cols: 384, rows: 200 };   // dust density (the surface under it shades per pixel)
 const RIM_PX = 1.3;            // front-edge rim width, CSS px
 
 const FOG_FN = `
@@ -32,15 +33,16 @@ float fade(float z) { return 1.0 - smoothstep(${glf(FADE_START)}, 1.0, z); }`;
 // Matte surface: soft diffuse light, dark floor → band color with height.
 const SURF_FS = `#version 300 es
 precision highp float;
-in float vU, vH, vZ;
-in vec3 vN;
+in float vU, vZ, vT;
 out vec4 o;
+${SPEC_FS}
 ${bandFn(DESATURATE)}
 ${FOG_FN}
 void main() {
   vec3 base = band(vU);
-  float h = clamp(vH, 0.0, 1.0);
-  vec3 n = normalize(vN);
+  float h; vec3 n;
+  specSurface(vU, vT, h, n);
+  n = normalize(n);
   float diff = 0.55 + 0.45 * max(dot(n, normalize(vec3(-0.4, 0.9, -0.35))), 0.0);
   vec3 col = base * (0.06 + 0.6 * smoothstep(0.0, 0.9, h)) * diff;
   col = mix(col, uBg, fog(vZ));
@@ -48,30 +50,32 @@ void main() {
   o = vec4(col * a, a);
 }`;
 
-// Points ride the surface vertices, jittered by a stable per-point hash
-// keyed on (column, history row, copy) so the noise travels with the data.
+// Points ride the grid vertices, jittered by a stable per-point hash keyed
+// on (column, grid row, copy) so the noise travels with the data; each reads
+// its own height from the texture at its jittered spot.
 const POINT_VS = `#version 300 es
-layout(location = 0) in float aH;
-layout(location = 1) in float aZ;
-layout(location = 3) in float aKey;
-uniform int uCols;
 ${PROJ_FN}
 ${HASH_FN}
+${SPEC_FN}
+${GRID_FN}
 out float vU, vH, vZ, vRand;
 void main() {
+  float u, row, z, key, pool;
+  gridVertex(gl_VertexID, u, row, z, key, pool);
   int col = gl_VertexID % uCols;
-  float u = float(col) / float(uCols - 1);
-  uint k = hash(uint(col) * 0x9E3779B1u ^ hash(uint(aKey) * 4u + uint(gl_InstanceID) + 0x632BE5ABu));
+  uint k = hash(uint(col) * 0x9E3779B1u ^ hash(uint(key) * 4u + uint(gl_InstanceID) + 0x632BE5ABu));
   float r1 = float(k & 0xFFFFu) / 65535.0, r2 = float(k >> 16) / 65535.0;
   u += (r1 - 0.5) * ${glf(POINT_JITTER)} / float(uCols - 1);
-  float zz = max(0.0, aZ + (r2 - 0.5) * ${glf(POINT_JITTER)} * uRowDz);
+  float dz = (r2 - 0.5) * ${glf(POINT_JITTER)} * uRowDz;
+  float zz = max(0.0, z + dz);
+  float h = specH(u, row - dz * uNView);
   vRand = float(hash(k) & 0xFFFFu) / 65535.0;
   float s;
-  vec2 px = toPx(u, aH, zz, s);
+  vec2 px = toPx(u, h, zz, s);
   gl_Position = clipPos(px, s);
   gl_Position.z -= 0.004 * gl_Position.w;   // sit just in front of the surface they ride on
   gl_PointSize = max(1.0, ${glf(POINT_PX)} * uDpr * sqrt(s));
-  vU = u; vH = aH; vZ = zz;
+  vU = u; vH = h; vZ = zz;
 }`;
 
 // Points: additive dust, brighter and whiter with height, per-point random brightness.
@@ -111,6 +115,7 @@ export default {
   name: "cloud",
   label: "Cloud",
   description: "Dust cloud on a faint matte sea, in the palette's band colors",
+  grid: GRID,
   background: () => theme.bg,
   text: { axis: "#7a8088", dim: "#5a6068" },
 
@@ -129,7 +134,7 @@ export default {
     const surf = program(gl, SURF_VS, SURF_FS);
     const points = program(gl, POINT_VS, POINT_FS);
     const flat = program(gl, FLAT_VS, FLAT_FS);
-    const strips = makeStrips(gl, 4 * 384);
+    const strips = makeStrips(gl, 4 * 2048);
     return {
       render(f) {
         gl.enable(gl.BLEND);

@@ -12,6 +12,7 @@ mod priority;
 mod py;
 mod ring;
 mod shared;
+mod spectro;
 mod validate;
 mod workers;
 mod ws;

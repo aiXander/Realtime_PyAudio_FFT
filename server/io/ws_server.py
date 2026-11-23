@@ -42,7 +42,7 @@ class _Client:
     it then gets control messages only — no snapshots, FFT or status.
     """
     __slots__ = ("ws", "control", "status", "stream", "wake", "sender_task", "closing",
-                 "streaming")
+                 "streaming", "spectro")
 
     def __init__(self, ws):
         self.ws = ws
@@ -53,6 +53,7 @@ class _Client:
         self.sender_task = None
         self.closing = False
         self.streaming = True
+        self.spectro = False      # subscribed to the 3D view's spectro stream (set_spectro)
 
     def put_control(self, msg) -> None:
         if self.closing:
@@ -94,7 +95,8 @@ class WSServer:
                  get_server_status, get_fft_enabled, get_fft_send_raw_db,
                  get_master_gain,
                  dispatcher_handle,
-                 perf_ring: np.ndarray | None = None):
+                 perf_ring: np.ndarray | None = None,
+                 spectro=None):
         self.host = host
         self.port = port
         self._snapshot_hz = max(15, min(240, int(snapshot_hz)))
@@ -108,6 +110,7 @@ class WSServer:
         self.get_fft_send_raw_db = get_fft_send_raw_db
         self.get_master_gain = get_master_gain
         self.dispatcher_handle = dispatcher_handle
+        self.spectro = spectro    # server.dsp.spectro.SpectroService, or None
         self.clients: set[_Client] = set()
         self._server = None
         self._broadcast_task: asyncio.Task | None = None
@@ -198,6 +201,7 @@ class WSServer:
             log.warning("ws client error: %s", e)
         finally:
             self.clients.discard(client)
+            self._sync_spectro()
             if client.sender_task:
                 client.sender_task.cancel()
             log.info("ws client disconnected (n=%d)", len(self.clients))
@@ -246,6 +250,10 @@ class WSServer:
             else:
                 client.stream.clear()
                 client.status = None
+            self._sync_spectro()
+            return
+        if msg["type"] == "set_spectro" and self.spectro is not None:
+            await self._reply(client, self._set_spectro(client, msg))
             return
         try:
             replies = await self.dispatcher_handle(msg)
@@ -260,6 +268,34 @@ class WSServer:
             await self._reply(client, r)
         for b in broadcasts:
             await self._broadcast(b)
+
+    def _set_spectro(self, client: _Client, msg: dict) -> dict:
+        """`set_spectro {enabled, n_bins?, res?}`, per connection: subscribe this
+        client to the 3D view's spectro stream. n_bins / res are shared by every
+        subscriber (the last request wins). Twin of `App::set_spectro` in Rust."""
+        from ..dsp.spectro import MAX_BINS, MIN_BINS, REL_RES
+        on = bool(msg.get("enabled", True))
+        n_bins, res = self.spectro.request()
+        n = msg.get("n_bins")
+        if n is not None:
+            if isinstance(n, bool) or not isinstance(n, int):
+                return {"type": "error", "reason": "set_spectro: n_bins must be an int"}
+            n_bins = max(MIN_BINS, min(MAX_BINS, n))
+        r = msg.get("res")
+        if r is not None:
+            if r not in REL_RES:
+                return {"type": "error", "reason": "set_spectro: res must be time, balanced or pitch"}
+            res = r
+        client.spectro = on
+        if on:
+            self.spectro.set_request(n_bins, res)
+        self._sync_spectro()
+        return self.spectro.info(on)
+
+    def _sync_spectro(self) -> None:
+        """The spectro thread runs while any streaming client is subscribed."""
+        if self.spectro is not None:
+            self.spectro.set_enabled(any(c.streaming and c.spectro for c in self.clients))
 
     async def _reply(self, client: _Client, msg: dict):
         client.put_control(json.dumps(msg))
@@ -370,6 +406,12 @@ class WSServer:
                 payload = self._encode_fft_binary(frame, gain)
                 for c in streamers:
                     c.put_stream(payload)
+        if self.spectro is not None:
+            payload = self.spectro.take_message()
+            if payload is not None:
+                for c in streamers:
+                    if c.spectro:
+                        c.put_stream(payload)
         if self.perf_ring is not None:
             self._record_perf(time.perf_counter_ns() - t_start)
 
@@ -426,6 +468,13 @@ class WSServer:
                 text = json.dumps(self._make_server_status())
                 for c in streamers:
                     c.put_status(text)
+                # Spectro thread cost, for subscribers' perf panels (separate
+                # message: server_status keeps its shape).
+                if self.spectro is not None and self.spectro.enabled:
+                    text = json.dumps(self.spectro.perf_message())
+                    for c in streamers:
+                        if c.spectro:
+                            c.put_control(text)
             except Exception:
                 self._log_loop_error("ws status loop")
 

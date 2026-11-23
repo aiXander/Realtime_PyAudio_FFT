@@ -265,6 +265,30 @@ def validate_onset(sensitivity=None, refractory_s=None, slow_tau_s=None,
     return out
 
 
+# Narrowest /audio/level range: keeps the dB -> 0..1 map's divisor away from 0.
+MIN_LEVEL_SPAN_DB = 1.0
+
+
+def validate_level(tau_s=None, floor_db=None, ceiling_db=None, *,
+                   cur_floor_db=None, cur_ceiling_db=None):
+    """`/audio/level` tunables. Returns only the keys that were provided.
+    Hard invariants: tau_s > 0 (denominator in tau→alpha); the range ends
+    finite, and the ceiling at least MIN_LEVEL_SPAN_DB above the floor —
+    checked against the current value (`cur_*`) of the end not being set."""
+    out = {}
+    if tau_s is not None:
+        out["tau_s"] = _finite_float(tau_s, "tau_s", gt=0.0)
+    if floor_db is not None:
+        out["floor_db"] = _finite_float(floor_db, "floor_db")
+    if ceiling_db is not None:
+        out["ceiling_db"] = _finite_float(ceiling_db, "ceiling_db")
+    lo = out.get("floor_db", cur_floor_db)
+    hi = out.get("ceiling_db", cur_ceiling_db)
+    if lo is not None and hi is not None and hi - lo < MIN_LEVEL_SPAN_DB:
+        raise ValueError(f"ceiling_db must be at least {MIN_LEVEL_SPAN_DB:g} dB above floor_db")
+    return out
+
+
 def validate_onset_band(band):
     if band not in BAND_NAMES:
         raise ValueError(f"band must be one of {BAND_NAMES}")

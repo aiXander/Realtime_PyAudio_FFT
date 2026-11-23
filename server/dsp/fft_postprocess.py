@@ -192,7 +192,11 @@ class FFTPostProcessor:
             self._smear_kernel = None
             return
         bins_per_octave = self.n_bins / max(1e-6, math.log2(f_max / self.f_min))
-        sigma = float(self.peak_smear_oct * bins_per_octave)
+        # Capped at n_bins: an f_min just below Nyquist would otherwise give a
+        # kernel of 1e8+ taps (GBs, then minutes per hop). Every geometry with
+        # a >= 4-octave span is below the cap even at the max smear (4 oct).
+        # Mirrored in engine/dsp.
+        sigma = min(float(self.peak_smear_oct * bins_per_octave), float(self.n_bins))
         self._smear_sigma_bins = sigma
         if sigma <= 0.0:
             self._smear_kernel = None

@@ -63,20 +63,24 @@ class OscPublisher:
         self._lmh_len = perf_lmh_e2e.shape[0] if perf_lmh_e2e is not None else 0
         self._fft_len = perf_fft_e2e.shape[0] if perf_fft_e2e is not None else 0
 
-    # ---------------- per-block L/M/H + onset + BPM ----------------
+    # ---------------- per-block L/M/H + BPM + level + onsets ----------------
     def publish_lmh(self, scaled: np.ndarray, onsets: np.ndarray,
-                    bpm: float, t_recv_ns: int = 0) -> None:
+                    bpm: float, level: float, t_recv_ns: int = 0) -> None:
         """Called by the DSP worker right after `features_store.publish`.
 
         `scaled` is the length-3 post-autoscale f64 array; `onsets` the
         length-3 int8 per-band onset pulse (1 on the firing block, 0 else);
-        `bpm` the smoothed tempo (0.0 when not locked).
+        `bpm` the smoothed tempo (0.0 when not locked); `level` the
+        fixed-scale loudness (0..1, never multiplied by master gain).
+        Wire order per block: lmh, bpm, level, then onsets — a consumer
+        woken by an onset already holds that block's level.
         """
         g = self._get_master_gain()
         s = self._sender
         try:
             s.send_lmh(scaled[0] * g, scaled[1] * g, scaled[2] * g)
             s.send_bpm(bpm)
+            s.send_level(level)
             if onsets[0]:
                 s.send_onset(0)
             if onsets[1]:

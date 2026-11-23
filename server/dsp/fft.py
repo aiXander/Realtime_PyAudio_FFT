@@ -77,6 +77,10 @@ class FFTWorker(threading.Thread):
         self.db_floor = float(db_floor)
         self.post_processor = post_processor  # FFTPostProcessor or None
         self.read_block_idx = 0
+        # Set when read_block_idx is rewound to 0 (reconfigure / reset): the
+        # next backlog skip jumps over the ring's history, not over hops we
+        # failed to process, so it isn't counted in fft_drops.
+        self._rewound = False
         self.fft_drops = 0
         self.perf_ring = perf_ring
         self.perf_len = perf_ring.shape[0]
@@ -181,6 +185,7 @@ class FFTWorker(threading.Thread):
             if f_min is not None: self.f_min = float(f_min)
             self._allocate()
             self.read_block_idx = 0  # alignment changed
+            self._rewound = True
             # Mirror to the post-processor INSIDE the worker lock: otherwise a
             # hop could run between the two reconfigures and feed new-size
             # bins to the old-size post-processor (ValueError on the worker
@@ -195,6 +200,7 @@ class FFTWorker(threading.Thread):
     def reset(self) -> None:
         with self._lock:
             self.read_block_idx = 0
+            self._rewound = True
 
     def resync(self) -> None:
         """Snap the read pointer to 'now' (one full window back) without
@@ -288,8 +294,10 @@ class FFTWorker(threading.Thread):
                     target_block = wi - self.n_blocks_per_window
                     skipped_hops = (target_block - self.read_block_idx) // self.hop_blocks
                     if skipped_hops > 0:
-                        self.fft_drops += int(skipped_hops)
+                        if not self._rewound:
+                            self.fft_drops += int(skipped_hops)
                         self.read_block_idx += int(skipped_hops) * self.hop_blocks
+                self._rewound = False
 
                 # Drain every hop currently available on each wake. fft_event is
                 # coalesced the same way dsp_event is — without draining, the worker

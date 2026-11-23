@@ -24,6 +24,60 @@ def block_rms(x: np.ndarray) -> float:
     return math.sqrt(float(np.dot(x, x)) / x.size)
 
 
+class LevelMeter:
+    """Broadband loudness that is never auto-gained (`/audio/level`).
+
+    An RMS meter over the mono block BEFORE the filter bank: one-pole smooth
+    the mean square (`tau_s`), then map dBFS linearly so `floor_db` reads 0
+    and `ceiling_db` reads 1, clipped to [0, 1]. Smoothing power (not dB)
+    keeps the reading independent of the block size. Not scaled by
+    master_gain, not noise-gated. The three params are `cfg.level` (UI
+    knobs); mirrored in engine/dsp/src/features.rs.
+    """
+
+    def __init__(self, sr: float, blocksize: int, tau_s: float, floor_db: float,
+                 ceiling_db: float):
+        self._scratch = np.zeros(int(blocksize), dtype=np.float64)
+        self._dt = int(blocksize) / float(sr)
+        self._p = 0.0
+        self.set_params(tau_s, floor_db, ceiling_db)
+
+    def set_params(self, tau_s: float, floor_db: float, ceiling_db: float) -> None:
+        """All three params at once (asyncio loop). The dB map is swapped in
+        as one tuple, so the worker never pairs a new floor with an old
+        ceiling. `p` (the smoothed power) is kept: the curve moves, the
+        meter doesn't restart."""
+        self._tau_s = float(tau_s)
+        self._alpha = tau_to_alpha(self._dt, self._tau_s)
+        floor_db, ceiling_db = float(floor_db), float(ceiling_db)
+        # (floor_db, 1 / span, power at the floor — also guards log10(0))
+        self._map = (floor_db, 1.0 / (ceiling_db - floor_db), 10.0 ** (floor_db / 10.0))
+
+    def reconfigure(self, sr: float, blocksize: int) -> None:
+        """New sr / blocksize (device hot-switch): re-derive alpha, zero p."""
+        if self._scratch.size != int(blocksize):
+            self._scratch = np.zeros(int(blocksize), dtype=np.float64)
+        self._dt = int(blocksize) / float(sr)
+        self._alpha = tau_to_alpha(self._dt, self._tau_s)
+        self._p = 0.0
+
+    def update(self, x: np.ndarray) -> float:
+        """One block of mono samples -> level in [0, 1]. No allocation."""
+        s = self._scratch
+        # float32 -> float64 first: np.dot on float32 sums in float32, which
+        # is outside the 1e-9 parity tolerance against the Rust engine.
+        np.copyto(s, x)
+        ms = float(np.dot(s, s)) / s.size
+        if not math.isfinite(ms):
+            ms = 0.0
+        p = self._p + self._alpha * (ms - self._p)
+        self._p = p
+        floor_db, inv_span, floor_power = self._map
+        if p <= floor_power:
+            return 0.0
+        return min(1.0, max(0.0, (10.0 * math.log10(p) - floor_db) * inv_span))
+
+
 class ExpSmoother:
     """Per-band ASYMMETRIC one-pole envelope follower.
 

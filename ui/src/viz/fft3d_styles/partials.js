@@ -3,18 +3,18 @@
 // harmonics, formants and tonal components show up as tracks running back
 // through time and you can read pitch glides, vibrato and onsets off them.
 //
-// Detection is free (per fragment, no extra pass): the mesh's frequency
-// slope is interpolated across each triangle, so a peak is where that slope
-// crosses zero going down; the line is drawn at that zero crossing with a
-// constant pixel width. Each peak's width is estimated from height / curvature
-// (σ ≈ √(h / |h''|)), so narrow tonal peaks light up fully and broad humps
-// or small ripples riding a high floor stay dark.
+// Detection is per pixel, straight from the history texture: the
+// frequency slope across ±1 bin crosses zero going down at a peak, and the
+// line is drawn at that crossing with a constant pixel width. Each peak's
+// width is estimated from height / curvature (σ ≈ √(h / |h''|)), so narrow
+// tonal peaks light up fully and broad humps or noise ripples riding a high
+// floor stay dark.
 // One opaque draw + the front-edge strips; no post-processing.
 // Palette: magnitude colormap from low → mid → high (lightness-ordered).
 
 import { theme } from "../../colors.js";
 import {
-  glf, SURF_VS, FLAT_VS, PAL_UNIFORMS, RAMP_FN, LINE_FN, LOG_PAPER_FN, program, setCommonUniforms,
+  glf, SURF_VS, SPEC_FS, FLAT_VS, PAL_UNIFORMS, RAMP_FN, LINE_FN, LOG_PAPER_FN, program, setCommonUniforms,
   setLogUniforms, makeStrips, fillCurtain, fillRim, disposeAll,
 } from "./common.js";
 
@@ -22,44 +22,48 @@ import {
 const LINE_PX = 0.6;           // peak-line half-width, CSS px
 const PEAK_OCT = [0.12, 0.45]; // estimated peak width (σ, octaves): full brightness below, gone above
 const PEAK_MIN_H = [0.03, 0.12]; // ignore peaks below this height (fade-in range)
+const PROM_BINS = 8;           // prominence: drop below the peak at ±this many bins (~ a main lobe) …
+const PROM = [0.02, 0.06];     // … needed to draw it (fade-in range, in height units: 0.05 = 3 dB at 60 dB range)
 const BODY = 0.4;              // surface brightness under the lines
 const GRID_ALPHA = [0.16, 0.05]; // log paper: decades, subdivisions
 const FOG_START = 0.72;
 
-// The mesh slope attribute is WORLD_HEIGHT · dh/dx over a surface 2 wide
-// (fft_3d.js: WORLD_HEIGHT = 0.5): sx = 0.25 · dh/du.
-const SLOPE_PER_DHDU = 0.25;
-
 const SURF_FS = `#version 300 es
 precision highp float;
-in float vU, vH, vZ;
-in vec3 vN;
+in float vU, vZ, vT;
 uniform vec3 uBg;
 uniform float uDpr;
 out vec4 o;
+${SPEC_FS}
 ${PAL_UNIFORMS}
 ${RAMP_FN}
 ${LINE_FN}
 ${LOG_PAPER_FN}
 void main() {
-  float h = clamp(vH, 0.0, 1.0);
+  float h; vec3 n;
+  specSurface(vU, vT, h, n);
   float fog = smoothstep(${glf(FOG_START)}, 1.0, vZ);
   // Body: dim colormap with soft light, so the energy stays readable under the tracks.
-  float lit = dot(normalize(vN), normalize(vec3(-0.6, 1.0, 0.4)));
+  float lit = dot(normalize(n), normalize(vec3(-0.6, 1.0, 0.4)));
   vec3 col = ramp(h) * ${glf(BODY)} * (0.75 + 0.35 * clamp(lit, 0.0, 1.0));
   vec2 grid = logPaper(vU, 0.5);
   col = mix(col, vec3(0.8), max(grid.x * ${glf(GRID_ALPHA[0])}, grid.y * ${glf(GRID_ALPHA[1])}) * (1.0 - fog));
-  // Peaks: the frequency slope crosses zero going down (u grows with screen x).
-  float sx = -vN.x;
+  // Peaks across frequency, in bins: slope over ±1 bin, curvature, zero crossing.
+  float db = 1.0 / (uNBins - 1.0);
+  float hl = specH(vU - db, vT), hc = specH(vU, vT), hr = specH(vU + db, vT);
+  float sx = 0.5 * (hr - hl);                    // dh per bin
+  float curv = 2.0 * hc - hl - hr;               // −h'' per bin², > 0 at a maximum
   vec2 gs = vec2(dFdx(sx), dFdy(sx));
-  float curv = -gs.x / max(dFdx(vU), 1e-7) / ${glf(SLOPE_PER_DHDU)};   // −h''(u)
-  float d = abs(sx) / max(length(gs), 1e-7);                             // px to the crossing
+  float d = abs(sx) / max(length(gs), 1e-7);     // px to the crossing
   float line = 1.0 - smoothstep(${glf(LINE_PX)} * uDpr - 0.25, ${glf(LINE_PX)} * uDpr + 0.75, d);
-  float sigmaOct = sqrt(h / max(curv, 1e-6)) * uLogSpan * 3.321928;
+  float sigmaOct = sqrt(hc / max(curv, 1e-6)) * db * uLogOct;
+  // Prominence: raw spectra ripple; a real partial stands clear of its flanks.
+  float prom = hc - max(specH(vU - ${glf(PROM_BINS)} * db, vT), specH(vU + ${glf(PROM_BINS)} * db, vT));
   float strength = (curv > 0.0 ? 1.0 : 0.0)
                  * (1.0 - smoothstep(${glf(PEAK_OCT[0])}, ${glf(PEAK_OCT[1])}, sigmaOct))
-                 * smoothstep(${glf(PEAK_MIN_H[0])}, ${glf(PEAK_MIN_H[1])}, h);
-  vec3 lineCol = mix(ramp(0.4 + 0.6 * h), vec3(1.0), 0.15);
+                 * smoothstep(${glf(PEAK_MIN_H[0])}, ${glf(PEAK_MIN_H[1])}, hc)
+                 * smoothstep(${glf(PROM[0])}, ${glf(PROM[1])}, prom);
+  vec3 lineCol = mix(ramp(0.4 + 0.6 * hc), vec3(1.0), 0.15);
   col = mix(col, lineCol, line * strength * (1.0 - fog));
   col = mix(col, uBg, fog * 0.85);
   o = vec4(col, 1.0);
@@ -89,14 +93,13 @@ export default {
   label: "Partials",
   description: "Every spectral peak traced as a line through time: harmonics, formants, glides",
   camera: { backScale: 0.5, ampFront: 0.26 },
-  smoothing: { freqOct: 0.025, timePasses: 1 },
   background: () => theme.bg,
   text: { axis: "#8a9098", dim: "#5a6068" },
 
   create(gl) {
     const surf = program(gl, SURF_VS, SURF_FS);
     const flat = program(gl, FLAT_VS, FLAT_FS);
-    const strips = makeStrips(gl, 4 * 384);
+    const strips = makeStrips(gl, 4 * 2048);
     return {
       render(f) {
         gl.disable(gl.BLEND);

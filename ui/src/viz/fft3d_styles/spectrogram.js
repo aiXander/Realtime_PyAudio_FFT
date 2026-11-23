@@ -4,44 +4,46 @@
 // Magnitude is a lightness-ordered colormap (the main carrier of detail),
 // lighting is kept gentle so it never fights the colors, and the graticule
 // is log graph paper across frequency plus 1 s parallels (labelled).
-// Minimal display smoothing: one light time pass, ~no frequency blur.
+// Colour and shading are read per pixel from the history texture (max over
+// the rows / bins under the pixel), so the sheet is at data resolution.
 // One opaque draw + the front-edge strips; no post-processing.
 // Palette: magnitude colormap from low → mid → high (lightness-ordered).
 
 import { theme } from "../../colors.js";
 import {
-  glf, SURF_VS, FLAT_VS, PAL_UNIFORMS, RAMP_FN, LINE_FN, LOG_PAPER_FN, program, setCommonUniforms,
+  glf, SURF_VS, SPEC_FS, FLAT_VS, PAL_UNIFORMS, RAMP_FN, LINE_FN, LOG_PAPER_FN, program, setCommonUniforms,
   setLogUniforms, makeStrips, fillCurtain, fillRim, disposeAll, drawSecondLabels,
 } from "./common.js";
 
 // Look. All tunable by eye.
 const SHADE = 0.28;            // hill-shading depth (0 = flat color, exact colormap)
-// Colormap sensitivity: level = (h · GAIN)^GAMMA. Autoscaled bins mostly sit
-// in 0.1–0.5 and top out near 0.8 (tanh · strength), so without gain the map
-// never reaches its bright end; GAMMA < 1 lifts the quiet detail out of black.
-const GAIN = 1.4;
-const GAMMA = 0.85;
+// Colormap: level = h^GAMMA. h is already dB-linear over the display range
+// (the loudest bin ≈ 1), so the map needs little help; GAMMA < 1 lifts quiet
+// detail a touch.
+const GAMMA = 0.9;
 const GRID_ALPHA = [0.22, 0.08, 0.14]; // decades, subdivisions, 1 s parallels
 const FOG_START = 0.85;
 
 const LEVEL_FN = `
-float level(float h) { return pow(clamp(h * ${glf(GAIN)}, 0.0, 1.0), ${glf(GAMMA)}); }`;
+float level(float h) { return pow(clamp(h, 0.0, 1.0), ${glf(GAMMA)}); }`;
 
 const SURF_FS = `#version 300 es
 precision highp float;
-in float vU, vH, vZ;
-in vec3 vN;
+in float vU, vZ, vT;
 uniform vec3 uBg;
 uniform float uDepthS;
 out vec4 o;
+${SPEC_FS}
 ${PAL_UNIFORMS}
 ${RAMP_FN}
 ${LINE_FN}
 ${LOG_PAPER_FN}
 ${LEVEL_FN}
 void main() {
-  vec3 col = ramp(level(vH));
-  float lit = dot(normalize(vN), normalize(vec3(-0.6, 1.0, 0.5)));
+  float h; vec3 n;
+  specSurface(vU, vT, h, n);
+  vec3 col = ramp(level(h));
+  float lit = dot(normalize(n), normalize(vec3(-0.6, 1.0, 0.5)));
   col *= 1.0 - ${glf(SHADE)} + ${glf(SHADE)} * 1.4 * clamp(lit, 0.0, 1.0);
   vec2 grid = logPaper(vU, 0.5);
   float g = max(max(grid.x * ${glf(GRID_ALPHA[0])}, grid.y * ${glf(GRID_ALPHA[1])}),
@@ -77,7 +79,6 @@ export default {
   label: "Spectrogram",
   description: "Spectrogram sheet in shallow perspective, lightness-ordered colormap, log graph paper",
   camera: { backScale: 0.72, ampFront: 0.15 },
-  smoothing: { freqOct: 0.02, timePasses: 1 },
   background: () => theme.bg,
   text: { axis: "#8a9098", dim: "#5a6068" },
 
@@ -88,7 +89,7 @@ export default {
   create(gl) {
     const surf = program(gl, SURF_VS, SURF_FS);
     const flat = program(gl, FLAT_VS, FLAT_FS);
-    const strips = makeStrips(gl, 4 * 384);
+    const strips = makeStrips(gl, 4 * 2048);
     return {
       render(f) {
         gl.disable(gl.BLEND);

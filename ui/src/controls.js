@@ -123,7 +123,8 @@ function bindSlider(el, label, o) {
   return api;
 }
 
-export function setupControls() {
+/** `on3dChange`: the 3D view's resolution / range / tilt picker changed. */
+export function setupControls({ on3dChange } = {}) {
   // Visual frequency-axis picker (drag colored regions / their edges).
   const freqAxis = makeFreqAxis(
     document.getElementById("freq-axis"),
@@ -225,6 +226,32 @@ export function setupControls() {
     toSlider: (v) => Math.round(v * 100),
     fmt: (v) => `${Math.round(v * 100)}%`,
     send: (v, commit) => send({ type: "set_autoscale", strength: v, commit }),
+  });
+
+  // Level (`/audio/level`): smoothing in ms (protocol in seconds) and the
+  // dBFS range mapped to 0..1. The two range ends keep LEVEL_MIN_SPAN_DB
+  // apart (the server rejects a range under 1 dB).
+  const LEVEL_MIN_SPAN_DB = 3;
+  const levelNow = () => store.meta.level || {};
+  const fmtDb = (v) => `${Math.round(v)} dBFS`;
+  const levelTauCtl = bindSlider($("level-tau"), $("level-tau-val"), {
+    fmt: (v) => (v >= 1000 ? `${(v / 1000).toFixed(1)} s` : fmtMs(v)),
+    send: (v, commit) => send({ type: "set_level", tau_s: v / 1000, commit }),
+  });
+  // onShow writes the snapped value back, so a thumb dragged past the other
+  // end stops there instead of sitting where the range can't go.
+  const levelFloorEl = $("level-floor"), levelCeilingEl = $("level-ceiling");
+  const levelFloorCtl = bindSlider(levelFloorEl, $("level-floor-val"), {
+    fmt: fmtDb,
+    onShow: (v) => { levelFloorEl.value = String(v); },
+    snap: (v) => Math.min(v, (levelNow().ceiling_db ?? 0) - LEVEL_MIN_SPAN_DB),
+    send: (v, commit) => send({ type: "set_level", floor_db: v, commit }),
+  });
+  const levelCeilingCtl = bindSlider(levelCeilingEl, $("level-ceiling-val"), {
+    fmt: fmtDb,
+    onShow: (v) => { levelCeilingEl.value = String(v); },
+    snap: (v) => Math.max(v, (levelNow().floor_db ?? -60) + LEVEL_MIN_SPAN_DB),
+    send: (v, commit) => send({ type: "set_level", ceiling_db: v, commit }),
   });
 
   // Onset detection — per band. One set of sliders edits the selected band;
@@ -400,6 +427,35 @@ export function setupControls() {
   const styleSelect = $("fft3d-style");
   fillSelect(styleSelect, STYLE_ORDER.map((st) => [st.name, st.label]));
   styleSelect.addEventListener("change", () => send({ type: "set_fft3d_style", style: styleSelect.value }));
+  // 3D view display settings: UI-local, remembered per browser. Resolution is
+  // a set_spectro parameter (main.js syncSpectro sends it); range and tilt
+  // only re-map the texture, smoothing applies to new frames (fft3d.setDisplay).
+  const res3d = $("fft3d-res"), range3d = $("fft3d-range"), tilt3d = $("fft3d-tilt"), smooth3d = $("fft3d-smooth");
+  const LS = "fft3d_display";
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS) || "{}");
+    if (["time", "balanced", "pitch"].includes(saved.res)) store.fft3d_res = saved.res;
+    if ([40, 60, 80, 100].includes(saved.range)) store.fft3d_range_db = saved.range;
+    if ([-3, 0, 1.5, 3, 4.5].includes(saved.tilt)) store.fft3d_tilt = saved.tilt;
+    if ([0, 20, 40, 80].includes(saved.smooth)) store.fft3d_smooth_ms = saved.smooth;
+  } catch { /* private mode / bad JSON: defaults */ }
+  res3d.value = store.fft3d_res;
+  range3d.value = String(store.fft3d_range_db);
+  tilt3d.value = String(store.fft3d_tilt);
+  smooth3d.value = String(store.fft3d_smooth_ms);
+  const save3d = () => {
+    store.fft3d_res = res3d.value;
+    store.fft3d_range_db = Number(range3d.value);
+    store.fft3d_tilt = Number(tilt3d.value);
+    store.fft3d_smooth_ms = Number(smooth3d.value);
+    try {
+      localStorage.setItem(LS, JSON.stringify({
+        res: store.fft3d_res, range: store.fft3d_range_db, tilt: store.fft3d_tilt, smooth: store.fft3d_smooth_ms,
+      }));
+    } catch { /* ignore */ }
+    on3dChange?.();
+  };
+  for (const el of [res3d, range3d, tilt3d, smooth3d]) el.addEventListener("change", save3d);
   const palette = setupPalettePicker($("palette-select"), $("palette-menu"),
     (name) => send({ type: "set_palette", palette: name }));
 
@@ -512,7 +568,7 @@ export function setupControls() {
   // Everything that needs a live server: disabled while offline / unsynced.
   const aside = document.querySelector(".controls");
   const liveInputs = ["ws-hz", "peak-decay", "show-onsets", "fft-toggle", "fft-raw-db", "fft-view-2d", "fft-view-3d", "fft-bins",
-    "fft3d-style", "palette-select"].map($);
+    "fft3d-style", "fft3d-res", "palette-select"].map($);
 
   function syncMeta(force = false) {
     const m = store.meta;
@@ -529,6 +585,10 @@ export function setupControls() {
     floorCtl.setValue(as.noise_floor || 0, force);
     strengthCtl.setValue(as.strength ?? 1.0, force);
     masterCtl.setValue(as.master_gain ?? 1.0, force);
+    const lv = m.level || {};
+    levelTauCtl.setValue((lv.tau_s ?? 0.1) * 1000, force);
+    levelFloorCtl.setValue(lv.floor_db ?? -60, force);
+    levelCeilingCtl.setValue(lv.ceiling_db ?? 0, force);
     wsCtl.setValue(m.ws_snapshot_hz || 60, force);
     peakDecayCtl.setValue(m.ui_peak_decay_per_s ?? 0.6, force);
     if (m.ui_show_onsets !== undefined) {

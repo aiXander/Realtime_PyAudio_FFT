@@ -33,11 +33,12 @@ from .config import (
 )
 from .control import validate as V
 from .control.dispatcher import Dispatcher
-from .dsp.features import AutoScaler, ExpSmoother
+from .dsp.features import AutoScaler, ExpSmoother, LevelMeter
 from .dsp.fft import FFTWorker
 from .dsp.fft_postprocess import FFTPostProcessor
 from .dsp.filters import FilterBank, clamp_band_edges
 from .dsp.onset import OnsetTracker
+from .dsp.spectro import SpectroService
 from .dsp.worker import DSPWorker
 from .io.http_server import StaticHTTPServer
 from .io.osc_publisher import OscPublisher
@@ -92,6 +93,8 @@ def _parse_args(argv):
     p.add_argument("--config", default=None,
                    help="path to main config file (default: <repo>/configs/main.yaml)")
     p.add_argument("--no-ws", action="store_true", help="disable the WebSocket server (headless OSC)")
+    p.add_argument("--no-fft", action="store_true",
+                   help="start with the FFT worker off, whatever the config says (not saved; the UI can turn it on)")
     p.add_argument("--open", action="store_true", help="open the bundled UI in the default browser")
     p.add_argument("--device", type=int, default=None, help="override input device index")
     p.add_argument("--log-level", default="INFO", help="logging level")
@@ -111,7 +114,7 @@ class App:
         self.dsp_event = threading.Event()
         self.fft_event = threading.Event()
         self.fft_enabled = threading.Event()
-        if cfg.fft.enabled:
+        if cfg.fft.enabled and not args.no_fft:
             self.fft_enabled.set()
         self.stop_flag = threading.Event()
 
@@ -145,6 +148,7 @@ class App:
         self.smoother: ExpSmoother | None = None
         self.auto_scaler: AutoScaler | None = None
         self.onset_tracker: OnsetTracker | None = None
+        self.level_meter: LevelMeter | None = None
         self.dsp_worker: DSPWorker | None = None
         self.fft_worker: FFTWorker | None = None
         self.fft_postprocessor: FFTPostProcessor | None = None
@@ -370,6 +374,18 @@ class App:
                 abs_floor=ok.get("abs_floor"),
             )
 
+    def apply_level(self, ok: dict) -> None:
+        """Apply a validated `/audio/level` update (any subset of tau_s,
+        floor_db, ceiling_db) to cfg + the meter. The meter always gets all
+        three current values in one call."""
+        lv = self.cfg.level
+        for k in ("tau_s", "floor_db", "ceiling_db"):
+            if k in ok:
+                setattr(lv, k, ok[k])
+        if self.level_meter is not None and ok:
+            self.level_meter.set_params(tau_s=lv.tau_s, floor_db=lv.floor_db,
+                                        ceiling_db=lv.ceiling_db)
+
     def apply_fft_n_bins(self, n: int) -> None:
         self.cfg.fft.n_bins = n
         self.fft_worker.reconfigure(n_bins=n)
@@ -454,6 +470,8 @@ class App:
         cfg = self.cfg
         clamped = self._clamp_cfg_bands_for_sr(sr)
         self._pipeline_sr = sr
+        if getattr(self, "spectro", None) is not None:
+            self.spectro.set_sr(sr)
         self.filter_bank = FilterBank(
             sr=sr,
             bands=self._bands_tuple_dict(),
@@ -477,6 +495,11 @@ class App:
             db_floor=cfg.fft.db_floor,
             db_ceiling=cfg.fft.db_ceiling,
         )
+        if self.level_meter is None:
+            self.level_meter = LevelMeter(sr, cfg.audio.blocksize, cfg.level.tau_s,
+                                          cfg.level.floor_db, cfg.level.ceiling_db)
+        else:
+            self.level_meter.reconfigure(sr, cfg.audio.blocksize)
         if self.onset_tracker is not None:
             # Hot-switch: alphas depend on dt = blocksize / sr. User-tuned
             # per-band params are persisted on the instance and survive
@@ -608,6 +631,7 @@ class App:
             smoother=self.smoother,
             auto_scaler=self.auto_scaler,
             onset_tracker=self.onset_tracker,
+            level_meter=self.level_meter,
             features_store=self.features_store,
             osc_publisher=self.osc_publisher,
             blocksize=cfg.audio.blocksize,
@@ -616,6 +640,10 @@ class App:
         self._build_fft_pipeline(self.stream.samplerate)
         self.dsp_worker.start()
         self.fft_worker.start()
+        # 3D view's spectrogram: idles until a WS client subscribes (set_spectro).
+        self.spectro = SpectroService(self.ring, self.stream.samplerate, cfg.audio.blocksize,
+                                      V.MAX_FFT_WINDOW)
+        self.spectro.start()
 
         # Send the OSC meta packet now that the sender is wired (resent at
         # 1 Hz + on change by _osc_meta_loop).
@@ -645,6 +673,7 @@ class App:
                 get_master_gain=lambda: self.cfg.autoscale.master_gain,
                 dispatcher_handle=dispatcher,
                 perf_ring=self.perf_ws,
+                spectro=self.spectro,
             )
 
             # Static HTTP server for the UI (ES modules need http://, not file://).
@@ -720,6 +749,11 @@ class App:
                 "noise_floor": cfg.autoscale.noise_floor,
                 "strength": cfg.autoscale.strength,
                 "master_gain": cfg.autoscale.master_gain,
+            },
+            "level": {
+                "tau_s": cfg.level.tau_s,
+                "floor_db": cfg.level.floor_db,
+                "ceiling_db": cfg.level.ceiling_db,
             },
             "onset": {
                 "low": {
@@ -1069,6 +1103,8 @@ class App:
         for w in (self.dsp_worker, self.fft_worker):
             if w is not None and w.is_alive():
                 w.join(timeout=1.0)
+        if getattr(self, "spectro", None) is not None:
+            self.spectro.stop()
         if self.ws is not None:
             await self.ws.stop()
         if self.http is not None:

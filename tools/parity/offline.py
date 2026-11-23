@@ -65,7 +65,7 @@ class OfflineApp(App):
     def __init__(self, cfg: Config, sr: float, config_path: Path | None = None):
         """`config_path` given: main.yaml (and presets) live in its directory
         and every persist request rewrites it. None: nothing touches disk."""
-        args = argparse.Namespace(no_ws=True, open=False, device=None, config=None,
+        args = argparse.Namespace(no_ws=True, no_fft=False, open=False, device=None, config=None,
                                   log_level="WARNING")
         super().__init__(args, cfg, config_path or (REPO / "configs" / "main.yaml"))
         self._sr = float(sr)
@@ -83,6 +83,7 @@ class OfflineApp(App):
             smoother=self.smoother,
             auto_scaler=self.auto_scaler,
             onset_tracker=self.onset_tracker,
+            level_meter=self.level_meter,
             features_store=self.features_store,
             osc_publisher=None,
             blocksize=cfg.audio.blocksize,

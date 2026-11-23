@@ -8,7 +8,7 @@
 // Palette: sea = low, lowlands = mid, highlands = high, then rock and snow.
 
 import {
-  glf, SURF_VS, PAL_UNIFORMS, palBg, FLAT_VS, program, setCommonUniforms, makeStrips, fillCurtain, fillRim, disposeAll,
+  glf, SURF_VS, SPEC_FS, PAL_UNIFORMS, palBg, FLAT_VS, program, setCommonUniforms, makeStrips, fillCurtain, fillRim, disposeAll,
   drawSecondLabels,
 } from "./common.js";
 
@@ -34,11 +34,11 @@ ${TINT.slice(1).map(([p, c], i) => `  c = mix(c, ${c}, smoothstep(${glf(TINT[i][
 
 const SURF_FS = `#version 300 es
 precision highp float;
-in float vU, vH, vZ, vKey, vS;
-in vec3 vN;
+in float vU, vZ, vT;
 uniform vec3 uBg;
 uniform float uOct0, uOctSpan, uDepthS;
 out vec4 o;
+${SPEC_FS}
 ${TINT_FN}
 /** Antialiased line coverage at integer values of q, halfPx wide on screen; fades out where lines crowd. */
 float lineAt(float q, float halfPx) {
@@ -47,10 +47,12 @@ float lineAt(float q, float halfPx) {
   return (1.0 - smoothstep(halfPx - 0.5, halfPx + 0.5, d)) * (1.0 - smoothstep(0.12, 0.35, w));
 }
 void main() {
-  float h = clamp(vH, 0.0, 1.2);
+  // Height + normal per pixel from the history texture (data resolution).
+  float h; vec3 n;
+  specSurface(vU, vT, h, n);
   vec3 col = tint(h);
   // Hill shading: light from the top-left (low frequencies, far away).
-  vec3 n = normalize(vN);
+  n = normalize(n);
   float lit = dot(n, normalize(vec3(-0.75, 1.0, 0.6)));
   col *= 0.62 + 0.55 * clamp(lit, 0.0, 1.2);
   // Contours: dark on light ground, light on dark (sea) ground.
@@ -105,7 +107,7 @@ export default {
   create(gl) {
     const surf = program(gl, SURF_VS, SURF_FS);
     const flat = program(gl, FLAT_VS, FLAT_FS);
-    const strips = makeStrips(gl, 4 * 384);
+    const strips = makeStrips(gl, 4 * 2048);
     return {
       render(f) {
         if (f.R >= 2) {

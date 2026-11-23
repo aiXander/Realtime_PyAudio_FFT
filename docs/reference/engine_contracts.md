@@ -6,7 +6,8 @@ This is a map. **Exact message shapes** are the captured instances in `testdata/
 
 ## CLI (`server/main.py:_parse_args`, `main`)
 
-- **Flags:** `--config PATH`, `--no-ws`, `--open`, `--device N`, `--log-level L`.
+- **Flags:** `--config PATH`, `--no-ws`, `--no-fft`, `--open`, `--device N`, `--log-level L`.
+- **`--no-fft`** starts with the FFT worker off whatever `fft.enabled` says. Unlike `--no-ws` it is not written to the config; the UI's FFT toggle still turns it on.
 - **Exit:** 0 on SIGINT/SIGTERM. On expected startup failures (bind error, no device, invalid config) it exits 1 after two stderr lines: `audio-server: error: …` and `audio-server: hint: …`, with no traceback.
 - **Config path** (`_resolve_config_path`):
   - no `--config` → `<repo>/configs/main.yaml`;
@@ -55,25 +56,30 @@ This is a map. **Exact message shapes** are the captured instances in `testdata/
   | name rule | `^[A-Za-z0-9_\- ]+$`, 1–64 chars after strip; `main` reserved |
   | listing | every `*.yaml` except `main`; `{name, saved_at: "YYYY-MM-DD HH:MM"}` from mtime, newest first |
   | load: merge | deep-merge the preset over **main.yaml as on disk** |
-  | load: sections | applied in this order, each validated alone (a bad one is logged and skipped): bands → filter_order → tau → autoscale → fft.n_bins → fft.window (always reconfigures the FFT, resetting its state) → peak_smear → tilt → onset per band |
+  | load: sections | applied in this order, each validated alone (a bad one is logged and skipped): bands → filter_order → tau → autoscale → fft.n_bins → fft.window (always reconfigures the FFT, resetting its state) → peak_smear → tilt → onset per band → level |
   | load: failure | error if no section applied |
 
 ## WebSocket (`server/io/ws_server.py`, `server/control/dispatcher.py`)
 
 - **Ports:** `ws://<ws.host>:<ws.port>`, default 8765. HTTP is a **separate** port, `ws.http_port` (default 8766).
 - **Greeting** on connect, in order: `meta`, `devices`, `presets` on the control lane, then `server_status`.
+- **Admission (Rust engine only; the reference accepts everything up to its 1 MiB `max_size`):** inbound messages and frames are capped at 1 MiB (over it the connection is dropped), and a browser upgrade whose `Origin` host is neither loopback nor the `Host` it connected to is refused with 403. Clients without an `Origin` (scripts, OSC bridges) are unaffected. Details: [`rust_server.md`](rust_server.md) → Robustness.
 - **Per-client outbound lanes**, drained in this priority:
   1. **control** — an unbounded FIFO. More than 1024 queued closes the client with code 1008.
   2. **status** — latest-only.
-  3. **stream** — snapshots + binary FFT; drop-oldest, max 4.
+  3. **stream** — snapshots + binary FFT + spectro batches; drop-oldest, max 4.
 - **Broadcast loop** at `snapshot_hz`, with deadline scheduling (resync if more than one period late):
   - **meta:** at most one coalesced meta per tick, to every client, when dirty.
-  - **snapshot:** only when the FeatureStore `seq` changed. Fields `low/mid/high` = scaled × master_gain; `*_raw` = smoother values (no gain); `*_onset` = 1 if that band's monotonic onset counter changed since the last snapshot; `bpm`; `t` = server ms since WS start.
+  - **snapshot:** only when the FeatureStore `seq` changed. Fields `low/mid/high` = scaled × master_gain; `*_raw` = smoother values (no gain); `*_onset` = 1 if that band's monotonic onset counter changed since the last snapshot; `bpm`; `level` = the same value as `/audio/level`; `t` = server ms since WS start.
   - **binary FFT:** only when the FFTStore seq changed and FFT is enabled. It carries processed × master_gain, or raw dB untouched if `send_raw_db`.
 - **Status loop:** `server_status` at 5 Hz to streaming clients only.
 - **Idle:** with no client streaming, the broadcast loop sleeps until a client resumes or meta goes dirty. On resume the onset counters are re-baselined, so stale onsets don't flash.
 - **`set_stream {enabled}`** is handled per connection in `WSServer._on_message`, not by the dispatcher. Disable drops the client's queued stream and status. Enable re-sends meta.
 - **Binary FFT frame:** `[1:u8][0:u8][n_bins:u16 LE][f32 LE × n_bins]`.
+- **Spectro stream** (the 3D view's analysis; [`fft_3d_styles.md`](fft_3d_styles.md)), in both engines but outside the reference contract: it isn't in the wire goldens, and `meta` / `server_status` don't mention it, so their key shapes stay comparable.
+  - **`set_spectro {enabled, n_bins?, res?}`**, handled per connection before the dispatcher, like `set_stream`. `n_bins` clamps to 64–2048 (default 1024), `res` ∈ `time` / `balanced` / `pitch`. These are shared by all subscribers, last request wins. Bad values get an `error` only. The reply is a targeted `{type:"spectro", enabled, n_bins, res, hop_s, f_min, f_max, windows, sr}`. The worker runs while any *streaming* client is subscribed. A server without it answers `unknown type 'set_spectro'`, which the UI treats as "unsupported", not an error toast.
+  - **Binary type 2**, one per broadcast tick to subscribers, all frames since the last tick: `[2:u8][1:u8 ver][n_bins:u16][n_frames:u16][0:u16][first_seq:u32][hop_s:f32][f_min:f32][f_max:f32][db0:f32][db_step:f32]` + `u8 × n_bins × n_frames` (frame-major, dB = db0 + q·db_step; −127.5 dBFS + 0.5 dB steps). `seq` counts hops. A gap in `seq` means frames were skipped (a backlog skip or a dropped stream message). Frames are raw, with no smoothing over time; the UI averages them in power before drawing.
+  - **`{type:"spectro_perf", avg_ms, p95_ms, load_pct}`** on the control lane at 5 Hz to subscribers while the worker runs.
 - **Errors** are `{"type":"error","reason":…}`. Malformed JSON, a missing `type`, and an unknown `type` get **only** the error. A handler `ValueError` (validation, failed device switch) gets the error **plus an immediate targeted meta**, so the UI snaps back, and meta is marked dirty.
 
 ### Inbound messages (`Dispatcher._handlers` + `set_stream`)
@@ -92,6 +98,7 @@ Every state change marks meta dirty, so a coalesced broadcast goes out next tick
 | `set_fft_tilt` | tilt_db_per_oct, commit | AutoScaler tilt + post-proc tilt | commit? |
 | `set_filter_order` | order (1..8), commit | redesign all three bandpasses (state reset) | commit? |
 | `set_onset` | band + any of sensitivity (>1), refractory_s, slow_tau_s, abs_floor; commit | `OnsetTracker.set_params` | commit? |
+| `set_level` | any of tau_s (>0), floor_db, ceiling_db (ceiling ≥ floor + 1 dB, checked against the end not being set); commit | `LevelMeter.set_params` (all three current values in one call) | commit? |
 | `set_ws_snapshot_hz` | hz, commit | broadcast rate | commit? |
 | `set_peak_decay` / `set_show_onsets` / `set_fft_view` / `set_fft3d_style` / `set_palette` / `set_ui_layout` | UI-only values | cfg only | commit (`set_peak_decay` / `set_ui_layout` take `commit`) |
 | `list_devices` | probe | re-init audio + reopen the input (~150 ms gap), list inputs; probe opens each for 0.2 s | targeted `devices` |
@@ -100,12 +107,13 @@ Every state change marks meta dirty, so a coalesced broadcast goes out next tick
 | `save_preset` | name | write full snapshot | targeted `presets` |
 | `load_preset` | name | section-by-section apply (above) | commit |
 | `set_stream` | enabled | per-connection pause/resume | none (resume → meta) |
+| `set_spectro` | enabled, n_bins?, res? | per-connection spectro subscription (above) | targeted `spectro` |
 
 ### Outbound messages
 
 Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
 
-- **`meta`:** 26 keys, including `sr` as an **int**, a `bands` dict of `{lo_hz, hi_hz}`, the nested `autoscale` / `onset`, the UI fields, and `device` `{index, name}`.
+- **`meta`:** 27 keys, including `sr` as an **int**, a `bands` dict of `{lo_hz, hi_hz}`, the nested `autoscale` / `onset` / `level` (`{tau_s, floor_db, ceiling_db}`), the UI fields, and `device` `{index, name}`.
 - **`devices.items[]`:** `{index, name, hostapi, default_samplerate, max_input_channels}`, plus `probed_signal` / `probed_at` after a probe.
 - **`server_status`:**
   - top level: `audio_stalled`, `cb_overruns`, `dsp_drops`, `fft_drops` (all counted from the current device session);
@@ -116,18 +124,29 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
 
 ## OSC (`server/io/osc_sender.py`, `server/io/osc_publisher.py`)
 
-- **Transport:** UDP to every `osc.destinations` entry, from one non-blocking socket. Send errors are swallowed and logged at DEBUG. Byte layouts: `testdata/golden/wire/osc_*.bin`.
+- **Transport:** UDP to every `osc.destinations` entry, from one non-blocking socket, IPv4 only. Every packet goes to every destination. Send errors are swallowed and logged at DEBUG. Byte layouts: `testdata/golden/wire/osc_*.bin`.
+- **Destination hosts.** An IPv4 literal is used as-is and never looked up. A host name (**Rust engine only**) is resolved on its own thread (`osc-resolve`), first right after start, then every 5 s until the name has an address and once a minute after that (no lookup every few seconds during a show): startup never waits for a name or fails on one; until it resolves that destination is skipped; a later failed lookup keeps the last address; an address change is picked up within a minute. Logged on change only (one warning when a name starts failing, one info line when it resolves or moves). Never resolve on a worker thread or the control loop: an absent `.local` name blocks `getaddrinfo` for 5 s on macOS. Pinned by `osc::tests::late_resolved_destination_starts_receiving`.
+  - **The Python reference needs literal IPs.** It resolves in the `OscSender` constructor (an unknown name stops the server from starting) and again on every packet on the DSP worker (a host that disappears blocks each send for 5 s).
+  - Destinations are set by hand in `configs/main.yaml` while the server is stopped (the persister rewrites the file from memory). No WS message or UI field. `configs/*.yaml` is gitignored except the example, because presets snapshot the destinations too: never write a real host into the example, a doc or a test.
 
   | address | args | when |
   |---|---|---|
   | `/audio/lmh` | `,fff` scaled × master_gain | every DSP block (32 B) |
   | `/audio/bpm` | `,f` | every DSP block (20 B) |
+  | `/audio/level` | `,f` loudness, `0..1` over `cfg.level`'s dB range, no master_gain | every DSP block (24 B, float at offset 20), after `bpm` and before that block's onsets |
   | `/audio/onset/{low,mid,high}` | `,i 1` | only on that band's onset blocks (28 B, constant) |
   | `/audio/fft` | `,f×n` processed × gain, or raw dB with sentinels and sub-floor values raised to `db_floor` | every hop while `osc.send_fft` and FFT is enabled. One datagram; `n ≤ 1024` keeps it under macOS's 9216-byte limit |
   | `/audio/meta` | `,iiiffffff` = sr, blocksize, n_bins, low_lo, low_hi, mid_lo, mid_hi, high_lo, high_hi | at startup, then every 1 s, ≥ 50 ms after a change to sr / bands / n_bins, and right after any stream change |
 
-- **Silence:** `/audio/lmh 0 0 0` + `/audio/bpm 0` (the zero templates), sent once when the audio watchdog detects a stall.
-- LMH, BPM and onsets go out on the DSP worker thread; FFT goes out on the FFT worker thread; meta goes out on the control loop.
+- **`/audio/level`** (`LevelMeter` in `server/dsp/features.py` / `engine/dsp/src/features.rs`). Per mono block, before the filter bank: `ms = mean(x²)` in f64 (non-finite → 0); `p += α·(ms − p)` with `α = 1 − exp(−(blocksize/sr)/tau_s)`, `p` starting at 0 and zeroed when the sample rate changes; `level = 0` when `p ≤ 10^(floor_db/10)`, else `clip((10·log10(p) − floor_db) / (ceiling_db − floor_db), 0, 1)`.
+  - **`cfg.level` = `{tau_s, floor_db, ceiling_db}`**, defaults `0.1 / −60 / 0` (−60 dBFS RMS reads 0, −30 reads 0.5, a full-scale sine 0.95). Set by `set_level` (the UI's *Level* panel), persisted, part of presets. A config without the block loads with the defaults (pinned by `config::tests::corrupt_vs_invalid`): never make it a required key, or an older `main.yaml` is moved aside as corrupt and reseeded.
+  - **Consumers write their thresholds in the `0..1` value**, so moving the range moves what every consumer does. With the defaults the wire value is the scale the LED controller's settings were written against.
+  - Never auto-scaled, noise-gated or multiplied by `master_gain`, and always inside `0..1` on the wire. A consumer that min/max-rescales any float leaving `0..1` would turn it back into an auto-gained signal.
+  - The power is smoothed, then the log taken (an RMS meter): the reading doesn't depend on the block size. Smoothing the dB value instead reads lower the smaller the block.
+  - A retune keeps `p`: the curve moves, the meter doesn't restart.
+- **Order within a DSP block:** `lmh`, `bpm`, `level`, then the onsets, so a consumer woken by an onset already holds that block's level.
+- **Silence:** `/audio/lmh 0 0 0` + `/audio/bpm 0` + `/audio/level 0` (the zero templates), sent once when the audio watchdog detects a stall.
+- LMH, BPM, level and onsets go out on the DSP worker thread; FFT goes out on the FFT worker thread; meta goes out on the control loop.
 
 ## Static HTTP (`server/io/http_server.py`)
 
@@ -139,6 +158,7 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
 
 ## Devices (`server/audio/devices.py`, `App.*` in `server/main.py`)
 
+- **Indices** are positions in the host's full device list (inputs and outputs): PortAudio's numbering in Python, cpal's in Rust, identical on CoreAudio. They shift as devices come and go; names don't.
 - **Initial device:** `--device` → `cfg.audio.device.name` (looked up **by name**) → `cfg.audio.device.index` → the system default.
 - **Stream:** opened with the device's default sr. `channels` is clamped to the device's maximum. Stereo is mixed to mono as `(L+R)/2`. A host latency over 80 ms logs a warning.
 - **Hot-switch** (`hot_switch_device`):
@@ -169,6 +189,7 @@ Shapes: `testdata/golden/wire/ws_*.json`. Highlights:
   - drains every complete hop;
   - if more than `window + 2 hops` behind, it skips whole hops to stay aligned;
   - `resync()` after a re-enable skips the idle gap without counting drops.
+  - any reconfigure (n_bins / window / hop / f_min / sr, preset load) or stream reset rewinds the read pointer to 0; the next wake's backlog skip jumps over the ring's history and is **not** counted as `fft_drops` (only that one skip; real backlogs after it still count). Hop alignment is unchanged (whole hops from block 0), so the goldens' hop table is unaffected. Fixed in both engines 2026-10-24; before that, one `set_n_fft_bins` showed hundreds to tens of thousands of phantom drops, growing with uptime.
 - **Worker loops never die:** each iteration is wrapped and errors are logged at most once a second.
-- **Priority:** macOS `QOS_CLASS_USER_INITIATED` for the workers and the main thread; Linux absolute nice −5 (best effort). The Python-only `sys.setswitchinterval(5e-4)` has no Rust equivalent and is not needed.
+- **Priority:** the reference: macOS `QOS_CLASS_USER_INITIATED` for the workers and the main thread; Linux absolute nice −5 (best effort). The Rust engine puts its two workers in a real-time class instead (macOS time-constraint policy; Linux `SCHED_FIFO` when permitted, else nice −5): not an outward contract, but the reason it meets the 10-minute zero-drop soak ([`rust_server.md`](rust_server.md) → Worker scheduling). The Python-only `sys.setswitchinterval(5e-4)` has no Rust equivalent and is not needed.
 - **Filter retunes** from `set_band` are debounced 50 ms server-side.

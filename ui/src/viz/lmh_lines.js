@@ -1,4 +1,5 @@
-// Three rolling polylines for low/mid/high.
+// Three rolling polylines for low/mid/high, plus the broadband level
+// (`/audio/level`) as a thin neutral line on the same 0..1 axis.
 //
 // - Horizontal alpha gradient: line goes 1.0 (right, newest) → 0 (left, oldest).
 // - Subtle per-band area fill at ~0.10 alpha on the right, fading to 0 on the left.
@@ -24,6 +25,9 @@ const FILL_ALPHA_RIGHT   = 0.10;
 const FILL_ALPHA_LEFT    = 0.0;
 const STROKE_ALPHA_RIGHT = 1.00;
 const STROKE_ALPHA_LEFT  = 0.0;
+// The level line is not a band: neutral, thinner, no area fill.
+const LEVEL_RGB = "236,240,246";
+const LEVEL_ALPHA_RIGHT = 0.85;
 
 export function makeLines(canvas) {
   const ctx = canvas.getContext("2d", { alpha: false });
@@ -33,6 +37,7 @@ export function makeLines(canvas) {
     low:  new Float32Array(N_MAX),
     mid:  new Float32Array(N_MAX),
     high: new Float32Array(N_MAX),
+    level: new Float32Array(N_MAX),
   };
   // Float64: ms since epoch0. Float32 has only ~24 bits of mantissa, so after
   // a few hours of uptime timestamps quantize to several ms and the x
@@ -42,7 +47,7 @@ export function makeLines(canvas) {
   let head = 0, count = 0;
 
   let gradVersion = -1, gradTheme = -1;
-  let strokeGrads = null, fillGrads = null;
+  let strokeGrads = null, fillGrads = null, levelGrad = null;
 
   // rAF pauses while the tab is hidden, so the ring's newest sample is
   // timestamped from when we last drew. On refocus, drop the stale history
@@ -65,6 +70,7 @@ export function makeLines(canvas) {
       mid:  mk(LMH.mid.rgb,  STROKE_ALPHA_LEFT, STROKE_ALPHA_RIGHT),
       high: mk(LMH.high.rgb, STROKE_ALPHA_LEFT, STROKE_ALPHA_RIGHT),
     };
+    levelGrad = mk(LEVEL_RGB, STROKE_ALPHA_LEFT, LEVEL_ALPHA_RIGHT);
     fillGrads = {
       low:  mk(LMH.low.rgb,  FILL_ALPHA_LEFT, FILL_ALPHA_RIGHT),
       mid:  mk(LMH.mid.rgb,  FILL_ALPHA_LEFT, FILL_ALPHA_RIGHT),
@@ -94,12 +100,17 @@ export function makeLines(canvas) {
       const yy = f === 0.0 ? y + 7 * dpr : f === 1.0 ? y - 7 * dpr : y;
       g.fillText(label, padL, yy);
     }
+    // Legend for the neutral line (the band lines carry their own colors).
+    g.textAlign = "right";
+    g.fillStyle = `rgba(${LEVEL_RGB},0.55)`;
+    g.fillText("— level", w - 6 * dpr, 9 * dpr);
   }
 
   function update() {
     buf.low[head]  = store.low;
     buf.mid[head]  = store.mid;
     buf.high[head] = store.high;
+    buf.level[head] = store.level;
     ts[head] = performance.now() - epoch0;
     head = (head + 1) % N_MAX;
     if (count < N_MAX) count++;
@@ -123,7 +134,8 @@ export function makeLines(canvas) {
   const _xs = new Float32Array(N_MAX);
   const _ys = new Float32Array(N_MAX);
 
-  function drawSeries(arr, fillGrad, strokeGrad, K, w, h, dpr, histMs, nowRel) {
+  // `fillGrad` null = stroke only, at `lineW` CSS px.
+  function drawSeries(arr, fillGrad, strokeGrad, K, w, h, dpr, histMs, nowRel, lineW = 1.5) {
     if (K < 2) return;
     const latest = (head - 1 + N_MAX) % N_MAX;
     for (let i = 0; i < K; i++) {
@@ -136,20 +148,22 @@ export function makeLines(canvas) {
     const lastX  = _xs[K - 1];
 
     // Fill first (closed to baseline), stroke on top.
-    ctx.beginPath();
-    ctx.moveTo(_xs[0], _ys[0]);
-    for (let i = 1; i < K; i++) ctx.lineTo(_xs[i], _ys[i]);
-    ctx.lineTo(lastX,  h);
-    ctx.lineTo(firstX, h);
-    ctx.closePath();
-    ctx.fillStyle = fillGrad;
-    ctx.fill();
+    if (fillGrad) {
+      ctx.beginPath();
+      ctx.moveTo(_xs[0], _ys[0]);
+      for (let i = 1; i < K; i++) ctx.lineTo(_xs[i], _ys[i]);
+      ctx.lineTo(lastX,  h);
+      ctx.lineTo(firstX, h);
+      ctx.closePath();
+      ctx.fillStyle = fillGrad;
+      ctx.fill();
+    }
 
     ctx.beginPath();
     ctx.moveTo(_xs[0], _ys[0]);
     for (let i = 1; i < K; i++) ctx.lineTo(_xs[i], _ys[i]);
     ctx.strokeStyle = strokeGrad;
-    ctx.lineWidth = 1.5 * dpr;
+    ctx.lineWidth = lineW * dpr;
     ctx.lineJoin = "round";
     ctx.stroke();
   }
@@ -173,6 +187,7 @@ export function makeLines(canvas) {
     drawSeries(buf.low,  fillGrads.low,  strokeGrads.low,  K, w, h, dpr, histMs, nowRel);
     drawSeries(buf.mid,  fillGrads.mid,  strokeGrads.mid,  K, w, h, dpr, histMs, nowRel);
     drawSeries(buf.high, fillGrads.high, strokeGrads.high, K, w, h, dpr, histMs, nowRel);
+    drawSeries(buf.level, null, levelGrad, K, w, h, dpr, histMs, nowRel, 1.1);
 
     recordVizPerf("lines", performance.now() - t0);
   }

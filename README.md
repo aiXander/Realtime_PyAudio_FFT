@@ -125,6 +125,7 @@ Pick a palette from the top bar and it recolors everything, the 3D styles includ
 |---|---|---|
 | `/audio/lmh` | `low mid high` (floats, `~[0, 1]`) | Every audio block (~187 Hz) |
 | `/audio/onset/low` · `/mid` · `/high` | `1` | Once per detected onset on that band (no `0`s are sent) |
+| `/audio/level` | `level` (float, `0..1`) | Every block. Overall loudness, never auto-scaled: `0..1` over the dB range set in the UI's *Level* panel (default −60..0 dBFS RMS, clipped outside) |
 | `/audio/bpm` | `bpm` | Every block. Octave-folded into 60–180, `0` until locked or after 5 s of silence |
 | `/audio/fft` | `n_bins` floats | Every FFT hop (~94 Hz), only when `osc.send_fft: true` |
 | `/audio/meta` | `sr blocksize n_fft_bins low_lo low_hi mid_lo mid_hi high_lo high_hi` | On start, on changes, and once a second |
@@ -202,6 +203,7 @@ Sliders can send `commit: false` while dragging and `commit: true` on release. T
 | `set_smoothing` | `tau: {low?, mid?, high?}`, `tau_attack: {…}` (seconds, 0.005–2) |
 | `set_autoscale` | any of `tau_attack_s` (0.001–1), `tau_release_s` (5–300), `noise_floor` (0–0.1), `strength` (0–1), `master_gain` |
 | `set_onset` | `band`, any of `sensitivity`, `refractory_s`, `slow_tau_s`, `abs_floor` |
+| `set_level` | any of `tau_s`, `floor_db`, `ceiling_db` (ceiling ≥ floor + 1 dB) |
 | `set_fft` | `enabled: bool` |
 | `set_n_fft_bins` | `n` (16–1024) |
 | `set_fft_send_raw_db` | `send_raw_db: bool` |

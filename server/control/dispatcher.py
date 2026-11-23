@@ -322,6 +322,22 @@ class Dispatcher:
             if not any_applied:
                 raise _SkipSection
 
+        with _preset_section("level", applied):
+            lv = data.get("level")
+            if not isinstance(lv, dict):
+                raise _SkipSection
+            cur = self.app.cfg.level
+            ok = V.validate_level(
+                tau_s=lv.get("tau_s"),
+                floor_db=lv.get("floor_db"),
+                ceiling_db=lv.get("ceiling_db"),
+                cur_floor_db=cur.floor_db,
+                cur_ceiling_db=cur.ceiling_db,
+            )
+            if not ok:
+                raise _SkipSection
+            self.app.apply_level(ok)
+
         if not applied:
             raise ValueError(f"preset {name!r} produced no valid fields")
         self.app.persister.request(commit=True)
@@ -403,6 +419,22 @@ class Dispatcher:
         self.app.persister.request(commit=commit)
         return self._meta_changed()
 
+    async def _set_level(self, msg):
+        commit = bool(msg.get("commit", True))
+        lv = self.app.cfg.level
+        ok = V.validate_level(
+            tau_s=msg.get("tau_s"),
+            floor_db=msg.get("floor_db"),
+            ceiling_db=msg.get("ceiling_db"),
+            cur_floor_db=lv.floor_db,
+            cur_ceiling_db=lv.ceiling_db,
+        )
+        if not ok:
+            raise ValueError("set_level needs at least one of tau_s / floor_db / ceiling_db")
+        self.app.apply_level(ok)
+        self.app.persister.request(commit=commit)
+        return self._meta_changed()
+
     _handlers = {
         "set_fft": _set_fft,
         "set_band": _set_band,
@@ -416,6 +448,7 @@ class Dispatcher:
         "set_fft_peak_smear": _set_fft_peak_smear,
         "set_fft_tilt": _set_fft_tilt,
         "set_onset": _set_onset,
+        "set_level": _set_level,
         "set_filter_order": _set_filter_order,
         "set_peak_decay": _set_peak_decay,
         "set_show_onsets": _set_show_onsets,

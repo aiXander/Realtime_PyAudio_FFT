@@ -281,6 +281,11 @@ def summarize_status(statuses: list[dict]) -> dict:
     first, last = statuses[0], statuses[-1]
     for k in ("cb_overruns", "dsp_drops", "fft_drops"):
         out[k] = int(last.get(k, 0)) - int(first.get(k, 0))
+    # Distinct drop events: status ticks (5 Hz) in which either counter rose.
+    out["drop_events"] = sum(
+        1 for a, b in zip(statuses, statuses[1:])
+        if int(b.get("dsp_drops", 0)) > int(a.get("dsp_drops", 0))
+        or int(b.get("fft_drops", 0)) > int(a.get("fft_drops", 0)))
     out["audio_stalled_any"] = any(s.get("audio_stalled") for s in statuses)
     out["block_period_ms"] = last["perf"]["block_period_ms"]
     out["hop_period_ms"] = last["perf"]["hop_period_ms"]
@@ -288,6 +293,7 @@ def summarize_status(statuses: list[dict]) -> dict:
 
 
 def measure_phase(name, proc, osc, player, duration, ws: WsClient | None):
+    load0 = os.getloadavg()
     t0, c0, th0 = cpu_snapshot(proc)
     st0 = len(ws.statuses) if ws else 0
     counts0 = dict(ws.counts) if ws else {}
@@ -298,7 +304,8 @@ def measure_phase(name, proc, osc, player, duration, ws: WsClient | None):
     res = {"phase": name, "wall_s": wall,
            "cpu_pct_one_core": (c1 - c0) / wall * 100.0,
            "rss_mb": proc.memory_info().rss / 2**20,
-           "num_threads": proc.num_threads()}
+           "num_threads": proc.num_threads(),
+           "loadavg_1m_start_end": [round(load0[0], 2), round(os.getloadavg()[0], 2)]}
     per_thread = sorted(((tid, (th1.get(tid, 0.0) - th0.get(tid, 0.0)) / wall * 100.0) for tid in th1),
                         key=lambda x: -x[1])
     res["threads_cpu_pct"] = {tid: round(p, 2) for tid, p in per_thread if p > 0.05}

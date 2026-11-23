@@ -4,8 +4,7 @@
 //! YAML parse error, an empty file or a non-mapping root is *corrupt* (backed
 //! up and reseeded from the example); a parseable file with an invalid value
 //! is a fatal startup error. A short list of optional keys take defaults.
-//! No legacy migrations (decided by Xander: `beat:` and the old layout are
-//! not read).
+//! There is one config format and neither engine converts older ones.
 
 use crate::py::{self, CoerceError};
 use crate::validate::{self as v, UiLayout};

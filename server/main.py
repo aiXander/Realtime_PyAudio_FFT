@@ -1156,56 +1156,6 @@ async def _run(args, cfg, config_path):
         await app.shutdown()
 
 
-def _migrate_legacy_config_layout(config_path: Path) -> None:
-    """One-shot migration: fold legacy `config.yaml` + `presets/*.yaml` into `configs/`."""
-    configs_dir = config_path.parent
-    try:
-        configs_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return
-    cwd = Path.cwd().resolve()
-    # Legacy main config at cwd/config.yaml -> configs/main.yaml
-    legacy_main = cwd / "config.yaml"
-    if legacy_main.exists() and not config_path.exists() and legacy_main.resolve() != config_path:
-        try:
-            legacy_main.rename(config_path)
-            log.info("migrated %s -> %s", legacy_main, config_path)
-        except OSError as e:
-            log.warning("could not migrate legacy config.yaml: %s", e)
-    # Legacy presets/*.yaml or presets/preset-*.yaml -> configs/<name>.yaml
-    legacy_presets = cwd / "presets"
-    if legacy_presets.is_dir():
-        for p in legacy_presets.glob("*.yaml"):
-            stem = p.stem
-            if stem.startswith("preset-"):
-                stem = stem[len("preset-"):]
-            if stem.lower() == "main":
-                continue
-            target = configs_dir / f"{stem}.yaml"
-            if target.exists():
-                continue
-            try:
-                p.rename(target)
-            except OSError:
-                pass
-        try:
-            legacy_presets.rmdir()
-        except OSError:
-            pass
-    # Legacy preset-*.yaml at cwd
-    for p in cwd.glob("preset-*.yaml"):
-        stem = p.stem[len("preset-"):]
-        if not stem or stem.lower() == "main":
-            continue
-        target = configs_dir / f"{stem}.yaml"
-        if target.exists():
-            continue
-        try:
-            p.rename(target)
-        except OSError:
-            pass
-
-
 def _resolve_config_path(arg_value: str | None) -> Path:
     """Find the config file deterministically, regardless of CWD.
 
@@ -1253,7 +1203,6 @@ def main(argv=None):
     # platforms / permissions where it can't apply.
     boost_current_thread("main")
     config_path = _resolve_config_path(args.config)
-    _migrate_legacy_config_layout(config_path)
     if not config_path.exists() and args.config is None:
         # Fresh clone: seed configs/main.yaml from the checked-in example so
         # the persister has a writable target. Example has device=null so

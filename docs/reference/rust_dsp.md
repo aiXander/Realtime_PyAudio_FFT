@@ -69,8 +69,8 @@ Checked 2026-10-24 with throwaway test projects. The versions are the ones that 
 | Thread priority | `libc` 0.2 (`pthread_set_qos_class_self_np` / `thread_policy_set` on macOS, `pthread_setschedparam` / nice on Linux) | Main thread: same policy as `server/priority.py`; workers: real-time class ([`rust_server.md`](rust_server.md) → Worker scheduling). Avoid the `libc` 1.0 alpha. |
 | CLI / logging / open browser | `clap` 4, `tracing` 0.1 + `tracing-subscriber` 0.3, `webbrowser` 1 | Same flags: `--open --device --no-ws --config --log-level`. |
 | Parity tests / benches | `npyz` 0.9 (reads the goldens), `criterion` 0.8, `loom` 0.7 (slot-ring), `hound` 3.5 (replay bin WAV) | |
-| Pi builds | `cross` or `cargo-zigbuild` → `aarch64-unknown-linux-gnu` | ALSA dev libs in the sysroot. Not built yet: [`../TODO/rust_port.md`](../TODO/rust_port.md) → Pi validation. |
-| Packaging | `rust-embed` 8, `directories` 6 | Not built and not scheduled: Rust is built from source, pip ships the Python engine. See [`../TODO/rust_port.md`](../TODO/rust_port.md) → Distribution. |
+| Pi builds | `cross` or `cargo-zigbuild` → `aarch64-unknown-linux-gnu` | ALSA dev libs in the sysroot. Runs on the Pi; one open check (real-time worker priority) is in the repo `CLAUDE.md`. |
+| Packaging | `rust-embed` 8, `directories` 6 | Not built and not scheduled: Rust is built from source, pip ships the Python engine. See [`../TODO/engine_ideas.md`](../TODO/engine_ideas.md). |
 
 ## Known L/M/H residual
 

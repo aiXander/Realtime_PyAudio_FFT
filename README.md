@@ -37,17 +37,27 @@ https://github.com/user-attachments/assets/83547924-0b8d-4667-ba55-5cb813fdc09d
 
 ## Quick start
 
-There are two engines with identical behaviour; install whichever you like. **Rust is the default** and the faster one. Python is the reference implementation and the easier one to hack on.
+One clone gives you both engines. They behave identically and share the UI, the configs and the OSC / WebSocket messages; only the core differs. Install whichever you like:
 
-**Rust engine.** You need [rustup](https://rustup.rs/); the pinned toolchain installs itself on the first build. No Python or PortAudio needed (on Linux, install the ALSA headers: `sudo apt install libasound2-dev`).
+| | **Rust** (the default) | **Python** |
+|---|---|---|
+| Run it with | `make start` | `make start-python` |
+| You need | [rustup](https://rustup.rs/) and a C toolchain | Python 3.10+, [uv](https://docs.astral.sh/uv/), PortAudio |
+| Tested on | macOS, Raspberry Pi | macOS, Linux, Raspberry Pi |
+| Pick it for | the lowest CPU and latency | hacking on the DSP |
+
+**Rust engine.** The pinned Rust toolchain installs itself on the first build. No Python or PortAudio needed. On Linux (including the Pi), the audio threads only get real-time priority if your user is allowed it, e.g. via an `@audio - rtprio 20` line in `/etc/security/limits.d/` with you in the `audio` group; without it, a busy machine can drop audio blocks.
 
 ```bash
+xcode-select --install                               # macOS, if you have no C toolchain yet
+sudo apt install build-essential pkg-config libasound2-dev   # Ubuntu / Debian
+
 git clone https://github.com/aiXander/Realtime_PyAudio_FFT.git
 cd Realtime_PyAudio_FFT
 make start                                           # release build, then server + UI in your browser
 ```
 
-**Python engine.** You need Python 3.10+, [uv](https://docs.astral.sh/uv/) and PortAudio.
+**Python engine.**
 
 ```bash
 brew install portaudio                               # macOS
@@ -58,6 +68,8 @@ cd Realtime_PyAudio_FFT
 uv sync
 make start-python                                    # = uv run audio-server --open
 ```
+
+No `make`? Run `cd engine && cargo run --release -p server -- --open` (Rust) or `uv run audio-server --open` (Python) from the repo instead.
 
 Both read and write the same `configs/main.yaml`, so you can switch engines at any time. `make start CONFIG=name` (or `make start-python CONFIG=name`) runs on `configs/name.yaml` instead. Measured on an M2 MacBook (48 kHz, 256-sample blocks, default settings, UI open):
 
@@ -78,11 +90,22 @@ Both engines take the same flags (`engine/target/release/audio-server …` or `u
 | `--open` | Open the UI in your default browser |
 | `--device N` | Use input device `N` (pick it in the UI otherwise) |
 | `--no-ws` | Headless: OSC only, no UI or WebSocket (e.g. a Pi at a gig) |
+| `--no-fft` | Start with the FFT off, whatever the config says (saves CPU when you only need bands, onsets and BPM; the UI can still turn it on) |
 | `--config PATH` | Use another config file instead of `configs/main.yaml` |
 | `--log-level DEBUG` | More logging |
 
 > [!TIP]
 > To react to what your computer is *playing* rather than a mic, route system audio into a loopback device ([BlackHole](https://github.com/ExistentialAudio/BlackHole) on macOS, a loopback / monitor device on Linux or Windows) and select it as the input.
+
+<details>
+<summary><b>Upgrading from an older checkout</b></summary>
+
+Until November 2026, `master` held only the Python engine and the Rust engine lived on a separate `rust-engine` branch. Both engines now live on `master`, and that branch is gone.
+
+- **Were you on `rust-engine`?** Switch back: `git checkout master && git pull`, then `git branch -D rust-engine`.
+- **`make start` now runs Rust,** not Python. Use `make start-python` to keep the Python engine.
+- **There is one config format, and older ones aren't converted.** Both engines read `configs/*.yaml` the same way. A pre-2026 `beat:` section is ignored (onset settings start from their defaults), and a `config.yaml` or `presets/` folder outside `configs/` isn't picked up.
+</details>
 
 ## FFT views and palettes
 

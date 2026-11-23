@@ -214,24 +214,11 @@ def _build_config(d: dict) -> Config:
         send_raw_db=bool(fd["send_raw_db"]),
     )
 
-    # Per-band onset detector. The legacy single-band `beat:` block (low-band
-    # only) is migrated transparently here: if `onset:` is missing but `beat:`
-    # is present, use it for the low band and seed mid/high with snappier
-    # defaults (shorter refractory + slow tau — snares and hats are sharper
-    # and denser than kicks). On the next config write the new `onset:` shape
-    # is persisted and the `beat:` block disappears.
+    # Per-band onset detector. A missing block or key takes the defaults
+    # (mid/high snappier than low: snares and hats are sharper and denser).
     onset_raw = d.get("onset")
     if not isinstance(onset_raw, dict):
-        legacy = d.get("beat") or {}
-        onset_raw = {
-            "low": {
-                "sensitivity": legacy.get("sensitivity", 1.8),
-                "refractory_s": legacy.get("refractory_s", 0.25),
-                "slow_tau_s": legacy.get("slow_tau_s", 0.30),
-            },
-            "mid":  {"sensitivity": 1.8, "refractory_s": 0.18, "slow_tau_s": 0.20},
-            "high": {"sensitivity": 1.8, "refractory_s": 0.12, "slow_tau_s": 0.15},
-        }
+        onset_raw = {}
     onset_defaults = {
         "low":  {"sensitivity": 1.8, "refractory_s": 0.25, "slow_tau_s": 0.30, "abs_floor": 0.10},
         "mid":  {"sensitivity": 1.8, "refractory_s": 0.18, "slow_tau_s": 0.20, "abs_floor": 0.10},
@@ -275,11 +262,9 @@ def _build_config(d: dict) -> Config:
     ui = UiCfg(
         peak_decay_per_s=V.validate_peak_decay_per_s(ud["peak_decay_per_s"]),
         layout=V.validate_ui_layout(ud["layout"]),
-        # Added after the initial schema; legacy configs without the key
-        # default to OFF (onset squares hidden — matches the user's first-run
-        # expectation of a minimal bars+peak-hold view).
+        # Optional keys (same defaults in engine/server/src/config.rs):
+        # onset squares hidden, 2D FFT view.
         show_onsets=bool(ud.get("show_onsets", False)),
-        # Added with the 3D FFT view; legacy configs default to the 2D view.
         fft_view=V.validate_fft_view(ud.get("fft_view", "2d")),
         # Look-only UI choices: an unknown name (e.g. a style that was
         # removed) falls back to the default instead of failing the load.

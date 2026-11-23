@@ -233,11 +233,7 @@ class Dispatcher:
         a = data.get("autoscale", {}) or {}
         onset = data.get("onset")
         if not isinstance(onset, dict):
-            # Legacy single-band `beat:` block — port to low-band onset; leave
-            # mid/high untouched so the active config's per-band tuning isn't
-            # overwritten by a preset that only knew about the old shape.
-            legacy = data.get("beat", {}) or {}
-            onset = {"low": legacy} if legacy else {}
+            onset = {}
 
         with _preset_section("dsp.bands", applied):
             bands_raw = {k: d.get(k) for k in ("low", "mid", "high") if isinstance(d.get(k), dict)}

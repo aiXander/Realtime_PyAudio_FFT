@@ -67,8 +67,8 @@ goldens, and `ledctl` must de-duplicate. Not without evidence.
 `/audio/level` (a loudness that is never auto-gained, on a range set in the server UI) in both
 engines at parity,
 with DSP and wire goldens; host-name destinations resolved on the `osc-resolve` thread in the
-Rust engine; `configs/*.yaml` gitignored except the example. Nothing here depends on the
-Rust-on-Pi phase of `rust_port.md`: the gig runs this server on the Mac only.
+Rust engine; `configs/*.yaml` gitignored except the example. Nothing here is
+Pi-specific.
 
 Done — see [reference/engine_contracts.md](../reference/engine_contracts.md) (the wire, the
 level's definition, destinations) and [reference/rust_server.md](../reference/rust_server.md)

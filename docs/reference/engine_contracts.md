@@ -31,7 +31,7 @@ This is a map. **Exact message shapes** are the captured instances in `testdata/
   | mid | 1.8 | 0.18 | 0.20 | 0.10 |
   | high | 1.8 | 0.12 | 0.15 | 0.10 |
 
-  A missing `onset:` block uses these defaults. (The legacy `beat:` → `onset.low` migration also lives here; the Rust port drops it.)
+  A missing `onset:` block uses these defaults. There is one schema: neither engine converts older formats (an old `beat:` block is ignored).
 - **Validators** are the single source of the value rules:
   - **Rejected** when non-finite or wrongly typed. `bool` is not accepted as a number.
   - **Clamped, not rejected:**

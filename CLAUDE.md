@@ -4,9 +4,13 @@ A realtime audio-analysis server for live visuals: it turns an audio input into 
 
 ## Two engines, one interface
 
-The repo has **two permanent engines**: `server/` (Python) and `engine/` (Rust, the default, `make start`). They share one `ui/`, one `configs/`, one CLI and one WS/OSC protocol; only the core differs. Python is the **DSP reference**: the parity goldens are generated from it and Rust is tested against them. **A behaviour change (DSP, a knob, a WS/OSC message, config schema) lands in both engines in the same commit, followed by `make check`.** UI and wire contracts exist once. Rule, what `make check` covers and the parity traps: `docs/reference/dual_engine.md`. Open work (Pi validation, distribution): `docs/TODO/`.
+The repo has **two permanent engines**: `server/` (Python) and `engine/` (Rust, the default, `make start`). They share one `ui/`, one `configs/`, one CLI and one WS/OSC protocol; only the core differs. Python is the **DSP reference**: the parity goldens are generated from it and Rust is tested against them. **A behaviour change (DSP, a knob, a WS/OSC message, config schema) lands in both engines in the same commit, followed by `make check`.** UI and wire contracts exist once. Rule, what `make check` covers and the parity traps: `docs/reference/dual_engine.md`. Open plans: `docs/TODO/`.
 
 **Definition of done** for a behaviour change: both engines changed, `make check` green, `cd engine && cargo clippy --all-targets` clean, no new `uv run ruff check server tools` errors (the existing E701/E702 one-liners are the house style), docs pass done.
+
+**One config format.** Both engines read one `configs/*.yaml` schema and neither converts older ones. A schema change updates both loaders and every file in `configs/`, never as a converter.
+
+**Raspberry Pi: one open check.** The Pi gig setup (`make start CONFIG=pi`) runs and is validated, except that nobody has confirmed the audio worker threads get real-time priority there. Next time the server runs on the Pi, read the startup log's `priority:` lines. If the workers got neither `SCHED_FIFO` nor nice −5 (a plain Linux user gets neither by default), run the server from a systemd unit with `LimitRTPRIO=20` + `LimitNICE=-10`, or add the user to `audio` with an `@audio` rule in `/etc/security/limits.d/`. Without that boost, workers dropped audio blocks in the M2 soaks. Once confirmed, delete this paragraph.
 
 | Reference doc | Open it when |
 |---|---|
@@ -88,7 +92,7 @@ cd engine && cargo test && cargo clippy --all-targets  # Rust engine (rustup 1.9
 
 > Note: the console script lives in `.venv/bin/audio-server`, so bare `audio-server` only works if that venv is activated (`source .venv/bin/activate`). Prefer `uv run audio-server …`, which doesn't need activation.
 
-The `configs/` directory *must* be writable — the Persister atomically rewrites `configs/main.yaml` on every UI control change, and presets are saved alongside as `configs/<name>.yaml`. (A legacy `./config.yaml` + `presets/` layout is auto-migrated into `configs/` at startup.)
+The `configs/` directory *must* be writable — the Persister atomically rewrites `configs/main.yaml` on every UI control change, and presets are saved alongside as `configs/<name>.yaml`.
 
 ## Architecture: the threading contract is the design
 
@@ -206,7 +210,6 @@ Algorithm — three independent Schmitt-trigger onset detectors sharing one hot 
 
 User-facing knobs (`sensitivity`, `refractory_s`, `slow_tau_s`, `abs_floor`, per band) live in `cfg.onset.{low,mid,high}` and are routed through `Dispatcher._set_onset` (with a `band` field) → `App.apply_onset(band, ok)` → `OnsetTracker.set_params(band, ...)`. The setters are atomic single-element writes into the `k_high` / `min_ioi_s` / `slow_tau_s` length-3 numpy arrays (worker re-reads on next iteration; no lock needed) — same pattern as `ExpSmoother.set_tau` / `AutoScaler.set_*`. `OnsetTracker.reconfigure(sr, blocksize)` is called from `App.hot_switch_device` to re-derive `dt` / alphas; user-tuned params persist across the swap. The `K_LOW`, fast envelope tau, threshold-EMA tau, `BPM_*` constants are deliberately not exposed — exposing every endpoint is over-tuning.
 
-**Legacy `beat:` config migration.** The previous schema had a single `beat:` block (low-band only). On load, if `onset:` is absent and `beat:` is present, `server/config.py:_build_config` ports the legacy values into `onset.low` and seeds `onset.{mid,high}` with snappier per-band defaults (shorter refractory / slow tau). On the next config write the new `onset:` shape is persisted and the `beat:` block disappears. The preset loader does the same migration for old preset files.
 
 ### Wire formats
 

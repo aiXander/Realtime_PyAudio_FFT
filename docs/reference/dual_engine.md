@@ -1,6 +1,6 @@
 # Two engines: Python and Rust, kept in agreement
 
-The repo ships two permanent audio-server engines with the same outward behaviour: `server/` (Python) and `engine/` (Rust, the default and what Xander runs day to day). They share one `ui/`, one `configs/`, one CLI, one WS protocol and one OSC protocol, so a consumer (WZRD, the LED controller, the browser UI) can't tell which engine it talks to. The engines differ only in their core. Python is the **DSP reference**: the parity goldens are generated from it and the Rust engine is tested against them. Someone cloning the repo installs one engine (`uv sync` or the Rust toolchain); `make start` runs Rust, `make start-python` runs Python.
+The repo ships two permanent audio-server engines with the same outward behaviour: `server/` (Python) and `engine/` (Rust, the default and what Xander runs day to day). They share one `ui/`, one `configs/`, one CLI, one WS protocol and one OSC protocol, so a consumer (WZRD, the LED controller, the browser UI) can't tell which engine it talks to. The engines differ only in their core. Python is the **DSP reference**: the parity goldens are generated from it and the Rust engine is tested against them. Someone cloning the repo installs one engine (`uv sync` or the Rust toolchain); `make start` runs Rust, `make start-python` runs Python. **Distribution (decided):** `pip` / `uv` installs the Python engine; the Rust engine is built from source with cargo. There is no maturin wheel and there are no prebuilt Rust binaries (what building them would take: [`../TODO/engine_ideas.md`](../TODO/engine_ideas.md)).
 
 ## Where the code lives
 
@@ -58,7 +58,7 @@ Places where a "reasonable" reimplementation diverges from the Python reference.
 22. **`FFTPostProcessor.reset()` resets smooth + peak + warm-up only.** `peak_smoothed` and the sentinel LUT survive. `reconfigure()` rebuilds everything, and the LUT is rebuilt from the next frame.
 23. **`load_preset` always reconfigures the FFT** through the `fft.n_bins` and `fft.window` sections, even with unchanged values, which resets all FFT post-processing state. The goldens' `script_drums` event at block 1100 records the exact call sequence.
 24. **Unknown WS message types get an error with no snap-back meta.** Only handler `ValueError`s add the targeted meta (see `testdata/golden/wire/`).
-25. **Legacy config migrations are Python-only.** Python still ports `beat:` → `onset:` and the old `./config.yaml` + `presets/` layout; Rust reads only the current schema (a file without `onset:` gets the onset defaults). Load and re-save an old config with Python once before pointing Rust at it.
+25. **One config format, no converters.** Both loaders read only the current schema (a file without `onset:` gets the onset defaults). A schema change updates both loaders and every file in `configs/`; never add a migration to one engine only.
 
 ## Runbook
 

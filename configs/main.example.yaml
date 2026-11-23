@@ -94,8 +94,18 @@ ui:
   peak_decay_per_s: 0.5
   show_onsets: false
   fft_view: 2d    # FFT card: 2d spectrum or 3d history ("ocean")
-  fft3d_style: cloud   # 3D look: cloud | aurora | topo | synthwave | engraving | embers
+  fft3d_style: cloud   # 3D look: cloud | topo | spectrogram | partials
   palette: classic     # UI colors: classic | neon | ember | ocean | sunset | mono | okabe
+  fft3d:                 # 3D view look (all optional; set from the FFT card's 3D controls)
+    res: balanced          # analysis: time | balanced | pitch
+    smooth_ms: 40.0        # power average per frame, 0–200 ms
+    range_db: 60.0         # dB below the top shown above the floor, 20–120
+    tilt_db_per_oct: 3.0   # display tilt around 1 kHz, −6–12
+    overscan: 0.05         # front row past each card edge (× width), 0–0.3
+    perspective: 1.0       # × the style's narrowing toward the horizon, 0–3
+    skew: 0.0              # horizon shift, −1 (left) … 1 (right)
+    height: 1.0            # × the style's peak height, 0.25–3
+    horizon: 0.0           # far edge lowered toward the front, 0–0.8
   layout:
     split_x: 0.34536064701337327
     split_y: 0.3863162718337408

@@ -243,6 +243,44 @@ def validate_palette(v):
     return v
 
 
+# 3D view display + camera (UI-only, `ui.fft3d`; same table in
+# engine/server/src/validate.rs). Numbers clamp to these ranges, which the UI
+# controls stay inside. Defaults live in config.FFT3D_DEFAULTS.
+FFT3D_RES = ("time", "balanced", "pitch")
+FFT3D_RANGES = {
+    "smooth_ms": (0.0, 200.0),          # power average before the ring
+    "range_db": (20.0, 120.0),          # dB below the top shown above the floor
+    "tilt_db_per_oct": (-6.0, 12.0),    # display tilt around 1 kHz
+    "overscan": (0.0, 0.3),             # front row past each card edge, × plot width
+    "perspective": (0.0, 3.0),          # × the style's narrowing toward the back
+    "skew": (-1.0, 1.0),                # horizon shift, × half the plot width
+    "height": (0.25, 3.0),              # × the style's peak height
+    "horizon": (0.0, 0.8),              # back edge lowered toward the front, 0..1
+}
+
+
+def validate_fft3d(src, lenient=False):
+    """The `ui.fft3d` keys present (non-null) in `src`, validated. Strict
+    (WS) raises on a bad value; lenient (YAML load) skips it so the default
+    stays, like an unknown style name."""
+    out = {}
+    for key in ("res", *FFT3D_RANGES):
+        v = src.get(key)
+        if v is None:
+            continue
+        try:
+            if key == "res":
+                if v not in FFT3D_RES:
+                    raise ValueError(f"res must be one of {list(FFT3D_RES)}")
+                out[key] = v
+            else:
+                out[key] = _clamp(_finite_float(v, key), FFT3D_RANGES[key])
+        except ValueError:
+            if not lenient:
+                raise
+    return out
+
+
 def validate_onset(sensitivity=None, refractory_s=None, slow_tau_s=None,
                    abs_floor=None):
     """Per-band onset-detector tunables. Hard invariants only:

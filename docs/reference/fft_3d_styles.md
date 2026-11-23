@@ -15,7 +15,7 @@ The 3D view does **not** show the LED-oriented FFT the 2D view shows (`/audio/ff
 | `ui/src/viz/fft3d_styles/common.js` | The **style contract** (header comment) and shared shader snippets: `SPEC_FN` / `SPEC_FS` (texture reads), `GRID_FN` + `SURF_VS` (grid vertices), `PROJ_FN`, `bandFn`, `RAMP_FN`, `LINE_FN`, `LOG_PAPER_FN`, `HASH_FN`, `FLAT_VS`; `program()`, `setCommonUniforms()`, front-edge strips, `drawSecondLabels()`. |
 | `ui/src/viz/fft3d_styles/index.js` | Registry: `STYLE_ORDER` (dropdown order), `STYLES`, `DEFAULT_STYLE`. |
 | `ui/src/viz/fft3d_styles/<name>.js` | One module per look: `cloud` (palette-colored dust), `topo` (survey map), `spectrogram`, `partials` (peak tracks). Look constants sit at the top of each. |
-| `ui/src/main.js` | `syncSpectro()`: subscribes while the 3D view shows live data; the 3D title-bar controls (resolution, smooth, range, tilt; `controls.js`, localStorage). |
+| `ui/src/main.js` | `syncSpectro()`: subscribes while the 3D view shows live data; `apply3dDisplay()` hands `store.fft3d` to the core. The 3D title-bar pickers and the **camera** panel live in `controls.js`. |
 | `ui/src/colors.js` | **Palettes** + the mutable `LMH` / `LMH_HEX` / `theme` objects every viz reads. |
 | `server/control/validate.py` | `FFT3D_STYLES` / `PALETTES` name lists — **keep in sync** with the registry and `PALETTE_ORDER`. |
 
@@ -44,7 +44,7 @@ Wire format and message fields: [`engine_contracts.md`](engine_contracts.md) →
 
 Both choices are server-authoritative UI settings, same pattern as the 2D/3D toggle: dropdown → WS `set_fft3d_style {style}` / `set_palette {palette}` → `cfg.ui.fft3d_style` / `cfg.ui.palette` (persisted in YAML) → meta `ui_fft3d_style` / `ui_palette` → `controls.syncMeta` sets `store.fft3d_style` and calls `applyPalette()`. The style dropdown sits in the FFT card title and only shows in 3D view. The palette dropdown is in the top bar. Unknown names in YAML fall back to the default (`_or_default` in `server/config.py`), so removing a style never breaks config loading.
 
-The 3D view's own settings (resolution, smooth, range, tilt) are UI-local: `localStorage` key `fft3d_display`. Resolution is a `set_spectro` field; smooth applies to frames from then on; range and tilt are display uniforms only.
+The 3D view's own settings are server-authoritative too, in one block: `ui.fft3d` (pickers: `res`, `smooth_ms`, `range_db`, `tilt_db_per_oct`; camera panel: `overscan`, `perspective`, `skew`, `height`, `horizon`), set with a partial `set_fft3d {key: value…, commit?}`, mirrored from meta `ui_fft3d` into `store.fft3d`. Ranges: `FFT3D_RANGES` in both `validate` modules; a bad key in YAML keeps its default. Resolution is a `set_spectro` field; smooth applies to frames from then on; the rest are uniforms. Camera sliders also write `store.fft3d` while dragged (local preview) and ignore meta echoes while held (`bindSlider().held`).
 
 ## Style contract (short version, details in `common.js`)
 
@@ -53,12 +53,13 @@ A style default-exports `{ name, label, description, camera?, grid?, background,
 - **Only one instance is alive.** The core disposes the old instance on a switch, and recreates it after a context restore.
 - `f` is one preallocated bundle mutated per frame: geometry (`geo`), grid (`R` rows, `mc` cols, `surfVao`, `triCount`, `rowDz`), front edge (`frontH`, `edgeX/edgeY`, `yBaseF`), band stops (palette), `t` (wall clock), and `spec` (every texture/grid uniform, set by `setCommonUniforms`). The texture is bound on unit 0 before `render()`. `render()` must not allocate.
 - The grid VAO has **no attributes**: vertex shaders work from `gl_VertexID` through `gridVertex()` (u, texture row, z, row key, pool). `SURF_VS` outputs `vU, vH, vZ, vKey, vS, vT, vPx`; `vT` is the texture row to pass to `specSurface` / `specH`.
-- `camera: { backScale, ampFront }` reshapes the projection (uniforms `uK`, `uBackScale`).
+- `camera: { backScale, ampFront }` is the style's look at the camera panel's **perspective ×1 / height ×1**; the user's settings multiply it (`geometry()` in `fft_3d.js`), so per-style tuning survives one global camera.
 - `specSurface` uses `fwidth`, so it lives in `SPEC_FS` (fragment only). Including it in a vertex shader fails to compile ("no matching overloaded function").
 - Lines on a uniform time grid use the depth: `gridLine(vZ · depthS)` (1 s parallels).
 
 ## Decisions and traps
 
+- **Projection (`PROJ_FN` + its CPU twin `projectRow` in `common.js`).** A row at depth z scales by s = 1/(1 + K·z) and sits `ground(z) = z(1+K)/(1+K·z)` of the way from the front baseline to the horizon; skew shifts it sideways by the same share. This form stays finite at K = 0 (perspective ×0, parallel rows). Depth is written from `ground(z)`, not from s: with s ≡ 1 at K = 0 every row would get the same depth and the back-to-front draw would let far rows paint over near ones. Overscan widens the front row past the card (`geo.halfW`), so the narrowing rows fill the width from a moment back instead of leaving empty corners; the x-axis labels follow `halfW` and drop ticks pushed off the card.
 - **Never draw the raw frames.** A short-window bin of noise-like sound is chi-square distributed (~±5 dB) and independent from one 5 ms frame to the next above ~2 kHz. Drawn raw it is speckle, a front edge that dances at the display rate, and shimmer as the picture scrolls (each pixel's taps slide over uncorrelated rows). Max-pooling raw rows made it worse: the max of six random draws is biased ~4 dB up and still random. Measured on a music file (40 ms vs raw): treble frame-to-frame change 3.2 → 0.5 dB, scroll shimmer down 3–8×, largest treble onset rise in 21 ms 40 → 34 dB.
 - **A boxcar, not a one-pole, for the integration.** A one-pole in power rises fast but falls only 4.3 dB per time constant: 25 ms leaves a ~350 ms tail behind every click on a 60 dB scale.
 - **The level must not follow single peaks.** The mapping is one uniform for the whole history, so every change re-maps everything on screen. An instant-attack / 6 dB/s-release top moved ~9 dB/s in steady music: the floor dropped on every kick and crept back. Any new scheme has to hold still for material that keeps its level.

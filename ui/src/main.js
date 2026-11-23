@@ -30,7 +30,11 @@ const fft   = makeFft(fftCanvas);
 const fft3d = makeFft3d(fftCanvas);
 onSpectro((buf) => { const m = decodeSpectro(buf); if (m) fft3d.push(m); });
 function apply3dDisplay() {
-  fft3d.setDisplay({ rangeDb: store.fft3d_range_db, tiltDbOct: store.fft3d_tilt, integrateMs: store.fft3d_smooth_ms });
+  const c = store.fft3d;
+  fft3d.setDisplay({
+    rangeDb: c.range_db, tiltDbOct: c.tilt_db_per_oct, integrateMs: c.smooth_ms,
+    camera: { overscan: c.overscan, perspective: c.perspective, skew: c.skew, height: c.height, horizon: c.horizon },
+  });
 }
 apply3dDisplay();
 
@@ -41,9 +45,9 @@ let spectroSent = "";   // last state sent: "" = nothing (fresh connection), "of
 function syncSpectro() {
   const want = store.conn === "connected" && store.synced && store.fft_view === "3d"
     && !!store.meta.fft_enabled && !document.hidden && store.spectro_supported !== false;
-  const key = want ? `on|${store.fft3d_res}` : "off";
+  const key = want ? `on|${store.fft3d.res}` : "off";
   if (key === spectroSent || (!want && spectroSent === "")) return;
-  if (send({ type: "set_spectro", enabled: want, n_bins: 1024, res: store.fft3d_res })) spectroSent = key;
+  if (send({ type: "set_spectro", enabled: want, n_bins: 1024, res: store.fft3d.res })) spectroSent = key;
 }
 onMessage("spectro", (m) => {
   store.spectro = m;
@@ -199,6 +203,7 @@ onMessage("meta", (m) => {
   // the 3D view has its own analysis and its own controls.
   if (fft3dStyleWrap) fft3dStyleWrap.hidden = view !== "3d";
   if (fft3dTools) fft3dTools.hidden = view !== "3d";
+  if (view !== "3d") controls.showCamera(false);
   if (fftRawDbWrap) fftRawDbWrap.hidden = view === "3d";
   if (fftBinsWrap) fftBinsWrap.hidden = view === "3d";
   if (view !== lastFftView) {
@@ -218,7 +223,7 @@ function updateFftTitle() {
   if (!fftTitleMode) return;
   const scale = store.meta.fft_send_raw_db ? "raw dB" : "scaled 0..1";
   const label = (STYLES[store.fft3d_style]?.label || store.fft3d_style).toLowerCase();
-  const t = store.fft_view === "3d" ? `3D · ${label} · ${store.fft3d_res}` : `log-x · ${scale}`;
+  const t = store.fft_view === "3d" ? `3D · ${label} · ${store.fft3d.res}` : `log-x · ${scale}`;
   if (t !== lastTitle) fftTitleMode.textContent = lastTitle = t;
 }
 

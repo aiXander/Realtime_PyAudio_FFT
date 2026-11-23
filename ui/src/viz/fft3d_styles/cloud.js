@@ -72,7 +72,7 @@ void main() {
   vRand = float(hash(k) & 0xFFFFu) / 65535.0;
   float s;
   vec2 px = toPx(u, h, zz, s);
-  gl_Position = clipPos(px, s);
+  gl_Position = clipPos(px, s, zz);
   gl_Position.z -= 0.004 * gl_Position.w;   // sit just in front of the surface they ride on
   gl_PointSize = max(1.0, ${glf(POINT_PX)} * uDpr * sqrt(s));
   vU = u; vH = h; vZ = zz;

@@ -173,6 +173,80 @@ pub struct UiCfg {
     pub fft_view: String,
     pub fft3d_style: String,
     pub palette: String,
+    pub fft3d: Fft3dCfg,
+}
+
+/// `ui.fft3d`: the 3D view's display and camera (UI-only). Field order =
+/// the reference `Fft3dCfg` dataclass.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Fft3dCfg {
+    pub res: String,
+    pub smooth_ms: f64,
+    pub range_db: f64,
+    pub tilt_db_per_oct: f64,
+    pub overscan: f64,
+    pub perspective: f64,
+    pub skew: f64,
+    pub height: f64,
+    pub horizon: f64,
+}
+
+/// Same values as `FFT3D_DEFAULTS` in server/config.py.
+impl Default for Fft3dCfg {
+    fn default() -> Self {
+        Fft3dCfg {
+            res: "balanced".into(),
+            smooth_ms: 40.0,
+            range_db: 60.0,
+            tilt_db_per_oct: 3.0,
+            overscan: 0.05,
+            perspective: 1.0,
+            skew: 0.0,
+            height: 1.0,
+            horizon: 0.0,
+        }
+    }
+}
+
+impl Fft3dCfg {
+    fn num_mut(&mut self, key: &str) -> &mut f64 {
+        match key {
+            "smooth_ms" => &mut self.smooth_ms,
+            "range_db" => &mut self.range_db,
+            "tilt_db_per_oct" => &mut self.tilt_db_per_oct,
+            "overscan" => &mut self.overscan,
+            "perspective" => &mut self.perspective,
+            "skew" => &mut self.skew,
+            "height" => &mut self.height,
+            "horizon" => &mut self.horizon,
+            _ => unreachable!("FFT3D_RANGES key {key}"),
+        }
+    }
+
+    /// Set the keys present (non-null) in `src` (`validate_fft3d` in
+    /// validate.py). Strict (WS): the first bad value errors and nothing
+    /// changes. Lenient (YAML load): a bad value keeps the current one.
+    pub fn apply(&mut self, src: &Value, lenient: bool) -> v::VResult<()> {
+        let mut next = self.clone();
+        let present = |k: &str| src.get(k).filter(|x| !x.is_null());
+        if let Some(x) = present("res") {
+            match v::validate_fft3d_res(Some(x)) {
+                Ok(r) => next.res = r,
+                Err(e) if !lenient => return Err(e),
+                Err(_) => {}
+            }
+        }
+        for (key, range) in v::FFT3D_RANGES {
+            let Some(x) = present(key) else { continue };
+            match v::validate_fft3d_num(key, range, Some(x)) {
+                Ok(n) => *next.num_mut(key) = n,
+                Err(e) if !lenient => return Err(e),
+                Err(_) => {}
+            }
+        }
+        *self = next;
+        Ok(())
+    }
 }
 
 /// Field order = the reference dataclasses, so the YAML a persister writes
@@ -451,6 +525,12 @@ fn build_config(d: &Value) -> Result<Config, BuildErr> {
         fft3d_style: v::validate_fft3d_style(opt(ud, "fft3d_style")?)
             .unwrap_or_else(|_| "cloud".into()),
         palette: v::validate_palette(opt(ud, "palette")?).unwrap_or_else(|_| "classic".into()),
+        // Optional block; a missing / bad key keeps its default.
+        fft3d: {
+            let mut f3 = Fft3dCfg::default();
+            f3.apply(opt(ud, "fft3d")?.unwrap_or(&Value::Null), true)?;
+            f3
+        },
     };
 
     Ok(Config { audio, dsp, autoscale, fft, onset, level, osc, ws, ui })

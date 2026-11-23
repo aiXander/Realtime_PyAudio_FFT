@@ -86,11 +86,13 @@ export const store = {
   spectro_supported: null,
   spectro: null,
   spectro_perf: null,
-  // 3D display settings (UI-local, remembered in localStorage by controls.js).
-  fft3d_res: "balanced",
-  fft3d_range_db: 60,
-  fft3d_tilt: 3,
-  fft3d_smooth_ms: 40,
+  // 3D view display + camera. Server-authoritative: mirrored from
+  // meta.ui_fft3d, persisted to ui.fft3d in YAML (set_fft3d). These are the
+  // defaults until the first meta arrives.
+  fft3d: {
+    res: "balanced", smooth_ms: 40, range_db: 60, tilt_db_per_oct: 3,
+    overscan: 0.05, perspective: 1, skew: 0, height: 1, horizon: 0,
+  },
 
   // Connection state mirror ("connecting" | "connected" | "reconnecting")
   // and whether the first meta after (re)connect has arrived. Controls stay

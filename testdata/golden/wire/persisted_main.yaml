@@ -85,3 +85,13 @@ ui:
   fft_view: 2d
   fft3d_style: cloud
   palette: classic
+  fft3d:
+    res: balanced
+    smooth_ms: 40.0
+    range_db: 60.0
+    tilt_db_per_oct: 3.0
+    overscan: 0.05
+    perspective: 1.0
+    skew: 0.0
+    height: 1.0
+    horizon: 0.0

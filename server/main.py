@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import webbrowser
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -781,6 +782,7 @@ class App:
             "ui_fft_view": cfg.ui.fft_view,
             "ui_fft3d_style": cfg.ui.fft3d_style,
             "ui_palette": cfg.ui.palette,
+            "ui_fft3d": asdict(cfg.ui.fft3d),
             "ui_layout": cfg.ui.layout,
             "device": device,
         }

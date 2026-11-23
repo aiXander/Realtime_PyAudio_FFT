@@ -25,6 +25,12 @@ log = logging.getLogger(__name__)
 
 # `level:` values for a config that predates the block.
 LEVEL_DEFAULTS = {"tau_s": 0.1, "floor_db": -60.0, "ceiling_db": 0.0}
+# `ui.fft3d` (3D view look; validate.FFT3D_RANGES has the ranges). Same values
+# in engine/server/src/config.rs FFT3D_DEFAULTS.
+FFT3D_DEFAULTS = {
+    "res": "balanced", "smooth_ms": 40.0, "range_db": 60.0, "tilt_db_per_oct": 3.0,
+    "overscan": 0.05, "perspective": 1.0, "skew": 0.0, "height": 1.0, "horizon": 0.0,
+}
 
 CANONICAL_CONFIG_PATH = (Path(__file__).resolve().parent.parent / "configs" / "main.yaml")
 
@@ -116,6 +122,19 @@ class OscCfg:
 
 
 @dataclass
+class Fft3dCfg:
+    res: str                # spectro resolution: time | balanced | pitch
+    smooth_ms: float
+    range_db: float
+    tilt_db_per_oct: float
+    overscan: float
+    perspective: float
+    skew: float
+    height: float
+    horizon: float
+
+
+@dataclass
 class UiCfg:
     peak_decay_per_s: float
     layout: dict
@@ -123,6 +142,7 @@ class UiCfg:
     fft_view: str
     fft3d_style: str
     palette: str
+    fft3d: Fft3dCfg
 
 
 @dataclass
@@ -270,6 +290,9 @@ def _build_config(d: dict) -> Config:
         # removed) falls back to the default instead of failing the load.
         fft3d_style=_or_default(V.validate_fft3d_style, ud.get("fft3d_style"), "cloud"),
         palette=_or_default(V.validate_palette, ud.get("palette"), "classic"),
+        # Optional block; a missing / bad key keeps its default.
+        fft3d=Fft3dCfg(**{**FFT3D_DEFAULTS, **V.validate_fft3d(
+            f3 if isinstance(f3 := ud.get("fft3d"), dict) else {}, lenient=True)}),
     )
 
     return Config(audio=audio, dsp=dsp, autoscale=autoscale, fft=fft, onset=onset, level=level,

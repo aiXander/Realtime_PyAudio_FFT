@@ -249,6 +249,29 @@ pub fn validate_palette(v: Option<&Value>) -> VResult<String> {
     one_of(v, &PALETTES, "palette")
 }
 
+/// 3D view display + camera (`ui.fft3d`, UI-only). Numbers clamp to these
+/// ranges (`FFT3D_RANGES` in validate.py); defaults: `config::Fft3dCfg::default`.
+pub const FFT3D_RES: [&str; 3] = ["time", "balanced", "pitch"];
+pub const FFT3D_RANGES: [(&str, (f64, f64)); 8] = [
+    ("smooth_ms", (0.0, 200.0)),
+    ("range_db", (20.0, 120.0)),
+    ("tilt_db_per_oct", (-6.0, 12.0)),
+    ("overscan", (0.0, 0.3)),
+    ("perspective", (0.0, 3.0)),
+    ("skew", (-1.0, 1.0)),
+    ("height", (0.25, 3.0)),
+    ("horizon", (0.0, 0.8)),
+];
+
+pub fn validate_fft3d_res(v: Option<&Value>) -> VResult<String> {
+    one_of(v, &FFT3D_RES, "res")
+}
+
+/// One numeric `ui.fft3d` key, clamped to its `FFT3D_RANGES` entry.
+pub fn validate_fft3d_num(key: &str, range: (f64, f64), v: Option<&Value>) -> VResult<f64> {
+    Ok(clamp(finite_float(v, key, None, None)?, range))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct OnsetOk {
     pub sensitivity: Option<f64>,

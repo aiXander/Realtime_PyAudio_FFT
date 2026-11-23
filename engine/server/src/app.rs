@@ -870,6 +870,7 @@ impl App {
             "ui_fft_view": c.ui.fft_view,
             "ui_fft3d_style": c.ui.fft3d_style,
             "ui_palette": c.ui.palette,
+            "ui_fft3d": c.ui.fft3d,
             "ui_layout": c.ui.layout,
             "device": device,
         })

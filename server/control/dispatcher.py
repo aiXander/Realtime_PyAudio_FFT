@@ -381,6 +381,14 @@ class Dispatcher:
         self.app.persister.request(commit=True)
         return self._meta_changed()
 
+    async def _set_fft3d(self, msg):
+        commit = bool(msg.get("commit", True))
+        f3 = self.app.cfg.ui.fft3d
+        for k, v in V.validate_fft3d(msg).items():
+            setattr(f3, k, v)
+        self.app.persister.request(commit=commit)
+        return self._meta_changed()
+
     async def _set_palette(self, msg):
         self.app.cfg.ui.palette = V.validate_palette(msg.get("palette"))
         self.app.persister.request(commit=True)
@@ -450,6 +458,7 @@ class Dispatcher:
         "set_show_onsets": _set_show_onsets,
         "set_fft_view": _set_fft_view,
         "set_fft3d_style": _set_fft3d_style,
+        "set_fft3d": _set_fft3d,
         "set_palette": _set_palette,
         "set_ui_layout": _set_ui_layout,
         "list_presets": _list_presets,

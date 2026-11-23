@@ -49,7 +49,8 @@ const GRID_COLS = 512;                 // default grid columns (a style may ask 
 const GRID_ROWS = 256;                 // default grid rows across the full depth
 const MAX_GRID_ROWS = 1024;
 
-// Camera defaults (a style's `camera` overrides them).
+// Camera defaults (a style's `camera` overrides them; the user's camera
+// settings scale them: perspective × the narrowing, height × the amplitude).
 const BACK_SCALE = 0.3;                // width/height of the oldest row vs the front one
 const AMP_FRONT = 0.4;                 // front edge full-scale height, fraction of plot height
 
@@ -65,8 +66,12 @@ export function makeFft3d(canvas) {
   const surf = makeSurface(canvas);
   const layer = makeLayer();
 
-  // ---- display mapping (UI-local, persisted by controls via setDisplay) ----
-  const disp = { rangeDb: 60, tiltDbOct: 0, integrateMs: 40 };
+  // ---- display mapping + camera (server-persisted `ui.fft3d`, set by main.js via setDisplay) ----
+  const disp = {
+    rangeDb: 60, tiltDbOct: 0, integrateMs: 40,
+    camera: { overscan: 0.05, perspective: 1, skew: 0, height: 1, horizon: 0 },
+  };
+  let camKey = "";
 
   // ---- history ring: integrated frames (CPU mirror of the texture: the front edge reads it) ----
   let nBins = 0, hopS = 0.005, fMin = 20, fMax = 20000, db0 = -127.5, dbStep = 0.5;
@@ -313,18 +318,31 @@ export function makeFft3d(canvas) {
 
   // ---- static layer: background, style art, x-axis labels ----
   let painted = false;
-  let kVersion = -1, kFmin = NaN, kFmax = NaN, kEmpty = null, kDepth = NaN, kStyle = "", kTheme = -1;
+  let kVersion = -1, kFmin = NaN, kFmax = NaN, kEmpty = null, kDepth = NaN, kStyle = "", kTheme = -1, kCam = "";
 
+  /**
+   * Screen layout + camera. The front row is `halfW` either side of `cx`
+   * (overscan: wider than the plot, so it reaches the edges a moment back);
+   * rows shrink by 1/(1 + K·z) toward the back, sit `ground(z)` of the way up
+   * to `yBack` and shift sideways by `skewPx` at the horizon (PROJ_FN).
+   */
   function geometry(W, H, dpr, style) {
-    const backScale = style.camera?.backScale ?? BACK_SCALE;
+    const cam = disp.camera;
+    const K = (1 / (style.camera?.backScale ?? BACK_SCALE) - 1) * cam.perspective;
+    const backScale = 1 / (1 + K);
     const padX = Math.round(PAD_X * dpr), padT = Math.round(PAD_T * dpr), padB = Math.round(PAD_B * dpr);
     const plotX = padX, plotW = Math.max(1, W - 2 * padX);
     const y0 = H - padB;                            // front baseline
     const plotH = Math.max(1, y0 - padT);
-    const ampFront = (style.camera?.ampFront ?? AMP_FRONT) * plotH;
-    // Back baseline sits low enough that a full-scale back row still fits.
-    const yBack = padT + ampFront * backScale + Math.round(6 * dpr);
-    return { plotX, plotW, cx: plotX + plotW / 2, y0, yBack, ampFront, padT, backScale };
+    const ampFront = (style.camera?.ampFront ?? AMP_FRONT) * cam.height * plotH;
+    // At horizon 0 the back baseline sits just low enough that a full-scale
+    // back row still fits; horizon lowers it toward the front.
+    const yFit = padT + ampFront * backScale + Math.round(6 * dpr);
+    const yBack = Math.min(y0 - 1, yFit + cam.horizon * (y0 - yFit));
+    return {
+      plotX, plotW, cx: plotX + plotW / 2, halfW: (plotW / 2) * (1 + 2 * cam.overscan),
+      y0, yBack, ampFront, padT, backScale, K, skewPx: cam.skew * (plotW / 2),
+    };
   }
 
   const bgOf = (style) => (typeof style.background === "function" ? style.background() : style.background);
@@ -352,16 +370,19 @@ export function makeFft3d(canvas) {
       g.restore();
       g.font = `${Math.round(10 * dpr)}px ${FONT_UI}`;
     }
-    // X axis under the front edge (log).
+    // X axis under the front edge (log), at the front row's positions; ticks
+    // that the overscan pushes off the card are skipped.
     g.fillStyle = text.axis || "#7a8088";
     g.textAlign = "center";
     g.textBaseline = "top";
     const yLabel = geo.y0 + Math.round(3 * dpr);
     const minSpacingPx = Math.round(40 * dpr);
+    const edgePx = Math.round(10 * dpr);
     let lastTickPx = -Infinity;
     for (const fq of X_TICK_CANDIDATES) {
       if (fq < fLo || fq > fHi) continue;
-      const x = Math.round(geo.plotX + ((Math.log10(fq) - logFmin) / logSpan) * geo.plotW);
+      const x = Math.round(geo.cx + (((Math.log10(fq) - logFmin) / logSpan) - 0.5) * 2 * geo.halfW);
+      if (x < geo.plotX + edgePx || x > geo.plotX + geo.plotW - edgePx) continue;
       if (x - lastTickPx < minSpacingPx) continue;
       lastTickPx = x;
       g.fillText(fq >= 1000 ? `${fq / 1000}k` : `${fq}`, x, yLabel);
@@ -395,9 +416,9 @@ export function makeFft3d(canvas) {
       : lastSeq < 1 ? "waiting for data…" : "";
 
     if (version !== kVersion || fMin !== kFmin || fMax !== kFmax || empty !== kEmpty || depthS !== kDepth
-        || style.name !== kStyle || theme.version !== kTheme) {
+        || style.name !== kStyle || theme.version !== kTheme || camKey !== kCam) {
       kVersion = version; kFmin = fMin; kFmax = fMax; kEmpty = empty; kDepth = depthS;
-      kStyle = style.name; kTheme = theme.version;
+      kStyle = style.name; kTheme = theme.version; kCam = camKey;
       buildStatic(W, H, dpr, fMin, fMax, empty, depthS, style);
       f.bgRgb.set(hex01(bgOf(style)));
       painted = false;
@@ -474,19 +495,17 @@ export function makeFft3d(canvas) {
       }
       frontH[m] = v;
     }
-    const K = 1 / geo.backScale - 1;
     const sF = 1;                                        // front row sits at z = 0
     const yBaseF = geo.y0;
     const ampF = geo.ampFront * sF;
-    const halfW = geo.plotW / 2;
     for (let m = 0; m < mc; m++) {
       const u = m / (mc - 1);
-      edgeX[m] = geo.cx + (u - 0.5) * 2 * halfW * sF;
+      edgeX[m] = geo.cx + (u - 0.5) * 2 * geo.halfW * sF;
       edgeY[m] = yBaseF - Math.min(1, frontH[m]) * ampF;
     }
 
     f.W = W; f.H = H; f.dpr = dpr; f.geo = geo;
-    f.R = R; f.mc = mc; f.K = K; f.backScale = geo.backScale;
+    f.R = R; f.mc = mc; f.K = geo.K; f.backScale = geo.backScale;
     f.rowDz = step / nView;
     f.now = now; f.t = now / 1000; f.depthS = depthS; f.fMin = fMin; f.fMax = fMax;
     f.yBaseF = yBaseF; f.sF = sF;
@@ -530,11 +549,20 @@ export function makeFft3d(canvas) {
     painted = false;
   }
 
-  /** Display settings: { rangeDb, tiltDbOct, integrateMs } (any may be omitted). Integration applies to new frames. */
+  /**
+   * Display settings: { rangeDb, tiltDbOct, integrateMs, camera: { overscan,
+   * perspective, skew, height, horizon } } (any may be omitted). Integration
+   * applies to new frames; everything else re-maps the whole history.
+   */
   function setDisplay(d) {
     if (d.rangeDb) disp.rangeDb = d.rangeDb;
     if (d.tiltDbOct !== undefined) disp.tiltDbOct = d.tiltDbOct;
-    if (d.integrateMs !== undefined) { disp.integrateMs = d.integrateMs; syncIntegrate(); }
+    if (d.integrateMs !== undefined && d.integrateMs !== disp.integrateMs) { disp.integrateMs = d.integrateMs; syncIntegrate(); }
+    if (d.camera) {
+      Object.assign(disp.camera, d.camera);
+      const c = disp.camera;
+      camKey = `${c.overscan}|${c.perspective}|${c.skew}|${c.height}|${c.horizon}`;
+    }
   }
 
   return { draw, push, reset, hide, setDisplay };

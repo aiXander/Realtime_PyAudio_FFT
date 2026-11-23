@@ -183,13 +183,15 @@ The raw analysis re-measures every 5 ms. Anything noise-like (hats, reverb, air,
 Applies to new frames. *Visual only.*"><select id="fft3d-smooth" class="title-select" aria-label="3D smoothing"><option value="0">raw</option><option value="20">20 ms</option><option value="40">40 ms</option><option value="80">80 ms</option></select></label> <label class="inline" title="**Range** — how many dB below the top still show above the floor. The top is the loudest level of the last 20 s, so it stands still while the music keeps its level and only moves when it gets louder or stays quieter.
 
 - **Small** (40 dB): only the strong components, high contrast.
-- **Large** (80–100 dB): quiet detail, reverb tails and noise too.
+- **Large** (70 dB): quiet detail, reverb tails and noise too.
 
-Re-maps the whole history at once. *Visual only.*"><select id="fft3d-range" class="title-select" aria-label="3D dB range"><option value="40">40 dB</option><option value="60">60 dB</option><option value="80">80 dB</option><option value="100">100 dB</option></select></label> <label class="inline" title="**Tilt** — dB per octave added around 1 kHz.
+Re-maps the whole history at once. *Visual only.*"><select id="fft3d-range" class="title-select" aria-label="3D dB range"><option value="40">40 dB</option><option value="50">50 dB</option><option value="60">60 dB</option><option value="70">70 dB</option></select></label> <label class="inline" title="**Tilt** — dB per octave added around 1 kHz.
 
 The analysis is constant-Q, so pink noise (about the long-term spectrum of music) reads flat at **0**. A positive tilt brightens the treble: cymbals, sibilance and air.
 
-Re-maps the whole history at once. *Visual only.*"><select id="fft3d-tilt" class="title-select" aria-label="3D tilt"><option value="-3">−3 dB/oct</option><option value="0">0 dB/oct</option><option value="1.5">+1.5 dB/oct</option><option value="3">+3 dB/oct</option><option value="4.5">+4.5 dB/oct</option></select></label></span> <span class="seg" role="radiogroup" aria-label="FFT view" title="**2D / 3D view.**
+Re-maps the whole history at once. *Visual only.*"><select id="fft3d-tilt" class="title-select" aria-label="3D tilt"><option value="-3">−3 dB/oct</option><option value="0">0 dB/oct</option><option value="1.5">+1.5 dB/oct</option><option value="3">+3 dB/oct</option><option value="4.5">+4.5 dB/oct</option></select></label> <button type="button" class="title-btn" id="fft3d-cam-btn" aria-expanded="false" aria-controls="fft3d-cam" title="**Camera** — how the 3D view is framed: front-row overscan, perspective, skew, peak height, horizon.
+
+Saved on the server (`ui.fft3d` in the config), like the pickers next to it. *Visual only.*">camera</button></span> <span class="seg" role="radiogroup" aria-label="FFT view" title="**2D / 3D view.**
 
 - **2D**: spectrum with peak-hold ticks and the draggable band overlay.
 - **3D**: history "ocean" — the newest spectrum is the front wave; older spectra recede toward the horizon, shrinking and fading. Depth = the **History** slider in the top bar. Band edges are then edited from the side panel.
@@ -197,6 +199,19 @@ Re-maps the whole history at once. *Visual only.*"><select id="fft3d-tilt" class
 *Visual only — does not affect DSP or the OSC payload.*"><label><input type="radio" name="fft-view" id="fft-view-2d" value="2d" /><span>2D</span></label><label><input type="radio" name="fft-view" id="fft-view-3d" value="3d" /><span>3D</span></label></span> <button type="button" class="icon-btn" id="fft-fullscreen" aria-label="Full screen" title="**Full screen** (Esc to exit).">⛶</button></span></div>
           <div class="viz-stack">
             <canvas id="viz-fft" width="640" height="200" role="img" aria-label="FFT spectrum"></canvas>
+            <div id="fft3d-cam" class="cam-panel" role="group" aria-label="3D camera" hidden>
+              <div class="cam-head"><span>Camera</span> <button type="button" id="fft3d-cam-reset" title="Back to the defaults: overscan 5 %, perspective ×1, centred, height ×1, horizon 0 %.">reset</button> <button type="button" class="icon-btn" id="fft3d-cam-close" aria-label="Close camera settings">✕</button></div>
+              <label title="**Overscan** — how far the newest (front) row reaches past each side of the card, as a share of its width.
+
+The rows narrow toward the back, so with some overscan the surface fills the card's full width from a moment behind the front, instead of leaving empty corners.">overscan <input type="range" id="fft3d-cam-overscan" min="0" max="30" step="1" /> <span id="fft3d-cam-overscan-val"></span></label>
+              <label title="**Perspective** — how much the rows narrow toward the horizon, relative to the style's own look (×1).
+
+- **×0**: parallel rows, a flat sheet with no convergence.
+- **×2–3**: strong depth, the far rows a narrow strip.">perspective <input type="range" id="fft3d-cam-perspective" min="0" max="300" step="5" /> <span id="fft3d-cam-perspective-val"></span></label>
+              <label title="**Skew** — slides the far rows left or right, as if seen at an angle. The front row stays put; at 100 % the horizon's centre sits on the card's edge.">skew <input type="range" id="fft3d-cam-skew" min="-100" max="100" step="1" /> <span id="fft3d-cam-skew-val"></span></label>
+              <label title="**Height** — peak height, relative to the style's own (×1).">height <input type="range" id="fft3d-cam-height" min="25" max="300" step="5" /> <span id="fft3d-cam-height-val"></span></label>
+              <label title="**Horizon** — lowers the far edge toward the front: a lower, flatter camera that packs the history into less height. At 0 % the horizon sits just low enough that a full-height far row still fits.">horizon <input type="range" id="fft3d-cam-horizon" min="0" max="80" step="1" /> <span id="fft3d-cam-horizon-val"></span></label>
+            </div>
           </div>
         </div>
         <div class="conn-overlay" id="conn-overlay" role="status">

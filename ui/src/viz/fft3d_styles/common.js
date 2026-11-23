@@ -7,7 +7,7 @@
 //
 //   {
 //     name, label, description,
-//     camera: { backScale, ampFront },         // optional
+//     camera: { backScale, ampFront },         // optional: the look at perspective ×1 / height ×1
 //     background: "#hex" | () => "#hex",       // static-layer fill (+ fog color)
 //     text: { axis, dim },                     // static-layer label colors
 //     drawStatic(g, geo, W, H, dpr, info),     // optional extra static art
@@ -46,24 +46,36 @@ export const palBg = (k = "low", t = 0.08) => mixHex(theme.bg, LMH[k].hex, t);
 
 // ---- shader snippets ----
 
-// Projection shared by every style. Mirrors the 2D ridge layout: row depth
-// z ∈ [0 front, 1 horizon] shrinks by s(z) = 1/(1 + K·z) toward the
-// horizon; w = 1/s so varyings interpolate perspective-correctly, and depth
-// (NDC 0.9 − 1.8·s) is linear in 1/w, so it is exact for planes.
+// Projection shared by every style (fft_3d.js geometry() sets the camera).
+// Row depth z ∈ [0 front, 1 horizon] shrinks by s(z) = 1/(1 + K·z) toward
+// the horizon (K = 0: parallel rows). ground(z) ∈ [0, 1] is how far up the
+// row's baseline sits between the front (uY0) and the horizon (uYBack); the
+// skew shifts rows sideways by the same share. w = 1/s so varyings
+// interpolate perspective-correctly; depth (NDC −0.9 + 1.8·ground) is affine
+// in w, so it is exact for planes and still orders rows when K = 0.
+// Mirrored on the CPU by projectRow() below.
 export const PROJ_FN = `
 uniform vec2 uRes;
-uniform float uCx, uHalfW, uY0, uYBack, uAmp, uDpr, uRowDz, uK, uBackScale;
+uniform float uCx, uHalfW, uY0, uYBack, uAmp, uDpr, uRowDz, uK, uSkew;
 float persp(float z) { return 1.0 / (1.0 + uK * z); }
+float ground(float z) { return z * (1.0 + uK) / (1.0 + uK * z); }
 /** Device-px position of (u, h) at depth z; s = its perspective scale. */
 vec2 toPx(float u, float h, float z, out float s) {
   s = persp(z);
-  float yBase = uY0 - (1.0 - s) / (1.0 - uBackScale) * (uY0 - uYBack);
-  return vec2(uCx + (u - 0.5) * 2.0 * uHalfW * s, yBase - h * uAmp * s);
+  float g = ground(z);
+  return vec2(uCx + uSkew * g + (u - 0.5) * 2.0 * uHalfW * s, uY0 - g * (uY0 - uYBack) - h * uAmp * s);
 }
-vec4 clipPos(vec2 px, float s) {
+vec4 clipPos(vec2 px, float s, float z) {
   float w = 1.0 / s;
-  return vec4((px.x / uRes.x * 2.0 - 1.0) * w, (1.0 - px.y / uRes.y * 2.0) * w, (0.9 - 1.8 * s) * w, w);
+  return vec4((px.x / uRes.x * 2.0 - 1.0) * w, (1.0 - px.y / uRes.y * 2.0) * w, (-0.9 + 1.8 * ground(z)) * w, w);
 }`;
+
+/** CPU twin of toPx for a row's baseline at depth z: { s, y, cx } (row center x). */
+export function projectRow(geo, z) {
+  const s = 1 / (1 + geo.K * z);
+  const g = z * (1 + geo.K) * s;
+  return { s, y: geo.y0 - g * (geo.y0 - geo.yBack), cx: geo.cx + geo.skewPx * g };
+}
 
 export const HASH_FN = `
 uint hash(uint x) {
@@ -171,7 +183,7 @@ void main() {
   float h = gridHeight(u, row, pool);
   float s;
   vec2 px = toPx(u, h, z, s);
-  gl_Position = clipPos(px, s);
+  gl_Position = clipPos(px, s, z);
   vU = u; vH = h; vZ = z; vKey = key; vS = s; vPx = px; vT = row;
 }`;
 
@@ -245,18 +257,17 @@ export function setLogUniforms(gl, u, f) {
 
 /** Static-layer labels for the 1 s parallels (−1s, −2s …) at the right edge, thinned where they crowd. */
 export function drawSecondLabels(g, geo, dpr, depthS, color) {
-  const K = 1 / geo.backScale - 1;
   g.font = `${Math.round(9 * dpr)}px ui-monospace, Menlo, monospace`;
   g.fillStyle = color;
   g.textAlign = "left";
   g.textBaseline = "middle";
   let lastY = Infinity;
   for (let sec = 1; sec < depthS; sec++) {
-    const s = 1 / (1 + K * (sec / depthS));
-    const y = geo.y0 - ((1 - s) / (1 - geo.backScale)) * (geo.y0 - geo.yBack);
+    const { s, y, cx } = projectRow(geo, sec / depthS);
     if (lastY - y < 14 * dpr) continue;
     lastY = y;
-    g.fillText(`−${sec}s`, geo.cx + (geo.plotW / 2) * s + 4 * dpr, y);
+    // Rows wider than the plot (overscan) put their edge off screen: pin the label inside.
+    g.fillText(`−${sec}s`, Math.min(cx + geo.halfW * s + 4 * dpr, geo.plotX + geo.plotW - 22 * dpr), y);
   }
 }
 
@@ -312,14 +323,14 @@ export function setCommonUniforms(gl, u, f) {
   if (u.uCols) gl.uniform1i(u.uCols, f.mc);
   if (u.uRes) gl.uniform2f(u.uRes, f.W, f.H);
   if (u.uCx) gl.uniform1f(u.uCx, geo.cx);
-  if (u.uHalfW) gl.uniform1f(u.uHalfW, geo.plotW / 2);
+  if (u.uHalfW) gl.uniform1f(u.uHalfW, geo.halfW);
+  if (u.uSkew) gl.uniform1f(u.uSkew, geo.skewPx);
   if (u.uY0) gl.uniform1f(u.uY0, geo.y0);
   if (u.uYBack) gl.uniform1f(u.uYBack, geo.yBack);
   if (u.uAmp) gl.uniform1f(u.uAmp, geo.ampFront);
   if (u.uDpr) gl.uniform1f(u.uDpr, f.dpr);
   if (u.uRowDz) gl.uniform1f(u.uRowDz, f.rowDz);
   if (u.uK) gl.uniform1f(u.uK, f.K);
-  if (u.uBackScale) gl.uniform1f(u.uBackScale, f.backScale);
   if (u.uBg) gl.uniform3fv(u.uBg, f.bgRgb);
   if (u.uStopPos) gl.uniform3fv(u.uStopPos, f.stopPos);
   if (u.uC0) gl.uniform3fv(u.uC0, f.stopRgb[0]);

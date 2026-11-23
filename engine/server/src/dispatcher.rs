@@ -76,6 +76,7 @@ impl App {
             "set_show_onsets" => self.h_set_show_onsets(msg),
             "set_fft_view" => self.h_set_fft_view(msg),
             "set_fft3d_style" => self.h_set_fft3d_style(msg),
+            "set_fft3d" => self.h_set_fft3d(msg),
             "set_palette" => self.h_set_palette(msg),
             "set_ui_layout" => self.h_set_ui_layout(msg),
             "list_presets" => Ok((vec![json!({"type": "presets", "items": self.list_presets()})], vec![])),
@@ -291,6 +292,13 @@ impl App {
     fn h_set_fft3d_style(&mut self, msg: &Value) -> HRes {
         self.cfg.ui.fft3d_style = v::validate_fft3d_style(get(msg, "style"))?;
         self.persister.request(true);
+        self.meta_changed()
+    }
+
+    fn h_set_fft3d(&mut self, msg: &Value) -> HRes {
+        let commit = get_bool(msg, "commit", true);
+        self.cfg.ui.fft3d.apply(msg, false)?;
+        self.persister.request(commit);
         self.meta_changed()
     }
 

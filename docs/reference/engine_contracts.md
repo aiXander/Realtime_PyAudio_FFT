@@ -23,7 +23,7 @@ This is a map. **Exact message shapes** are the captured instances in `testdata/
 - **The loader is strict, not per-field-fallback:**
   - **missing section or key, YAML parse error, empty file** → *corrupt*: the file is moved to `<name>.corrupt-<YYYYmmdd-HHMMSS>[-n]`, re-seeded from the example, and reloaded;
   - **parseable file with an invalid value** → fatal startup error, because it's likely a hand edit worth fixing.
-- **Optional keys** (absent → default): `dsp.filter_order` → 2; `ui.show_onsets` → false; `ui.fft_view` → `"2d"`; `ui.fft3d_style` → `"cloud"` (an unknown name also falls back); `ui.palette` → `"classic"` (likewise). Each `onset.{low,mid,high}.*` field defaults to:
+- **Optional keys** (absent → default): `dsp.filter_order` → 2; `ui.show_onsets` → false; `ui.fft_view` → `"2d"`; `ui.fft3d_style` → `"cloud"` (an unknown name also falls back); `ui.palette` → `"classic"` (likewise); `ui.fft3d` and each of its keys → `FFT3D_DEFAULTS` in `server/config.py` (a bad value also falls back, per key). Each `onset.{low,mid,high}.*` field defaults to:
 
   | band | sensitivity | refractory_s | slow_tau_s | abs_floor |
   |---|---|---|---|---|
@@ -100,7 +100,7 @@ Every state change marks meta dirty, so a coalesced broadcast goes out next tick
 | `set_onset` | band + any of sensitivity (>1), refractory_s, slow_tau_s, abs_floor; commit | `OnsetTracker.set_params` | commit? |
 | `set_level` | any of tau_s (>0), floor_db, ceiling_db (ceiling ≥ floor + 1 dB, checked against the end not being set); commit | `LevelMeter.set_params` (all three current values in one call) | commit? |
 | `set_ws_snapshot_hz` | hz, commit | broadcast rate | commit? |
-| `set_peak_decay` / `set_show_onsets` / `set_fft_view` / `set_fft3d_style` / `set_palette` / `set_ui_layout` | UI-only values | cfg only | commit (`set_peak_decay` / `set_ui_layout` take `commit`) |
+| `set_peak_decay` / `set_show_onsets` / `set_fft_view` / `set_fft3d_style` / `set_fft3d` / `set_palette` / `set_ui_layout` | UI-only values | cfg only | commit (`set_peak_decay` / `set_fft3d` / `set_ui_layout` take `commit`). `set_fft3d` is partial: any `ui.fft3d` keys; one bad value rejects the whole message |
 | `list_devices` | probe | re-init audio + reopen the input (~150 ms gap), list inputs; probe opens each for 0.2 s | targeted `devices` |
 | `set_device` | index | transactional hot-switch (below); cfg device = {index, name} | commit; **broadcast** `devices` |
 | `list_presets` | — | | targeted `presets` |

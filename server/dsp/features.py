@@ -123,9 +123,12 @@ class ExpSmoother:
         v = self._values
         aa = self._alpha_attack
         ar = self._alpha_release
-        d = rms_lo - v[0]; v[0] += (aa[0] if d > 0.0 else ar[0]) * d
-        d = rms_md - v[1]; v[1] += (aa[1] if d > 0.0 else ar[1]) * d
-        d = rms_hi - v[2]; v[2] += (aa[2] if d > 0.0 else ar[2]) * d
+        d = rms_lo - v[0]
+        v[0] += (aa[0] if d > 0.0 else ar[0]) * d
+        d = rms_md - v[1]
+        v[1] += (aa[1] if d > 0.0 else ar[1]) * d
+        d = rms_hi - v[2]
+        v[2] += (aa[2] if d > 0.0 else ar[2]) * d
         return float(v[0]), float(v[1]), float(v[2])
 
     @property
@@ -360,44 +363,64 @@ class AutoScaler:
         a_rel = self._a_rel
 
         # Read input scalars once (numpy scalar attribute lookups aren't free).
-        r0 = float(values_in[0]); r1 = float(values_in[1]); r2 = float(values_in[2])
+        r0 = float(values_in[0])
+        r1 = float(values_in[1])
+        r2 = float(values_in[2])
 
         # Bandwidth-aware noise subtraction in power, then sqrt + tilt.
-        c0 = r0 * r0 - npwr[0]; c0 = 0.0 if c0 < 0.0 else c0
-        c1 = r1 * r1 - npwr[1]; c1 = 0.0 if c1 < 0.0 else c1
-        c2 = r2 * r2 - npwr[2]; c2 = 0.0 if c2 < 0.0 else c2
+        c0 = r0 * r0 - npwr[0]
+        c0 = 0.0 if c0 < 0.0 else c0
+        c1 = r1 * r1 - npwr[1]
+        c1 = 0.0 if c1 < 0.0 else c1
+        c2 = r2 * r2 - npwr[2]
+        c2 = 0.0 if c2 < 0.0 else c2
         v0 = math.sqrt(c0) * tilt[0]
         v1 = math.sqrt(c1) * tilt[1]
         v2 = math.sqrt(c2) * tilt[2]
 
         # Asymmetric peak follower (warm to nf — don't saturate to first sample).
         if not self._warmed:
-            peak[0] = nf; peak[1] = nf; peak[2] = nf
+            peak[0] = nf
+            peak[1] = nf
+            peak[2] = nf
             self._warmed = True
-        p0 = peak[0]; p1 = peak[1]; p2 = peak[2]
-        d0 = v0 - p0; p0 += (a_atk if d0 > 0.0 else a_rel) * d0
-        d1 = v1 - p1; p1 += (a_atk if d1 > 0.0 else a_rel) * d1
-        d2 = v2 - p2; p2 += (a_atk if d2 > 0.0 else a_rel) * d2
-        peak[0] = p0; peak[1] = p1; peak[2] = p2
+        p0 = peak[0]
+        p1 = peak[1]
+        p2 = peak[2]
+        d0 = v0 - p0
+        p0 += (a_atk if d0 > 0.0 else a_rel) * d0
+        d1 = v1 - p1
+        p1 += (a_atk if d1 > 0.0 else a_rel) * d1
+        d2 = v2 - p2
+        p2 += (a_atk if d2 > 0.0 else a_rel) * d2
+        peak[0] = p0
+        peak[1] = p1
+        peak[2] = p2
 
         # tanh( max(0, v - nf2) / max(peak, nf) )
-        g0 = v0 - nf2; g0 = 0.0 if g0 < 0.0 else g0
-        g1 = v1 - nf2; g1 = 0.0 if g1 < 0.0 else g1
-        g2 = v2 - nf2; g2 = 0.0 if g2 < 0.0 else g2
+        g0 = v0 - nf2
+        g0 = 0.0 if g0 < 0.0 else g0
+        g1 = v1 - nf2
+        g1 = 0.0 if g1 < 0.0 else g1
+        g2 = v2 - nf2
+        g2 = 0.0 if g2 < 0.0 else g2
         sc0 = math.tanh(g0 / (p0 if p0 > nf else nf))
         sc1 = math.tanh(g1 / (p1 if p1 > nf else nf))
         sc2 = math.tanh(g2 / (p2 if p2 > nf else nf))
 
         s = self.strength
         if s >= 1.0:
-            out[0] = sc0; out[1] = sc1; out[2] = sc2
+            out[0] = sc0
+            out[1] = sc1
+            out[2] = sc2
             return out
 
         # Raw dB-mapped baseline (strength<1 path). Mirrors the FFT
         # post-processor's strength<1 path: UNTILTED, per-rfft-bin equivalent
         # (raw · _per_bin_factor), gate at noise_floor (matches FFT viz).
         span = self.db_ceiling - self.db_floor
-        if span < 1.0: span = 1.0
+        if span < 1.0:
+            span = 1.0
         inv_span = 1.0 / span
         df = self.db_floor
         pbf = self._per_bin_factor
@@ -409,8 +432,10 @@ class AutoScaler:
             if pb < EPS:
                 pb = EPS
             v = (20.0 * math.log10(pb) - df) * inv_span
-            if v < 0.0: return 0.0
-            if v > 1.0: return 1.0
+            if v < 0.0:
+                return 0.0
+            if v > 1.0:
+                return 1.0
             return v
 
         b0 = _baseline(r0, pbf[0])
@@ -418,7 +443,9 @@ class AutoScaler:
         b2 = _baseline(r2, pbf[2])
 
         if s <= 0.0:
-            out[0] = b0; out[1] = b1; out[2] = b2
+            out[0] = b0
+            out[1] = b1
+            out[2] = b2
         else:
             inv_s = 1.0 - s
             out[0] = s * sc0 + inv_s * b0

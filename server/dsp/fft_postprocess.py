@@ -246,15 +246,24 @@ class FFTPostProcessor:
                     bands=None, tau=None, tau_attack=None, hop_period_s=None,
                     db_floor=None, db_ceiling=None) -> None:
         with self._lock:
-            if n_bins is not None: self.n_bins = int(n_bins)
-            if f_min is not None: self.f_min = float(f_min)
-            if sr is not None: self.sr = float(sr)
-            if bands is not None: self.bands = bands
-            if tau is not None: self.tau = tau
-            if tau_attack is not None: self.tau_attack = tau_attack
-            if hop_period_s is not None: self.hop_period_s = float(hop_period_s)
-            if db_floor is not None: self.db_floor = float(db_floor)
-            if db_ceiling is not None: self.db_ceiling = float(db_ceiling)
+            if n_bins is not None:
+                self.n_bins = int(n_bins)
+            if f_min is not None:
+                self.f_min = float(f_min)
+            if sr is not None:
+                self.sr = float(sr)
+            if bands is not None:
+                self.bands = bands
+            if tau is not None:
+                self.tau = tau
+            if tau_attack is not None:
+                self.tau_attack = tau_attack
+            if hop_period_s is not None:
+                self.hop_period_s = float(hop_period_s)
+            if db_floor is not None:
+                self.db_floor = float(db_floor)
+            if db_ceiling is not None:
+                self.db_ceiling = float(db_ceiling)
             self._allocate()
 
     def update_smoothing(self, tau: dict, tau_attack: dict) -> None:

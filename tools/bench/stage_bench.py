@@ -66,19 +66,29 @@ def bench_config(overrides: dict, sr: float = 48000.0) -> dict:
     pub = OscPublisher(sender, get_master_gain=lambda: 1.0, get_db_floor=lambda: cfg.fft.db_floor,
                        get_send_fft=lambda: True, get_send_raw_db=lambda: False, get_fft_enabled=lambda: True)
     for x in blocks:
-        t0 = pc(); lo, md, hi = fb.process(x); t1 = pc()
-        r = (block_rms(lo), block_rms(md), block_rms(hi)); t2 = pc()
-        sm.update(*r); t3 = pc()
-        asc.update(sm.values, dw.scaled_buf); t4 = pc()
-        bpm = ot.update(dw.scaled_buf, dw.onsets_buf); t5 = pc()
-        app.features_store.publish(sm.values, dw.scaled_buf, dw.onsets_buf, ot.onset_count, bpm, 0); t6 = pc()
-        pub.publish_lmh(dw.scaled_buf, dw.onsets_buf, bpm, dw.level, 0); t7 = pc()
+        t0 = pc()
+        lo, md, hi = fb.process(x)
+        t1 = pc()
+        r = (block_rms(lo), block_rms(md), block_rms(hi))
+        t2 = pc()
+        sm.update(*r)
+        t3 = pc()
+        asc.update(sm.values, dw.scaled_buf)
+        t4 = pc()
+        bpm = ot.update(dw.scaled_buf, dw.onsets_buf)
+        t5 = pc()
+        app.features_store.publish(sm.values, dw.scaled_buf, dw.onsets_buf, ot.onset_count, bpm, 0)
+        t6 = pc()
+        pub.publish_lmh(dw.scaled_buf, dw.onsets_buf, bpm, dw.level, 0)
+        t7 = pc()
         for k, a, b in (("filter_bank", t0, t1), ("rms_x3", t1, t2), ("smoother", t2, t3),
                         ("autoscaler", t3, t4), ("onset", t4, t5), ("feature_store_publish", t5, t6),
                         ("osc_publish_lmh", t6, t7)):
             t[k].append(b - a)
     for x in blocks:  # the production entry point, end to end
-        t0 = pc(); dw.process_block(x); t["dsp_block_total"].append(pc() - t0)
+        t0 = pc()
+        dw.process_block(x)
+        t["dsp_block_total"].append(pc() - t0)
 
     # Math floor, DSP: the private Cython SOS kernel on 3 preallocated f64
     # buffers (= what a Rust biquad loop does) + dot-product RMS.
@@ -111,22 +121,31 @@ def bench_config(overrides: dict, sr: float = 48000.0) -> dict:
         tf["window_rfft"].append(t1 - t0)
     for w in windows:
         np.copyto(fw.window_buf, w)
-        t0 = pc(); bins_f32, processed = fw.process_hop(); t1 = pc()
-        app.fft_store.publish(bins_f32, processed, 0); t2 = pc()
-        pub.publish_fft(bins_f32, processed, 0); t3 = pc()
+        t0 = pc()
+        bins_f32, processed = fw.process_hop()
+        t1 = pc()
+        app.fft_store.publish(bins_f32, processed, 0)
+        t2 = pc()
+        pub.publish_fft(bins_f32, processed, 0)
+        t3 = pc()
         tf["fft_hop_total"].append(t1 - t0)
         tf["fft_store_publish"].append(t2 - t1)
         tf["osc_publish_fft"].append(t3 - t2)
     db_in = bins_f32.copy()
     for _ in range(N_HOPS):
-        t0 = pc(); pp.process(db_in); tf["postprocess"].append(pc() - t0)
+        t0 = pc()
+        pp.process(db_in)
+        tf["postprocess"].append(pc() - t0)
     tf["power_logbin_db"] = list(np.maximum(0, np.array(tf["fft_hop_total"]) - np.array(tf["window_rfft"])
                                             - np.array(tf["postprocess"])))
     floor_fft = []
     buf = np.zeros(ws)
     spec = np.zeros(ws // 2 + 1, np.complex128)
     for w in windows:
-        t0 = pc(); np.multiply(w, fw.hann, out=buf); np.fft.rfft(buf, out=spec); floor_fft.append(pc() - t0)
+        t0 = pc()
+        np.multiply(w, fw.hann, out=buf)
+        np.fft.rfft(buf, out=spec)
+        floor_fft.append(pc() - t0)
 
     # WS encode costs (asyncio loop side, per broadcast tick).
     wss = WSServer.__new__(WSServer)

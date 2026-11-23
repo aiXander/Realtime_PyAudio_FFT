@@ -204,38 +204,54 @@ class OnsetTracker:
         k_low = self.K_LOW
         abs_floor = self.abs_floor   # per-band length-3 array
 
-        x0 = float(lmh[0]); x1 = float(lmh[1]); x2 = float(lmh[2])
+        x0 = float(lmh[0])
+        x1 = float(lmh[1])
+        x2 = float(lmh[2])
 
         # Fast envelopes
-        f0 = fast[0] + a_fast * (x0 - fast[0]); fast[0] = f0
-        f1 = fast[1] + a_fast * (x1 - fast[1]); fast[1] = f1
-        f2 = fast[2] + a_fast * (x2 - fast[2]); fast[2] = f2
+        f0 = fast[0] + a_fast * (x0 - fast[0])
+        fast[0] = f0
+        f1 = fast[1] + a_fast * (x1 - fast[1])
+        fast[1] = f1
+        f2 = fast[2] + a_fast * (x2 - fast[2])
+        fast[2] = f2
 
         # Slow envelopes (per-band tau)
-        s0 = slow[0] + a_slow[0] * (x0 - slow[0]); slow[0] = s0
-        s1 = slow[1] + a_slow[1] * (x1 - slow[1]); slow[1] = s1
-        s2 = slow[2] + a_slow[2] * (x2 - slow[2]); slow[2] = s2
+        s0 = slow[0] + a_slow[0] * (x0 - slow[0])
+        slow[0] = s0
+        s1 = slow[1] + a_slow[1] * (x1 - slow[1])
+        slow[1] = s1
+        s2 = slow[2] + a_slow[2] * (x2 - slow[2])
+        slow[2] = s2
 
         # Half-wave-rectified novelty
         n0 = f0 - s0
-        if n0 < 0.0: n0 = 0.0
+        if n0 < 0.0:
+            n0 = 0.0
         n1 = f1 - s1
-        if n1 < 0.0: n1 = 0.0
+        if n1 < 0.0:
+            n1 = 0.0
         n2 = f2 - s2
-        if n2 < 0.0: n2 = 0.0
+        if n2 < 0.0:
+            n2 = 0.0
 
         # Adaptive threshold EMA of novelty
-        ta0 = thr_avg[0] + a_thr * (n0 - thr_avg[0]); thr_avg[0] = ta0
-        ta1 = thr_avg[1] + a_thr * (n1 - thr_avg[1]); thr_avg[1] = ta1
-        ta2 = thr_avg[2] + a_thr * (n2 - thr_avg[2]); thr_avg[2] = ta2
+        ta0 = thr_avg[0] + a_thr * (n0 - thr_avg[0])
+        thr_avg[0] = ta0
+        ta1 = thr_avg[1] + a_thr * (n1 - thr_avg[1])
+        thr_avg[1] = ta1
+        ta2 = thr_avg[2] + a_thr * (n2 - thr_avg[2])
+        thr_avg[2] = ta2
 
         # ----- Band 0 (low) — also drives BPM -----
         af0 = abs_floor[0]
         th = ta0 * k_high[0]
-        if th < af0: th = af0
+        if th < af0:
+            th = af0
         tl = ta0 * k_low
         af_lo = af0 * 0.5
-        if tl < af_lo: tl = af_lo
+        if tl < af_lo:
+            tl = af_lo
         o0 = 0
         if not armed[0]:
             if n0 > th and (t - last_fire[0]) > min_ioi[0]:
@@ -251,10 +267,12 @@ class OnsetTracker:
         # ----- Band 1 (mid) -----
         af1 = abs_floor[1]
         th = ta1 * k_high[1]
-        if th < af1: th = af1
+        if th < af1:
+            th = af1
         tl = ta1 * k_low
         af_lo = af1 * 0.5
-        if tl < af_lo: tl = af_lo
+        if tl < af_lo:
+            tl = af_lo
         o1 = 0
         if not armed[1]:
             if n1 > th and (t - last_fire[1]) > min_ioi[1]:
@@ -269,10 +287,12 @@ class OnsetTracker:
         # ----- Band 2 (high) -----
         af2 = abs_floor[2]
         th = ta2 * k_high[2]
-        if th < af2: th = af2
+        if th < af2:
+            th = af2
         tl = ta2 * k_low
         af_lo = af2 * 0.5
-        if tl < af_lo: tl = af_lo
+        if tl < af_lo:
+            tl = af_lo
         o2 = 0
         if not armed[2]:
             if n2 > th and (t - last_fire[2]) > min_ioi[2]:

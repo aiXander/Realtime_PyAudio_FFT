@@ -178,11 +178,16 @@ class FFTWorker(threading.Thread):
                     window_size: int | None = None, hop: int | None = None,
                     f_min: float | None = None) -> None:
         with self._lock:
-            if n_bins is not None: self.n_bins = int(n_bins)
-            if sr is not None: self.sr = float(sr)
-            if window_size is not None: self.window_size = int(window_size)
-            if hop is not None: self.hop = int(hop)
-            if f_min is not None: self.f_min = float(f_min)
+            if n_bins is not None:
+                self.n_bins = int(n_bins)
+            if sr is not None:
+                self.sr = float(sr)
+            if window_size is not None:
+                self.window_size = int(window_size)
+            if hop is not None:
+                self.hop = int(hop)
+            if f_min is not None:
+                self.f_min = float(f_min)
             self._allocate()
             self.read_block_idx = 0  # alignment changed
             self._rewound = True
